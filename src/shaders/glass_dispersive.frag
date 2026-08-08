@@ -30,7 +30,7 @@ void main() {
 
     float NdotV = abs(dot(N, V));
 
-    // 1. Réfraction Snell-Descartes & Échantillonnage 9-Taps Géant sur Mipmap Level 4.0 (Diffusion Laiteuse Extrême 150px+)
+    // 1. Réfraction Snell-Descartes & Échantillonnage 9-Taps Géant sur Mipmap Level 4.2 (Flou Dépoli Satiné Massif)
     float ior = 1.52;
     float eta = 1.0 / ior;
 
@@ -41,9 +41,9 @@ void main() {
     }
 
     float glass_thickness = pc.glass_tint.w;
-    vec2 refraction_offset = (refract_dir.xy + N.xy * 0.45) * (glass_thickness * 0.40);
+    vec2 refraction_offset = (refract_dir.xy + N.xy * 0.45) * (glass_thickness * 0.35);
 
-    // Échantillonnage 9-Taps géant (r = 0.14) sur Mipmap Level 4.0 VRAM Vulkan pour diffusion laiteuse intégrale
+    // Échantillonnage 9-Taps élargi (r = 0.14) sur Mipmap Level 4.2 VRAM Vulkan pour diffusion laiteuse intégrale
     float r = 0.140;
     vec2 offsets[9] = vec2[](
         vec2(0.0, 0.0),
@@ -54,17 +54,21 @@ void main() {
     vec3 frosted_refracted_bg = vec3(0.0);
     for (int i = 0; i < 9; i++) {
         vec2 uv_sample = clamp(in_screen_uv + refraction_offset + offsets[i], vec2(0.001), vec2(0.999));
-        frosted_refracted_bg += textureLod(sampler2D(transmission_texture, transmission_sampler), uv_sample, 4.0).rgb * (1.0 / 9.0);
+        frosted_refracted_bg += textureLod(sampler2D(transmission_texture, transmission_sampler), uv_sample, 4.2).rgb * (1.0 / 9.0);
     }
 
-    // 2. Absorption Volumétrique de Beer-Lambert (Bleu Saphir Profond Volumétrique)
+    // 2. Ombre Portée Inter-dalles & Gradient Volumétrique Cœur Bleu Saphir Sombre
+    float center_dist = length(in_uv - vec2(0.5));
+    float saphire_core_mask = smoothstep(0.48, 0.0, center_dist);
+
     float optical_path = glass_thickness / (NdotV + 0.04);
-    vec3 sigma_a = vec3(3.6, 1.20, 0.02); // Bleu Saphir intense au cœur de la dalle
+    vec3 sigma_a = vec3(4.2, 1.60, 0.05) * (1.0 + saphire_core_mask * 1.6);
     vec3 beer_lambert_decay = exp(-sigma_a * optical_path);
 
-    vec3 transmitted_color = frosted_refracted_bg * pc.glass_tint.rgb * beer_lambert_decay;
+    vec3 sapphire_tint = mix(pc.glass_tint.rgb, vec3(0.04, 0.22, 0.58), saphire_core_mask * 0.65);
+    vec3 transmitted_color = frosted_refracted_bg * sapphire_tint * beer_lambert_decay;
 
-    // 3. Éclairage Spéculaire HDR & Liseré Cyan Électrique "Fibre Optique" (#00E5FF)
+    // 3. Éclairage Spéculaire HDR & Liseré Cyan Électrique 1-Pixel (#00E5FF)
     float fresnel = fresnel_schlick(NdotV, 0.08);
 
     vec3 light1_dir = normalize(vec3(-3.8, -2.2, 3.2)); // Rim Light Bottom-Left
@@ -77,24 +81,20 @@ void main() {
     float is_side_wall = step(abs(N.z), 0.20);
     float is_chamfer = step(0.20, abs(N.z)) * step(abs(N.z), 0.90);
 
-    float spec1 = pow(max(dot(N, H1), 0.0), 96.0) * 80.0;
-    float spec2 = pow(max(dot(N, H2), 0.0), 48.0) * 20.0;
-
-    // Liseré Cyan Électrique ultra-net (#00E5FF) sur le chanfrein à 45° (Fibre Optique)
-    vec3 cyan_glow_tint = vec3(0.00, 0.90, 1.00);
-    vec3 chamfer_specular = mix(vec3(1.0), cyan_glow_tint, is_chamfer * 0.95) * (spec1 * is_chamfer + spec2 * 0.3);
+    // Liseré Cyan Électrique ultra-net (#00E5FF) vibrant sur le chanfrein à 45°
+    float spec_chamfer = pow(max(dot(N, H1), 0.0), 320.0) * 180.0;
+    vec3 cyan_glow_tint = vec3(0.00, 0.95, 1.00);
+    vec3 chamfer_specular = cyan_glow_tint * spec_chamfer * is_chamfer;
 
     // Tranche sombre 90° franche
-    vec3 side_wall_darkening = mix(transmitted_color, vec3(0.01, 0.08, 0.35) * beer_lambert_decay, is_side_wall * 0.92);
+    vec3 side_wall_darkening = mix(transmitted_color, vec3(0.01, 0.06, 0.28) * beer_lambert_decay, is_side_wall * 0.92);
 
-    // Composition Finale BSDF Verre Dépoli Satiné Photoréaliste
+    // Composition Finale BSDF Verre Dépoli Satiné Photoréaliste OPAQUE
     vec3 final_rgb = mix(side_wall_darkening, vec3(0.98, 1.0, 1.0), fresnel) + chamfer_specular;
 
-    float alpha = clamp(0.45 + fresnel * 0.50 + (1.0 - beer_lambert_decay.r) * 0.45, 0.40, 0.98);
-
     // Tonemapping Filmique
-    vec3 tonemapped = final_rgb / (final_rgb + vec3(0.52));
+    vec3 tonemapped = final_rgb / (final_rgb + vec3(0.48));
     vec3 gamma_corrected = pow(tonemapped, vec3(1.0 / 2.2));
 
-    out_color = vec4(gamma_corrected, alpha);
+    out_color = vec4(gamma_corrected, 1.0);
 }
