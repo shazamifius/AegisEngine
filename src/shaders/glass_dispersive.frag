@@ -30,7 +30,7 @@ void main() {
 
     float NdotV = abs(dot(N, V));
 
-    // 1. Réfraction Snell-Descartes & Sampling Mipmap Flou Dépoli Hardware (textureLod)
+    // 1. Réfraction Snell-Descartes & Échantillonnage 9-Taps Géant sur Mipmap Level 4.0 (Diffusion Laiteuse Extrême 150px+)
     float ior = 1.52;
     float eta = 1.0 / ior;
 
@@ -43,19 +43,19 @@ void main() {
     float glass_thickness = pc.glass_tint.w;
     vec2 refraction_offset = (refract_dir.xy + N.xy * 0.45) * (glass_thickness * 0.40);
 
-    // Mipmap LOD level pour flou dépoli matériel crémeux et laiteux (Level 4.4)
-    float mip_lod = 4.4 + (1.0 - NdotV) * 0.6;
+    // Échantillonnage 9-Taps géant (r = 0.14) sur Mipmap Level 4.0 VRAM Vulkan pour diffusion laiteuse intégrale
+    float r = 0.140;
+    vec2 offsets[9] = vec2[](
+        vec2(0.0, 0.0),
+        vec2(-r, -r), vec2(r, -r), vec2(-r, r), vec2(r, r),
+        vec2(-r * 1.8, 0.0), vec2(r * 1.8, 0.0), vec2(0.0, -r * 1.8), vec2(0.0, r * 1.8)
+    );
 
-    // Dispersion chromatique Cauchy RGB sur la chaîne de Mipmaps VRAM Vulkan
-    vec2 uv_r = clamp(in_screen_uv + refraction_offset * 1.20, vec2(0.001), vec2(0.999));
-    vec2 uv_g = clamp(in_screen_uv + refraction_offset * 1.00, vec2(0.001), vec2(0.999));
-    vec2 uv_b = clamp(in_screen_uv + refraction_offset * 0.80, vec2(0.001), vec2(0.999));
-
-    float sample_r = textureLod(sampler2D(transmission_texture, transmission_sampler), uv_r, mip_lod).r;
-    float sample_g = textureLod(sampler2D(transmission_texture, transmission_sampler), uv_g, mip_lod).g;
-    float sample_b = textureLod(sampler2D(transmission_texture, transmission_sampler), uv_b, mip_lod).b;
-
-    vec3 frosted_refracted_bg = vec3(sample_r, sample_g, sample_b);
+    vec3 frosted_refracted_bg = vec3(0.0);
+    for (int i = 0; i < 9; i++) {
+        vec2 uv_sample = clamp(in_screen_uv + refraction_offset + offsets[i], vec2(0.001), vec2(0.999));
+        frosted_refracted_bg += textureLod(sampler2D(transmission_texture, transmission_sampler), uv_sample, 4.0).rgb * (1.0 / 9.0);
+    }
 
     // 2. Absorption Volumétrique de Beer-Lambert (Bleu Saphir Profond Volumétrique)
     float optical_path = glass_thickness / (NdotV + 0.04);

@@ -5,15 +5,14 @@ layout(location = 0) out vec4 out_color;
 
 void main() {
     vec2 uv = in_uv;
-    vec3 col_center = vec3(0.96, 0.98, 1.00); // Studio Ice Cyan White
-    vec3 col_edge = vec3(0.80, 0.88, 0.96);   // Studio Soft Blue Shadow
-    
-    float dist = length(uv - vec2(0.5));
-    vec3 studio_bg = mix(col_center, col_edge, smoothstep(0.1, 0.95, dist));
 
-    // Ombre verticale douce sur la gauche
-    float shadow_wall = smoothstep(0.0, 0.45, uv.x);
-    vec3 final_bg = mix(vec3(0.68, 0.76, 0.88), studio_bg, shadow_wall);
+    // Démarcation nette de studio : Mur d'ombre sombre à gauche, lumière blanche glaciale à droite
+    vec3 shadow_left = vec3(0.16, 0.26, 0.44);   // Bleu Saphir Sombre Studio
+    vec3 light_right = vec3(0.96, 0.98, 1.00);   // Blanc Cyan Glacial Studio
 
-    out_color = vec4(final_bg, 1.0);
+    // Arête de démarcation nette du studio à x = 0.42
+    float wall_edge = smoothstep(0.415, 0.425, uv.x);
+    vec3 studio_bg = mix(shadow_left, light_right, wall_edge);
+
+    out_color = vec4(studio_bg, 1.0);
 }
