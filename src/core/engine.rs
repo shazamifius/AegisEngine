@@ -28,6 +28,7 @@ pub struct GlassSlabInstance {
     pub position: Vec3,
     pub rotation_z: f32,
     pub rotation_x: f32,
+    pub scale: Vec3,
     pub tint: Vec4,
 }
 
@@ -447,26 +448,29 @@ impl GlassSceneRenderPass {
         };
 
         let instances = vec![
-            // 1. Dalle Capsule Arrière (Fond Bleu Glacial Dépoli)
+            // 1. Dalle Capsule Diagonale Haut-Gauche (BLEU SAPHIR PROFOND AU FOND)
             GlassSlabInstance {
-                position: Vec3::new(-0.20, -0.65, -0.45),
-                rotation_z: -38.0f32.to_radians(),
-                rotation_x: -6.0f32.to_radians(),
-                tint: Vec4::new(0.60, 0.85, 0.98, 0.32),
+                position: Vec3::new(-0.35, 0.45, -0.30),
+                rotation_z: -36.0f32.to_radians(),
+                rotation_x: -4.0f32.to_radians(),
+                scale: Vec3::new(1.85, 0.58, 0.22),
+                tint: Vec4::new(0.04, 0.22, 0.78, 0.85),
             },
-            // 2. Dalle Capsule Intermédiaire (Bleu Saphir Profond)
+            // 2. Dalle Capsule Premier Plan (Diagonale Haut-Droite, VERRE CLAIR CYAN AU-DESSUS)
             GlassSlabInstance {
-                position: Vec3::new(0.12, 0.05, 0.00),
-                rotation_z: 38.0f32.to_radians(),
+                position: Vec3::new(0.05, -0.05, 0.35),
+                rotation_z: 36.0f32.to_radians(),
                 rotation_x: 4.0f32.to_radians(),
-                tint: Vec4::new(0.05, 0.38, 0.95, 0.70),
+                scale: Vec3::new(2.10, 0.65, 0.25),
+                tint: Vec4::new(0.85, 0.96, 1.00, 0.15),
             },
-            // 3. Dalle Capsule Premier Plan (Verre Clair avec Liseré Cyan Électrique #00C2FF)
+            // 3. Dalle Capsule Arrière (Bas-Droite)
             GlassSlabInstance {
-                position: Vec3::new(-0.15, 0.65, 0.45),
-                rotation_z: -38.0f32.to_radians(),
-                rotation_x: -6.0f32.to_radians(),
-                tint: Vec4::new(0.82, 0.94, 1.00, 0.16),
+                position: Vec3::new(0.35, -0.65, -0.50),
+                rotation_z: -36.0f32.to_radians(),
+                rotation_x: -4.0f32.to_radians(),
+                scale: Vec3::new(1.50, 0.52, 0.18),
+                tint: Vec4::new(0.55, 0.78, 0.95, 0.35),
             },
         ];
 
