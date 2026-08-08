@@ -1,0 +1,29 @@
+[package]
+name = "aegis_engine"
+version = "0.1.0"
+edition = "2021"
+authors = ["Shaza"]
+description = "Pure Vulkan 1.4 From Scratch 3D Engine for VR and Mobile"
+
+[dependencies]
+# Direct Vulkan 1.4 C API Bindings (Zero Middleware)
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+
+# Pure-Rust Shader Compiler (WGSL -> Vulkan 1.4 SPIR-V)
+naga = { version = "23.1", features = ["wgsl-in", "spv-out"] }
+
+# Windowing & Events
+winit = "0.30"
+
+# Math & Data Packing
+glam = "0.29"
+bytemuck = { version = "1.18", features = ["derive"] }
+
+# Async runtime helper
+pollster = "0.4"
+
+# Logging & Diagnostic
+log = "0.4"
+env_logger = "0.11"
