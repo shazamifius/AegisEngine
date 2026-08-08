@@ -23,6 +23,31 @@ impl PipelineFactory {
         Ok(spirv_words)
     }
 
+    /// Compile du code GLSL Native (Vertex ou Fragment) vers du bytecode Vulkan SPIR-V à chaud via Naga GLSL parser.
+    pub fn compile_glsl_to_spirv(
+        glsl_source: &str,
+        stage: naga::ShaderStage,
+    ) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+        let mut parser = naga::front::glsl::Frontend::default();
+        let options = naga::front::glsl::Options {
+            stage,
+            defines: Default::default(),
+        };
+        let module = parser.parse(&options, glsl_source)?;
+
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        let module_info = validator.validate(&module)?;
+
+        let mut spv_options = naga::back::spv::Options::default();
+        spv_options.lang_version = (1, 5);
+
+        let spirv_words = naga::back::spv::write_vec(&module, &module_info, &spv_options, None)?;
+        Ok(spirv_words)
+    }
+
     /// Crée un Shader Module Vulkan à partir d'un bytecode SPIR-V.
     pub fn create_shader_module(
         device: &Device,
@@ -92,6 +117,19 @@ mod tests {
         "#;
 
         let spirv = PipelineFactory::compile_wgsl_to_spirv(wgsl).unwrap();
+        assert!(!spirv.is_empty());
+    }
+
+    #[test]
+    fn test_glsl_to_spirv_compilation() {
+        let glsl_vert = r#"#version 450
+        layout(location = 0) in vec3 inPos;
+        void main() {
+            gl_Position = vec4(inPos, 1.0);
+        }
+        "#;
+
+        let spirv = PipelineFactory::compile_glsl_to_spirv(glsl_vert, naga::ShaderStage::Vertex).unwrap();
         assert!(!spirv.is_empty());
     }
 }

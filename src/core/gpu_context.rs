@@ -25,6 +25,11 @@ pub struct GpuContext {
     pub swapchain_extent: vk::Extent2D,
     pub swapchain_images: Vec<vk::Image>,
     pub swapchain_image_views: Vec<vk::ImageView>,
+    pub command_pool: vk::CommandPool,
+    pub command_buffers: Vec<vk::CommandBuffer>,
+    pub image_available_semaphore: vk::Semaphore,
+    pub render_finished_semaphore: vk::Semaphore,
+    pub in_flight_fence: vk::Fence,
 }
 
 impl GpuContext {
@@ -163,7 +168,7 @@ impl GpuContext {
             .image_color_space(format.color_space)
             .image_extent(extent)
             .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(surface_caps.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -172,7 +177,6 @@ impl GpuContext {
         let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
         let swapchain_images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
 
-        // Crée les ImageViews pour chaque image du swapchain
         let mut swapchain_image_views = Vec::new();
         for &img in swapchain_images.iter() {
             let view_info = vk::ImageViewCreateInfo::default()
@@ -189,6 +193,28 @@ impl GpuContext {
             let view = unsafe { device.create_image_view(&view_info, None)? };
             swapchain_image_views.push(view);
         }
+
+        // 8. Command Pool & Buffers
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(graphics_family_idx)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+
+        let command_pool = unsafe { device.create_command_pool(&pool_info, None)? };
+
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(swapchain_images.len() as u32);
+
+        let command_buffers = unsafe { device.allocate_command_buffers(&alloc_info)? };
+
+        // 9. Synchro Vulkan (Semaphores & Fences)
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+
+        let image_available_semaphore = unsafe { device.create_semaphore(&semaphore_info, None)? };
+        let render_finished_semaphore = unsafe { device.create_semaphore(&semaphore_info, None)? };
+        let in_flight_fence = unsafe { device.create_fence(&fence_info, None)? };
 
         log::info!("Swapchain Vulkan 1.4 créé ({x}x{y}, Format: {fmt:?}, Images: {count})", x = extent.width, y = extent.height, fmt = format.format, count = swapchain_images.len());
 
@@ -209,7 +235,105 @@ impl GpuContext {
             swapchain_extent: extent,
             swapchain_images,
             swapchain_image_views,
+            command_pool,
+            command_buffers,
+            image_available_semaphore,
+            render_finished_semaphore,
+            in_flight_fence,
         })
+    }
+
+    pub fn begin_frame(&mut self) -> Result<(vk::CommandBuffer, usize), Box<dyn std::error::Error>> {
+        unsafe {
+            self.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX)?;
+            let (image_index, _) = self.swapchain_loader.acquire_next_image(
+                self.swapchain,
+                u64::MAX,
+                self.image_available_semaphore,
+                vk::Fence::null(),
+            )?;
+
+            self.device.reset_fences(&[self.in_flight_fence])?;
+            let cmd = self.command_buffers[image_index as usize];
+
+            self.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
+            let begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+            self.device.begin_command_buffer(cmd, &begin_info)?;
+
+            Ok((cmd, image_index as usize))
+        }
+    }
+
+    pub fn end_frame(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        image_index: usize,
+        window: &Window,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe {
+            self.device.end_command_buffer(cmd)?;
+
+            let wait_semaphores = [self.image_available_semaphore];
+            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let signal_semaphores = [self.render_finished_semaphore];
+
+            let submit_info = vk::SubmitInfo::default()
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(std::slice::from_ref(&cmd))
+                .signal_semaphores(&signal_semaphores);
+
+            self.device.queue_submit(
+                self.graphics_queue.queue,
+                &[submit_info],
+                self.in_flight_fence,
+            )?;
+
+            let swapchains = [self.swapchain];
+            let image_indices = [image_index as u32];
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&signal_semaphores)
+                .swapchains(&swapchains)
+                .image_indices(&image_indices);
+
+            let result = self.swapchain_loader.queue_present(self.graphics_queue.queue, &present_info);
+
+            if result == Ok(true) || result == Err(vk::Result::ERROR_OUT_OF_DATE_KHR) {
+                self.resize(window);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn begin_single_time_commands(&self) -> Result<vk::CommandBuffer, Box<dyn std::error::Error>> {
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_pool(self.command_pool)
+            .command_buffer_count(1);
+
+        let command_buffer = unsafe { self.device.allocate_command_buffers(&alloc_info)?[0] };
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        unsafe { self.device.begin_command_buffer(command_buffer, &begin_info)? };
+        Ok(command_buffer)
+    }
+
+    pub fn end_single_time_commands(&self, command_buffer: vk::CommandBuffer) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe {
+            self.device.end_command_buffer(command_buffer)?;
+
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(std::slice::from_ref(&command_buffer));
+
+            self.device.queue_submit(self.graphics_queue.queue, &[submit_info], vk::Fence::null())?;
+            self.device.queue_wait_idle(self.graphics_queue.queue)?;
+
+            self.device.free_command_buffers(self.command_pool, &[command_buffer]);
+        }
+        Ok(())
     }
 
     /// Redimensionne la taille du Swapchain Vulkan lors du redimensionnement de la fenêtre.
@@ -239,7 +363,7 @@ impl GpuContext {
                 .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
                 .image_extent(extent)
                 .image_array_layers(1)
-                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .pre_transform(surface_caps.current_transform)
                 .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -280,6 +404,10 @@ impl Drop for GpuContext {
             for &view in self.swapchain_image_views.iter() {
                 self.device.destroy_image_view(view, None);
             }
+            self.device.destroy_semaphore(self.image_available_semaphore, None);
+            self.device.destroy_semaphore(self.render_finished_semaphore, None);
+            self.device.destroy_fence(self.in_flight_fence, None);
+            self.device.destroy_command_pool(self.command_pool, None);
             self.swapchain_loader.destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.device.destroy_device(None);

@@ -12,7 +12,7 @@ ash-window = "0.13"
 raw-window-handle = "0.6"
 
 # Pure-Rust Shader Compiler (WGSL -> Vulkan 1.4 SPIR-V)
-naga = { version = "23.1", features = ["wgsl-in", "spv-out"] }
+naga = { version = "23.1", features = ["glsl-in", "wgsl-in", "spv-out"] }
 
 # Windowing & Events
 winit = "0.30"

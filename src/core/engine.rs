@@ -1,35 +1,38 @@
 use ash::vk;
+use glam::{Mat4, Vec3, Vec4};
 use std::sync::Arc;
 use std::time::Instant;
-use glam::{Mat4, Vec3, Vec4};
+use winit::window::Window;
+
 use crate::core::gpu_context::GpuContext;
 use crate::core::memory::MemoryManager;
 use crate::geometry::glass_slab::GlassSlabGenerator;
 use crate::geometry::vertex::Vertex;
 use crate::render::pipeline::PipelineFactory;
-use crate::render::render_graph::{RenderPass, RenderGraph};
-use winit::window::Window;
+use crate::render::render_graph::RenderPass;
 
-/// Payload de Push Constants transféré instantanément au shader de Verre (144 octets).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct GlassPushConstants {
-    mvp_matrix: [f32; 16],
-    model_matrix: [f32; 16],
-    normal_matrix: [f32; 16],
-    glass_tint: [f32; 4],
+#[derive(Clone, Copy, Debug)]
+pub struct GlassPushConstants {
+    pub mvp_matrix: Mat4,
+    pub model_matrix: Mat4,
+    pub normal_matrix: Mat4,
+    pub glass_tint: Vec4,
 }
 
-/// Dalle Capsule de Verre Dépoli dans la Scène 3D.
-struct GlassSlabInstance {
-    position: Vec3,
-    rotation_z: f32,
-    rotation_x: f32,
-    tint: Vec4,
+unsafe impl bytemuck::Pod for GlassPushConstants {}
+unsafe impl bytemuck::Zeroable for GlassPushConstants {}
+
+#[derive(Clone, Debug)]
+pub struct GlassSlabInstance {
+    pub position: Vec3,
+    pub rotation_z: f32,
+    pub rotation_x: f32,
+    pub tint: Vec4,
 }
 
-/// Passe de Rendu 3D Photoréaliste de Dalles Capsule en Verre Dépoli Satiné sous Vulkan 1.4 Native.
-struct GlassSceneRenderPass {
+/// Dynamic Glass Scene Render Pass (Native Vulkan 1.4 + GLSL + Hardware Mipmap Chain Frosted Blur)
+pub struct GlassSceneRenderPass {
     bg_pipeline: vk::Pipeline,
     bg_pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -37,19 +40,23 @@ struct GlassSceneRenderPass {
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
+
     transmission_image: vk::Image,
     _transmission_memory: vk::DeviceMemory,
     transmission_image_view: vk::ImageView,
     transmission_sampler: vk::Sampler,
     transmission_layout: vk::ImageLayout,
+
     vertex_buffer: vk::Buffer,
     _vertex_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
     _index_memory: vk::DeviceMemory,
     index_count: u32,
+
     depth_image: vk::Image,
     _depth_memory: vk::DeviceMemory,
     depth_image_view: vk::ImageView,
+
     instances: Vec<GlassSlabInstance>,
     start_time: Instant,
 }
@@ -59,14 +66,12 @@ impl GlassSceneRenderPass {
         gpu: &GpuContext,
         memory_props: &vk::PhysicalDeviceMemoryProperties,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        log::info!("Initialisation de la Scène de Verre Dépoli Satiné Photoréaliste Vulkan 1.4...");
+        log::info!("Initialisation de la Scène de Verre Dépoli Vulkan 1.4 Native (GLSL + Mipmap Chain)...");
 
         let (vertices, indices) = GlassSlabGenerator::create_capsule_slab(2.8, 0.62, 0.12, 0.05, 36);
         let index_count = indices.len() as u32;
 
         let vertex_bytes = bytemuck::cast_slice(&vertices);
-        let index_bytes = bytemuck::cast_slice(&indices);
-
         let (vertex_buffer, vertex_memory) = MemoryManager::create_buffer(
             &gpu.device,
             memory_props,
@@ -74,7 +79,13 @@ impl GlassSceneRenderPass {
             vk::BufferUsageFlags::VERTEX_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
+        unsafe {
+            let data_ptr = gpu.device.map_memory(vertex_memory, 0, vertex_bytes.len() as vk::DeviceSize, vk::MemoryMapFlags::empty())?;
+            std::ptr::copy_nonoverlapping(vertex_bytes.as_ptr(), data_ptr as *mut u8, vertex_bytes.len());
+            gpu.device.unmap_memory(vertex_memory);
+        }
 
+        let index_bytes = bytemuck::cast_slice(&indices);
         let (index_buffer, index_memory) = MemoryManager::create_buffer(
             &gpu.device,
             memory_props,
@@ -82,18 +93,13 @@ impl GlassSceneRenderPass {
             vk::BufferUsageFlags::INDEX_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
-
         unsafe {
-            let data_ptr = gpu.device.map_memory(vertex_memory, 0, vertex_bytes.len() as vk::DeviceSize, vk::MemoryMapFlags::empty())?;
-            std::ptr::copy_nonoverlapping(vertex_bytes.as_ptr(), data_ptr as *mut u8, vertex_bytes.len());
-            gpu.device.unmap_memory(vertex_memory);
-
             let data_ptr = gpu.device.map_memory(index_memory, 0, index_bytes.len() as vk::DeviceSize, vk::MemoryMapFlags::empty())?;
             std::ptr::copy_nonoverlapping(index_bytes.as_ptr(), data_ptr as *mut u8, index_bytes.len());
             gpu.device.unmap_memory(index_memory);
         }
 
-        // 1. Image Z-Buffer (Profondeur)
+        // 1. Z-Buffer Depth Attachment
         let depth_format = vk::Format::D32_SFLOAT;
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -138,7 +144,8 @@ impl GlassSceneRenderPass {
 
         let depth_image_view = unsafe { gpu.device.create_image_view(&view_info, None)? };
 
-        // 2. Offscreen Transmission Image Buffer (pour réfraction et flou dépoli)
+        // 2. Offscreen Transmission Image Buffer avec Chaîne de Mipmaps Vulkan Hardware (5 Niveaux de Mipmap)
+        let mip_levels = 5u32;
         let trans_image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(gpu.swapchain_format)
@@ -147,11 +154,11 @@ impl GlassSceneRenderPass {
                 height: gpu.swapchain_extent.height,
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
@@ -174,7 +181,7 @@ impl GlassSceneRenderPass {
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: mip_levels,
                 base_array_layer: 0,
                 layer_count: 1,
             });
@@ -184,9 +191,12 @@ impl GlassSceneRenderPass {
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0)
+            .max_lod(mip_levels as f32);
 
         let transmission_sampler = unsafe { gpu.device.create_sampler(&sampler_info, None)? };
 
@@ -230,52 +240,55 @@ impl GlassSceneRenderPass {
 
         let descriptor_set = unsafe { gpu.device.allocate_descriptor_sets(&alloc_info)?[0] };
 
-        let descriptor_image_info = [vk::DescriptorImageInfo {
-            sampler: vk::Sampler::null(),
-            image_view: transmission_image_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }];
+        let image_info = vk::DescriptorImageInfo::default()
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image_view(transmission_image_view);
 
-        let descriptor_sampler_info = [vk::DescriptorImageInfo {
-            sampler: transmission_sampler,
-            image_view: vk::ImageView::null(),
-            image_layout: vk::ImageLayout::UNDEFINED,
-        }];
+        let sampler_descriptor_info = vk::DescriptorImageInfo::default()
+            .sampler(transmission_sampler);
 
         let descriptor_writes = [
             vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(0)
+                .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(&descriptor_image_info),
+                .image_info(std::slice::from_ref(&image_info)),
             vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(1)
+                .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::SAMPLER)
-                .image_info(&descriptor_sampler_info),
+                .image_info(std::slice::from_ref(&sampler_descriptor_info)),
         ];
 
         unsafe { gpu.device.update_descriptor_sets(&descriptor_writes, &[]) };
 
-        // 4. Pipeline Fond Studio
-        let bg_wgsl_source = include_str!("../shaders/background.wgsl");
-        let bg_spirv = PipelineFactory::compile_wgsl_to_spirv(bg_wgsl_source)?;
-        let bg_shader_module = PipelineFactory::create_shader_module(&gpu.device, &bg_spirv)?;
+        // 4. Compilation des Shaders GLSL Native vers Vulkan SPIR-V
+        let bg_vert_spv = PipelineFactory::compile_glsl_to_spirv(
+            include_str!("../shaders/background.vert"),
+            naga::ShaderStage::Vertex,
+        )?;
+        let bg_frag_spv = PipelineFactory::compile_glsl_to_spirv(
+            include_str!("../shaders/background.frag"),
+            naga::ShaderStage::Fragment,
+        )?;
+
+        let bg_vert_module = PipelineFactory::create_shader_module(&gpu.device, &bg_vert_spv)?;
+        let bg_frag_module = PipelineFactory::create_shader_module(&gpu.device, &bg_frag_spv)?;
 
         let bg_pipeline_layout = PipelineFactory::create_pipeline_layout(&gpu.device, &[], &[])?;
 
-        let entry_name = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"vs_main\0") };
-        let fs_entry_name = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"fs_main\0") };
-
+        let entry_name = std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap();
         let bg_stages = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
-                .module(bg_shader_module)
+                .module(bg_vert_module)
                 .name(entry_name),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(bg_shader_module)
-                .name(fs_entry_name),
+                .module(bg_frag_module)
+                .name(entry_name),
         ];
 
         let bg_vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
@@ -336,13 +349,24 @@ impl GlassSceneRenderPass {
                 .map_err(|(_, err)| err)?
         };
 
-        unsafe { gpu.device.destroy_shader_module(bg_shader_module, None) };
+        unsafe {
+            gpu.device.destroy_shader_module(bg_vert_module, None);
+            gpu.device.destroy_shader_module(bg_frag_module, None);
+        };
         let bg_pipeline = bg_pipelines[0];
 
-        // 5. Pipeline Verre Dépoli
-        let wgsl_source = include_str!("../shaders/glass_dispersive.wgsl");
-        let spirv_code = PipelineFactory::compile_wgsl_to_spirv(wgsl_source)?;
-        let shader_module = PipelineFactory::create_shader_module(&gpu.device, &spirv_code)?;
+        // 5. Pipeline Verre Dépoli GLSL Native
+        let glass_vert_spv = PipelineFactory::compile_glsl_to_spirv(
+            include_str!("../shaders/glass_dispersive.vert"),
+            naga::ShaderStage::Vertex,
+        )?;
+        let glass_frag_spv = PipelineFactory::compile_glsl_to_spirv(
+            include_str!("../shaders/glass_dispersive.frag"),
+            naga::ShaderStage::Fragment,
+        )?;
+
+        let glass_vert_module = PipelineFactory::create_shader_module(&gpu.device, &glass_vert_spv)?;
+        let glass_frag_module = PipelineFactory::create_shader_module(&gpu.device, &glass_frag_spv)?;
 
         let push_constant_range = PipelineFactory::create_push_constant_range(
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
@@ -359,12 +383,12 @@ impl GlassSceneRenderPass {
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
-                .module(shader_module)
+                .module(glass_vert_module)
                 .name(entry_name),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(shader_module)
-                .name(fs_entry_name),
+                .module(glass_frag_module)
+                .name(entry_name),
         ];
 
         let binding_desc = [Vertex::binding_description()];
@@ -387,18 +411,18 @@ impl GlassSceneRenderPass {
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
 
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+        let color_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)
             .blend_enable(true)
             .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .color_blend_op(vk::BlendOp::ADD)
             .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .alpha_blend_op(vk::BlendOp::ADD);
 
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(std::slice::from_ref(&color_blend_attachment));
+            .attachments(std::slice::from_ref(&color_attachment));
 
         let mut rendering_create_info = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&color_formats)
@@ -423,7 +447,10 @@ impl GlassSceneRenderPass {
                 .map_err(|(_, err)| err)?
         };
 
-        unsafe { gpu.device.destroy_shader_module(shader_module, None) };
+        unsafe {
+            gpu.device.destroy_shader_module(glass_vert_module, None);
+            gpu.device.destroy_shader_module(glass_frag_module, None);
+        };
 
         let instances = vec![
             // 1. Dalle Capsule Arrière (Fond Bleu Glacial Dépoli)
@@ -449,7 +476,7 @@ impl GlassSceneRenderPass {
             },
         ];
 
-        log::info!("Pipeline Graphique de Verre Dépoli Satiné & Buffer Offscreen Vulkan 1.4 prêt !");
+        log::info!("Pipeline Graphique GLSL Native & Hardware Mipmap Chain Vulkan 1.4 prêt !");
 
         Ok(Self {
             bg_pipeline,
@@ -480,7 +507,7 @@ impl GlassSceneRenderPass {
 
 impl RenderPass for GlassSceneRenderPass {
     fn name(&self) -> &str {
-        "Vulkan 1.4 Photoreal Dispersive Glass Render Pass"
+        "Vulkan 1.4 Native GLSL Glass Scene Render Pass"
     }
 
     fn execute(&mut self, context: &GpuContext, cmd: vk::CommandBuffer, image_index: usize) {
@@ -496,6 +523,69 @@ impl RenderPass for GlassSceneRenderPass {
         proj.y_axis.y *= -1.0;
 
         unsafe {
+            // A. Transition de l'image Swapchain -> COLOR_ATTACHMENT_OPTIMAL
+            let barrier_present_to_color = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::NONE)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let barrier_depth = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::NONE)
+                .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .image(self.depth_image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::DEPTH,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let init_barriers = [barrier_present_to_color, barrier_depth];
+            context.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &init_barriers,
+            );
+
+            // B. Rendu du Studio Background
+            let color_attachment_info = vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.94, 0.96, 0.98, 1.0],
+                    },
+                });
+
+            let bg_rendering_info = vk::RenderingInfo::default()
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: context.swapchain_extent,
+                })
+                .layer_count(1)
+                .color_attachments(std::slice::from_ref(&color_attachment_info));
+
+            context.device.cmd_begin_rendering(cmd, &bg_rendering_info);
+            context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.bg_pipeline);
+
             let viewport = vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -508,90 +598,50 @@ impl RenderPass for GlassSceneRenderPass {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: context.swapchain_extent,
             };
-
-            // --- PASSE 1 : Fond Studio Texturé Photoréaliste ---
-            let barrier_color_bg = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-                .src_access_mask(vk::AccessFlags2::NONE)
-                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-
-            let dep_bg = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_color_bg));
-            context.device.cmd_pipeline_barrier2(cmd, &dep_bg);
-
-            let bg_color_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] },
-                });
-
-            let bg_rendering_info = vk::RenderingInfo::default()
-                .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent })
-                .layer_count(1)
-                .color_attachments(std::slice::from_ref(&bg_color_attachment));
-
-            context.device.cmd_begin_rendering(cmd, &bg_rendering_info);
             context.device.cmd_set_viewport(cmd, 0, &[viewport]);
             context.device.cmd_set_scissor(cmd, 0, &[scissor]);
-            context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.bg_pipeline);
+
             context.device.cmd_draw(cmd, 3, 1, 0, 0);
             context.device.cmd_end_rendering(cmd);
 
-            // --- Initialisation du Z-Buffer ---
-            let barrier_depth = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-                .src_access_mask(vk::AccessFlags2::NONE)
-                .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
-                .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .image(self.depth_image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::DEPTH,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-            let dep_depth = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_depth));
-            context.device.cmd_pipeline_barrier2(cmd, &dep_depth);
-
+            // C. Effacement du Z-Buffer avant le rendu des dalles
             let depth_clear_attachment = vk::RenderingAttachmentInfo::default()
                 .image_view(self.depth_image_view)
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } });
-            let depth_clear_rendering = vk::RenderingInfo::default()
-                .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent })
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 },
+                });
+
+            let dummy_color_attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE);
+
+            let depth_clear_rendering_info = vk::RenderingInfo::default()
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: context.swapchain_extent,
+                })
                 .layer_count(1)
+                .color_attachments(std::slice::from_ref(&dummy_color_attachment))
                 .depth_attachment(&depth_clear_attachment);
-            context.device.cmd_begin_rendering(cmd, &depth_clear_rendering);
+
+            context.device.cmd_begin_rendering(cmd, &depth_clear_rendering_info);
             context.device.cmd_end_rendering(cmd);
 
-            // --- PASSE 2 : Rendu Multi-Passes des Dalles Capsule avec Offscreen Transmission Buffer ---
-            for instance in &self.instances {
-                // 1. Transition swapchain image -> TRANSFER_SRC_OPTIMAL
-                let b1 = vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+            // D. Boucle Multi-Passes pour chaque dalle avec Génération de Mipmaps Hardware Vulkan (vkCmdBlitImage)
+            let mip_levels = 5u32;
+
+            for (idx, instance) in self.instances.iter().enumerate() {
+                // 1. Transition Swapchain -> TRANSFER_SRC_OPTIMAL
+                let barrier_swapchain_src = vk::ImageMemoryBarrier::default()
                     .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
                     .image(image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -601,14 +651,12 @@ impl RenderPass for GlassSceneRenderPass {
                         layer_count: 1,
                     });
 
-                // 2. Transition transmission_image -> TRANSFER_DST_OPTIMAL
-                let b2 = vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::TOP_OF_PIPE)
-                    .src_access_mask(vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::NONE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                    .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                // 2. Transition Transmission Level 0 -> TRANSFER_DST_OPTIMAL
+                let barrier_trans_dst = vk::ImageMemoryBarrier::default()
                     .old_layout(self.transmission_layout)
                     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::NONE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .image(self.transmission_image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -618,11 +666,18 @@ impl RenderPass for GlassSceneRenderPass {
                         layer_count: 1,
                     });
 
-                let trans_barriers = [b1, b2];
-                let dep_trans = vk::DependencyInfo::default().image_memory_barriers(&trans_barriers);
-                context.device.cmd_pipeline_barrier2(cmd, &dep_trans);
+                let barriers_copy = [barrier_swapchain_src, barrier_trans_dst];
+                context.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &barriers_copy,
+                );
 
-                // 3. Copy swapchain color attachment -> transmission_image
+                // Copie Swapchain -> Transmission Image Level 0
                 let copy_region = vk::ImageCopy::default()
                     .src_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -651,14 +706,123 @@ impl RenderPass for GlassSceneRenderPass {
                     &[copy_region],
                 );
 
-                // 4. Transition swapchain image -> COLOR_ATTACHMENT_OPTIMAL
-                let b3 = vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                    .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                // 3. Génération de Mipmaps Matérielle Vulkan (Blit Hardware Mip 0 -> Mip 1 -> Mip 2 -> Mip 3 -> Mip 4)
+                let mut mip_w = context.swapchain_extent.width as i32;
+                let mut mip_h = context.swapchain_extent.height as i32;
+
+                for i in 1..mip_levels {
+                    let prev_barrier = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                        .image(self.transmission_image)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: i - 1,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        });
+
+                    let next_barrier = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::NONE)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .image(self.transmission_image)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: i,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        });
+
+                    let mip_barriers = [prev_barrier, next_barrier];
+                    context.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &mip_barriers,
+                    );
+
+                    let next_w = if mip_w > 1 { mip_w / 2 } else { 1 };
+                    let next_h = if mip_h > 1 { mip_h / 2 } else { 1 };
+
+                    let blit = vk::ImageBlit::default()
+                        .src_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: i - 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .src_offsets([
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D { x: mip_w, y: mip_h, z: 1 },
+                        ])
+                        .dst_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: i,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .dst_offsets([
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D { x: next_w, y: next_h, z: 1 },
+                        ]);
+
+                    context.device.cmd_blit_image(
+                        cmd,
+                        self.transmission_image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        self.transmission_image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[blit],
+                        vk::Filter::LINEAR,
+                    );
+
+                    mip_w = next_w;
+                    mip_h = next_h;
+                }
+
+                // 4. Transition Mip 0..3 et Mip 4 -> SHADER_READ_ONLY_OPTIMAL
+                let barrier_mip_0_to_3 = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .image(self.transmission_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: mip_levels - 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+
+                let barrier_mip_4 = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .image(self.transmission_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: mip_levels - 1,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+
+                let barrier_swapchain_back = vk::ImageMemoryBarrier::default()
                     .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                     .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
                     .image(image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -668,79 +832,64 @@ impl RenderPass for GlassSceneRenderPass {
                         layer_count: 1,
                     });
 
-                // 5. Transition transmission_image -> SHADER_READ_ONLY_OPTIMAL
-                let b4 = vk::ImageMemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
-                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image(self.transmission_image)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
+                let barriers_post_copy = [barrier_mip_0_to_3, barrier_mip_4, barrier_swapchain_back];
+                context.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &barriers_post_copy,
+                );
 
                 self.transmission_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
 
-                let back_barriers = [b3, b4];
-                let dep_trans_back = vk::DependencyInfo::default().image_memory_barriers(&back_barriers);
-                context.device.cmd_pipeline_barrier2(cmd, &dep_trans_back);
-
-                // 6. Dessin de la Dalle Translucide
-                let slab_color_attachment = vk::RenderingAttachmentInfo::default()
+                // 5. Rendu de la dalle avec Shading GLSL & Mipmaps Vulkan Hardware
+                let color_attachment_slab = vk::RenderingAttachmentInfo::default()
                     .image_view(view)
                     .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .load_op(vk::AttachmentLoadOp::LOAD)
                     .store_op(vk::AttachmentStoreOp::STORE);
 
-                let slab_depth_attachment = vk::RenderingAttachmentInfo::default()
+                let depth_attachment_slab = vk::RenderingAttachmentInfo::default()
                     .image_view(self.depth_image_view)
                     .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                     .load_op(vk::AttachmentLoadOp::LOAD)
                     .store_op(vk::AttachmentStoreOp::STORE);
 
-                let slab_rendering_info = vk::RenderingInfo::default()
-                    .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent })
+                let rendering_info_slab = vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: context.swapchain_extent,
+                    })
                     .layer_count(1)
-                    .color_attachments(std::slice::from_ref(&slab_color_attachment))
-                    .depth_attachment(&slab_depth_attachment);
+                    .color_attachments(std::slice::from_ref(&color_attachment_slab))
+                    .depth_attachment(&depth_attachment_slab);
 
-                context.device.cmd_begin_rendering(cmd, &slab_rendering_info);
+                context.device.cmd_begin_rendering(cmd, &rendering_info_slab);
+                context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+
                 context.device.cmd_set_viewport(cmd, 0, &[viewport]);
                 context.device.cmd_set_scissor(cmd, 0, &[scissor]);
 
-                context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-                context.device.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline_layout,
-                    0,
-                    &[self.descriptor_set],
-                    &[],
-                );
-                context.device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
-                context.device.cmd_bind_index_buffer(cmd, self.index_buffer, 0, vk::IndexType::UINT32);
-
-                let model = Mat4::from_translation(instance.position + Vec3::new(0.0, osc, 0.0))
+                let rot_y = if idx == 1 { osc } else { -osc };
+                let model_matrix = Mat4::from_translation(instance.position)
                     * Mat4::from_rotation_z(instance.rotation_z)
+                    * Mat4::from_rotation_y(rot_y)
                     * Mat4::from_rotation_x(instance.rotation_x);
 
-                let mvp = proj * view_matrix * model;
-                let normal_matrix = model.inverse().transpose();
+                let mvp_matrix = proj * view_matrix * model_matrix;
+                let normal_matrix = model_matrix.inverse().transpose();
 
-                let push_payload = GlassPushConstants {
-                    mvp_matrix: mvp.to_cols_array(),
-                    model_matrix: model.to_cols_array(),
-                    normal_matrix: normal_matrix.to_cols_array(),
-                    glass_tint: instance.tint.to_array(),
+                let push_constants = GlassPushConstants {
+                    mvp_matrix,
+                    model_matrix,
+                    normal_matrix,
+                    glass_tint: instance.tint,
                 };
 
-                let push_bytes = bytemuck::bytes_of(&push_payload);
+                let push_bytes = bytemuck::bytes_of(&push_constants);
                 context.device.cmd_push_constants(
                     cmd,
                     self.pipeline_layout,
@@ -749,19 +898,29 @@ impl RenderPass for GlassSceneRenderPass {
                     push_bytes,
                 );
 
+                context.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout,
+                    0,
+                    &[self.descriptor_set],
+                    &[],
+                );
+
+                context.device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
+                context.device.cmd_bind_index_buffer(cmd, self.index_buffer, 0, vk::IndexType::UINT32);
+
                 context.device.cmd_draw_indexed(cmd, self.index_count, 1, 0, 0, 0);
 
                 context.device.cmd_end_rendering(cmd);
             }
 
-            // --- Transition finale pour Présentation à l'écran ---
-            let barrier_to_present = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
-                .dst_access_mask(vk::AccessFlags2::NONE)
+            // E. Transition Finale Swapchain -> PRESENT_SRC_KHR
+            let barrier_color_to_present = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::NONE)
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -771,295 +930,183 @@ impl RenderPass for GlassSceneRenderPass {
                     layer_count: 1,
                 });
 
-            let dependency_info_present = vk::DependencyInfo::default()
-                .image_memory_barriers(std::slice::from_ref(&barrier_to_present));
-
-            context.device.cmd_pipeline_barrier2(cmd, &dependency_info_present);
+            context.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier_color_to_present],
+            );
         }
     }
 }
 
-/// Moteur principal orchestrant le cycle de trame Vulkan 1.4 Native.
+/// Moteur de Rendu 3D Principal AegisEngine (Pure Vulkan 1.4 Native).
 pub struct Engine {
     pub gpu: GpuContext,
-    pub render_graph: RenderGraph,
-    pub command_pool: vk::CommandPool,
-    pub command_buffer: vk::CommandBuffer,
-    pub image_available_semaphore: vk::Semaphore,
-    pub render_finished_semaphore: vk::Semaphore,
-    pub in_flight_fence: vk::Fence,
+    pub render_pass: GlassSceneRenderPass,
     pub frame_count: u64,
-    glass_pass: GlassSceneRenderPass,
-    memory_properties: vk::PhysicalDeviceMemoryProperties,
 }
 
 impl Engine {
     pub async fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
         let gpu = GpuContext::new(window).await?;
-        let memory_properties = unsafe { gpu.instance.get_physical_device_memory_properties(gpu.physical_device) };
-        let render_graph = RenderGraph::new();
-
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(gpu.graphics_queue.family_index)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-
-        let command_pool = unsafe { gpu.device.create_command_pool(&pool_info, None)? };
-
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-
-        let command_buffers = unsafe { gpu.device.allocate_command_buffers(&alloc_info)? };
-        let command_buffer = command_buffers[0];
-
-        let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-
-        let image_available_semaphore = unsafe { gpu.device.create_semaphore(&semaphore_info, None)? };
-        let render_finished_semaphore = unsafe { gpu.device.create_semaphore(&semaphore_info, None)? };
-        let in_flight_fence = unsafe { gpu.device.create_fence(&fence_info, None)? };
-
-        let glass_pass = GlassSceneRenderPass::new(&gpu, &memory_properties)?;
+        let memory_props = unsafe { gpu.instance.get_physical_device_memory_properties(gpu.physical_device) };
+        let render_pass = GlassSceneRenderPass::new(&gpu, &memory_props)?;
 
         Ok(Self {
             gpu,
-            render_graph,
-            command_pool,
-            command_buffer,
-            image_available_semaphore,
-            render_finished_semaphore,
-            in_flight_fence,
+            render_pass,
             frame_count: 0,
-            glass_pass,
-            memory_properties,
         })
     }
 
-    pub fn capture_screenshot(&mut self, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let width = self.gpu.swapchain_extent.width;
-        let height = self.gpu.swapchain_extent.height;
-        let size = (width * height * 4) as vk::DeviceSize;
+    pub fn render_frame(&mut self, window: &Window) {
+        if let Ok((cmd, image_index)) = self.gpu.begin_frame() {
+            self.render_pass.execute(&self.gpu, cmd, image_index);
+            let _ = self.gpu.end_frame(cmd, image_index, window);
+            self.frame_count += 1;
+        }
+    }
+
+    pub fn capture_screenshot(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let extent = self.gpu.swapchain_extent;
+        let format = self.gpu.swapchain_format;
+        let image = self.gpu.swapchain_images[0];
+
+        let buffer_size = (extent.width * extent.height * 4) as vk::DeviceSize;
+        let memory_props = unsafe { self.gpu.instance.get_physical_device_memory_properties(self.gpu.physical_device) };
 
         let (staging_buffer, staging_memory) = MemoryManager::create_buffer(
             &self.gpu.device,
-            &self.memory_properties,
-            size,
+            &memory_props,
+            buffer_size,
             vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
 
+        let cmd = self.gpu.begin_single_time_commands()?;
+
+        let barrier_to_src = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::NONE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
         unsafe {
-            let cmd_alloc = vk::CommandBufferAllocateInfo::default()
-                .command_pool(self.command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
+            self.gpu.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier_to_src],
+            );
+        }
 
-            let cmd = self.gpu.device.allocate_command_buffers(&cmd_alloc)?[0];
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            });
 
-            let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.gpu.device.begin_command_buffer(cmd, &begin_info)?;
+        unsafe {
+            self.gpu.device.cmd_copy_image_to_buffer(
+                cmd,
+                image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                staging_buffer,
+                &[region],
+            );
+        }
 
-            let image = self.gpu.swapchain_images[0];
+        let barrier_back = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .dst_access_mask(vk::AccessFlags::NONE)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
 
-            let barrier_src = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
+        unsafe {
+            self.gpu.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier_back],
+            );
+        }
 
-            let dep1 = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_src));
-            self.gpu.device.cmd_pipeline_barrier2(cmd, &dep1);
+        self.gpu.end_single_time_commands(cmd)?;
 
-            let region = vk::BufferImageCopy::default()
-                .buffer_offset(0)
-                .buffer_row_length(0)
-                .buffer_image_height(0)
-                .image_subresource(vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                })
-                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                .image_extent(vk::Extent3D { width, height, depth: 1 });
-
-            self.gpu.device.cmd_copy_image_to_buffer(cmd, image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, staging_buffer, &[region]);
-
-            let barrier_dst = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
-                .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
-                .dst_access_mask(vk::AccessFlags2::NONE)
-                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-
-            let dep2 = vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_dst));
-            self.gpu.device.cmd_pipeline_barrier2(cmd, &dep2);
-
-            self.gpu.device.end_command_buffer(cmd)?;
-
-            let command_buffers = [cmd];
-            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-            self.gpu.device.queue_submit(self.gpu.graphics_queue.queue, &[submit_info], vk::Fence::null())?;
-            self.gpu.device.queue_wait_idle(self.gpu.graphics_queue.queue)?;
-
-            self.gpu.device.free_command_buffers(self.command_pool, &[cmd]);
-
-            let ptr = self.gpu.device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty())? as *const u8;
-            let bgra_slice = std::slice::from_raw_parts(ptr, size as usize);
-
-            let mut rgb_bytes = Vec::with_capacity((width * height * 3) as usize);
-            for pixel in bgra_slice.chunks_exact(4) {
-                rgb_bytes.push(pixel[2]); // R
-                rgb_bytes.push(pixel[1]); // G
-                rgb_bytes.push(pixel[0]); // B
-            }
-
+        let mut raw_pixels = vec![0u8; buffer_size as usize];
+        unsafe {
+            let data_ptr = self.gpu.device.map_memory(staging_memory, 0, buffer_size, vk::MemoryMapFlags::empty())?;
+            std::ptr::copy_nonoverlapping(data_ptr as *const u8, raw_pixels.as_mut_ptr(), buffer_size as usize);
             self.gpu.device.unmap_memory(staging_memory);
             self.gpu.device.destroy_buffer(staging_buffer, None);
             self.gpu.device.free_memory(staging_memory, None);
+        }
 
-            use std::io::Write;
-            let is_png = output_path.ends_with(".png");
-            let ppm_path = if is_png {
-                format!("{}.ppm", output_path)
-            } else {
-                output_path.to_string()
-            };
-
-            let mut file = std::fs::File::create(&ppm_path)?;
-            let header = format!("P6\n{} {}\n255\n", width, height);
-            file.write_all(header.as_bytes())?;
-            file.write_all(&rgb_bytes)?;
-
-            if is_png {
-                let status = std::process::Command::new("convert")
-                    .arg(&ppm_path)
-                    .arg(output_path)
-                    .status();
-                let _ = std::fs::remove_file(&ppm_path);
-                if let Ok(s) = status {
-                    if s.success() {
-                        log::info!("Screenshot PNG VRAM Vulkan 1.4 généré avec succès : {}", output_path);
-                    } else {
-                        log::warn!("Échec de conversion PNG via convert, fichier PPM conservé.");
-                    }
-                }
-            } else {
-                log::info!("Screenshot VRAM Vulkan 1.4 exporté avec succès : {}", output_path);
+        if format == vk::Format::B8G8R8A8_SRGB || format == vk::Format::B8G8R8A8_UNORM {
+            for pixel in raw_pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
             }
+        }
+
+        let temp_ppm = format!("{}.ppm", path);
+        let mut ppm_data = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+        for pixel in raw_pixels.chunks_exact(4) {
+            ppm_data.push(pixel[0]);
+            ppm_data.push(pixel[1]);
+            ppm_data.push(pixel[2]);
+        }
+
+        std::fs::write(&temp_ppm, ppm_data)?;
+        let convert_status = std::process::Command::new("magick")
+            .arg("convert")
+            .arg(&temp_ppm)
+            .arg(path)
+            .status()
+            .or_else(|_| std::process::Command::new("convert").arg(&temp_ppm).arg(path).status())?;
+
+        let _ = std::fs::remove_file(&temp_ppm);
+
+        if convert_status.success() {
+            log::info!("Screenshot PNG VRAM Vulkan 1.4 généré avec succès : {}", path);
         }
 
         Ok(())
-    }
-
-    pub fn render_frame(&mut self, window: &Window) {
-        self.frame_count += 1;
-        unsafe {
-            let _ = self.gpu.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX);
-
-            let (image_index, _is_suboptimal) = match self.gpu.swapchain_loader.acquire_next_image(
-                self.gpu.swapchain,
-                u64::MAX,
-                self.image_available_semaphore,
-                vk::Fence::null(),
-            ) {
-                Ok(res) => res,
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.gpu.resize(window);
-                    return;
-                }
-                Err(e) => {
-                    log::error!("Erreur d'acquisition de l'image swapchain: {:?}", e);
-                    return;
-                }
-            };
-
-            let _ = self.gpu.device.reset_fences(&[self.in_flight_fence]);
-            let _ = self.gpu.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty());
-
-            let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            let _ = self.gpu.device.begin_command_buffer(self.command_buffer, &begin_info);
-
-            self.glass_pass.execute(&self.gpu, self.command_buffer, image_index as usize);
-
-            let _ = self.gpu.device.end_command_buffer(self.command_buffer);
-
-            let wait_semaphores = [self.image_available_semaphore];
-            let signal_semaphores = [self.render_finished_semaphore];
-            let wait_dst_stage_mask = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let command_buffers = [self.command_buffer];
-
-            let submit_info = vk::SubmitInfo::default()
-                .wait_semaphores(&wait_semaphores)
-                .wait_dst_stage_mask(&wait_dst_stage_mask)
-                .command_buffers(&command_buffers)
-                .signal_semaphores(&signal_semaphores);
-
-            let _ = self.gpu.device.queue_submit(self.gpu.graphics_queue.queue, &[submit_info], self.in_flight_fence);
-
-            let swapchains = [self.gpu.swapchain];
-            let image_indices = [image_index];
-
-            let present_info = vk::PresentInfoKHR::default()
-                .wait_semaphores(&signal_semaphores)
-                .swapchains(&swapchains)
-                .image_indices(&image_indices);
-
-            let result = self.gpu.swapchain_loader.queue_present(self.gpu.graphics_queue.queue, &present_info);
-
-            if result == Err(vk::Result::ERROR_OUT_OF_DATE_KHR) || result == Ok(true) {
-                self.gpu.resize(window);
-            }
-        }
-    }
-}
-
-impl Drop for Engine {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = self.gpu.device.device_wait_idle();
-            self.gpu.device.destroy_pipeline(self.glass_pass.bg_pipeline, None);
-            self.gpu.device.destroy_pipeline_layout(self.glass_pass.bg_pipeline_layout, None);
-            self.gpu.device.destroy_descriptor_pool(self.glass_pass.descriptor_pool, None);
-            self.gpu.device.destroy_descriptor_set_layout(self.glass_pass.descriptor_set_layout, None);
-            self.gpu.device.destroy_sampler(self.glass_pass.transmission_sampler, None);
-            self.gpu.device.destroy_image_view(self.glass_pass.transmission_image_view, None);
-            self.gpu.device.destroy_image(self.glass_pass.transmission_image, None);
-            self.gpu.device.free_memory(self.glass_pass._transmission_memory, None);
-            self.gpu.device.destroy_image_view(self.glass_pass.depth_image_view, None);
-            self.gpu.device.destroy_image(self.glass_pass.depth_image, None);
-            self.gpu.device.free_memory(self.glass_pass._depth_memory, None);
-            self.gpu.device.destroy_pipeline(self.glass_pass.pipeline, None);
-            self.gpu.device.destroy_pipeline_layout(self.glass_pass.pipeline_layout, None);
-            self.gpu.device.destroy_buffer(self.glass_pass.vertex_buffer, None);
-            self.gpu.device.free_memory(self.glass_pass._vertex_memory, None);
-            self.gpu.device.destroy_buffer(self.glass_pass.index_buffer, None);
-            self.gpu.device.free_memory(self.glass_pass._index_memory, None);
-            self.gpu.device.destroy_semaphore(self.image_available_semaphore, None);
-            self.gpu.device.destroy_semaphore(self.render_finished_semaphore, None);
-            self.gpu.device.destroy_fence(self.in_flight_fence, None);
-            self.gpu.device.destroy_command_pool(self.command_pool, None);
-        }
-        log::info!("Ressources 3D et synchronisations Vulkan 1.4 libérées.");
     }
 }
