@@ -11,8 +11,8 @@ layout(push_constant) uniform PushConstants {
     mat4 mvp_matrix;
     mat4 model_matrix;
     mat4 normal_matrix;
-    vec4 glass_tint; // RGB: Teinte du verre, A: Alpha (1.0)
-    vec4 params;     // X: Rugosité (0.0 = Cristallin, 1.0 = Dépoli), Y: IOR (1.48)
+    vec4 glass_tint; // RGB: Couleur du verre, A: Translucidité
+    vec4 params;     // X: Rugosité, Y: IOR (1.48)
 } pc;
 
 layout(set = 0, binding = 0) uniform texture2D transmission_texture;
@@ -22,7 +22,6 @@ layout(location = 0) out vec4 out_color;
 
 const float PI = 3.14159265359;
 
-// Approximation Fresnel de Schlick (F0 = 0.08 pour le verre polie)
 float fresnel_schlick(float cos_theta, float f0) {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 3.5);
 }
@@ -35,10 +34,9 @@ void main() {
     float NdotV = abs(dot(N, V));
 
     float ior = pc.params.y > 0.0 ? pc.params.y : 1.48; // Indice de réfraction du verre = 1.48
-    float epaisseur = pc.glass_tint.w > 0.0 ? pc.glass_tint.w : 0.16;
 
     // ------------------------------------------------------------------------
-    // 1. REFRACTION OPTIQUE SNELL-DESCARTES (Déformation des formes sous le verre)
+    // 1. REFRACTION OPTIQUE SNELL-DESCARTES (Déformation des contours sous le verre)
     // ------------------------------------------------------------------------
     float eta = 1.0 / ior;
     float k = 1.0 - eta * eta * (1.0 - NdotV * NdotV);
@@ -47,44 +45,34 @@ void main() {
         refract_dir = -V * eta + N * (eta * NdotV - sqrt(k));
     }
 
-    // Déformation optique exacte des UV de l'écran par la normale biseautée (Snell Optical Bend)
-    vec2 refraction_offset = (N.xy * 0.16 + refract_dir.xy * 0.20) * (1.0 - N.z * N.z * 0.60);
-
-    // Échantillonnage de l'écran VRAM capturé avec la déformation de réfraction
+    // Déplacement optique Snell accentué par la normale biseautée
+    vec2 refraction_offset = refract_dir.xy * 0.28 + N.xy * 0.18;
     vec2 uv_sample = clamp(in_screen_uv + refraction_offset, vec2(0.001), vec2(0.999));
     vec3 fond_transmis = texture(sampler2D(transmission_texture, transmission_sampler), uv_sample).rgb;
 
     // ------------------------------------------------------------------------
-    // 2. TRANSMISSION DIELECTRIQUE & PURETÉ DES TEINTES (Pas de zones sombres)
+    // 2. TRANSMISSION CRISTALLINE (Conservation des couleurs vives sous-jacentes)
     // ------------------------------------------------------------------------
-    // Translucidité physique diélectrique : conserve la vivacité des formes arrière tout en colorant le verre
-    vec3 couleur_transmise = mix(fond_transmis, pc.glass_tint.rgb, 0.35);
+    vec3 couleur_transmise = mix(fond_transmis, pc.glass_tint.rgb, 0.22);
 
     // ------------------------------------------------------------------------
-    // 3. FRESNEL CONTINU 360° & REFLETS SPÉCULAIRES HIGH-GLOSS (Brillance Verre Polie)
+    // 3. FIL LUMINEUX CONTINU FRESNEL SUR 360° (Tranche Cristalline hyper brillante)
     // ------------------------------------------------------------------------
     float fresnel = fresnel_schlick(NdotV, 0.08);
 
     vec3 lumière_clef = normalize(vec3(3.2, 4.0, 3.0));
-    vec3 lumière_liseré = normalize(vec3(-3.5, -2.0, 3.0));
-
     vec3 H_clef = normalize(V + lumière_clef);
-    vec3 H_liseré = normalize(V + lumière_liseré);
 
-    // Reflet spéculaire de surface polie très vif (High-Gloss Glass Shine)
-    float spec_surface = pow(max(dot(N, H_clef), 0.0), 128.0) * 0.70 * fresnel;
+    // Reflet spéculaire de surface très poli
+    float spec_surface = pow(max(dot(N, H_clef), 0.0), 128.0) * 0.75 * fresnel;
     vec3 reflet_surface = vec3(1.0, 1.0, 1.0) * spec_surface;
 
-    // FRESNEL PERIMETRIQUE CONTINU SUR 360° (Contour Lumineux sur la tranche rase)
-    float fresnel_perimetre = pow(1.0 - NdotV, 3.0) * 0.85;
-    vec3 reflet_perimetre = vec3(0.92, 0.97, 1.00) * fresnel_perimetre;
+    // FIL LUMINEUX CONTINU TRES FIN ET HYPER BRILLANT (360° Perimeter Crystal Rim)
+    float fil_lumineux = pow(1.0 - NdotV, 6.0) * 2.8;
+    vec3 rim_cristallin = vec3(0.85, 0.94, 1.00) * fil_lumineux;
 
-    // Éclat spéculaire additionnel accroché sur la courbure du biseau
-    float spec_liseré = pow(max(dot(N, H_liseré), 0.0), 96.0) * 90.0;
-    vec3 glow_cyan = vec3(0.70, 0.95, 1.00) * spec_liseré * step(0.10, 1.0 - abs(N.z));
+    // Assemblage final pure matière verre
+    vec3 rgb_final = couleur_transmise + reflet_surface + rim_cristallin;
 
-    // Assemblage final pure matière de verre
-    vec3 rgb_final = couleur_transmise + reflet_surface + reflet_perimetre + glow_cyan;
-
-    out_color = vec4(clamp(rgb_final, 0.0, 1.0), 1.0);
+    out_color = vec4(clamp(rgb_final, vec3(0.0), vec3(1.0)), 0.65);
 }
