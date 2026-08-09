@@ -22,9 +22,9 @@ layout(location = 0) out vec4 out_color;
 
 const float PI = 3.14159265359;
 
-// Formule de Réflexion Spéculaire Fresnel (Approximation de Schlick F0 = 0.08 pour le verre)
+// Formule de Réflexion Spéculaire Fresnel (Approximation de Schlick F0 = 0.08 pour le verre polie)
 float fresnel_schlick(float cos_theta, float f0) {
-    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 4.0);
+    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 3.5);
 }
 
 void main() {
@@ -48,14 +48,14 @@ void main() {
         refract_dir = -V * eta + N * (eta * NdotV - sqrt(k));
     }
 
-    // Déformation optique continue sur tous les bords
-    vec2 refraction_offset = refract_dir.xy * (epaisseur * 0.40) + N.xy * (0.06 * (1.0 - NdotV));
+    // Déformation optique continue sur les bords biseautés arrondis (Snell Optical Distortion)
+    vec2 refraction_offset = (N.xy * 0.14 + refract_dir.xy * 0.16) * (1.0 - N.z * N.z * 0.65);
 
     // ------------------------------------------------------------------------
     // 2. INTEGRALE DE DISPERSION LAITEUSE (Flou Pyramide Mipmaps VRAM)
     // ------------------------------------------------------------------------
-    float mip_level = rugosite * 4.0;
-    float r = rugosite * 0.032;
+    float mip_level = rugosite * 3.8;
+    float r = rugosite * 0.028;
     vec2 offsets[9] = vec2[](
         vec2(0.0, 0.0),
         vec2(-r, -r), vec2(r, -r), vec2(-r, r), vec2(r, r),
@@ -69,18 +69,17 @@ void main() {
     }
 
     // ------------------------------------------------------------------------
-    // 3. TRANSMISSION LUMINEUSE CONTINU & CONSERVATION DE COULEUR (Pas d'extinction terne)
+    // 3. TRANSMISSION LUMINEUSE CONTINU (Preservation des Couleurs Vives du Fond)
     // ------------------------------------------------------------------------
     float trajet_optique = epaisseur / (NdotV + 0.10);
-    // Atténuation ultra-doucement dosée pour préserver 90%+ des couleurs sous-jacentes (Rouge, Vert)
-    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 0.15 + vec3(0.002);
+    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 0.08 + vec3(0.001);
     vec3 attenuation_beer_lambert = exp(-sigma_absorption * trajet_optique);
 
     vec3 fond_attenué = fond_transmis * attenuation_beer_lambert;
-    vec3 couleur_transmise = mix(fond_attenué, pc.glass_tint.rgb * fond_attenué, 0.15);
+    vec3 couleur_transmise = mix(fond_attenué, pc.glass_tint.rgb * fond_attenué, 0.12);
 
     // ------------------------------------------------------------------------
-    // 4. EFFET FRESNEL SUR TOUT LE PERIMETRE & SPECULAIRE STUDIO (360° Rim Light)
+    // 4. BRILLANCE HIGH-GLOSS, FRESNEL 360° & REFLETS STUDIO DE SURFACE
     // ------------------------------------------------------------------------
     float fresnel = fresnel_schlick(NdotV, 0.08);
 
@@ -90,20 +89,19 @@ void main() {
     vec3 H_clef = normalize(V + lumière_clef);
     vec3 H_liseré = normalize(V + lumière_liseré);
 
-    // Reflet spéculaire de surface
-    float spec_surface = pow(max(dot(N, H_clef), 0.0), 32.0) * 0.35 * fresnel;
-    vec3 reflet_surface = vec3(0.96, 0.99, 1.00) * spec_surface;
+    // Spéculaire de surface polie très vif (High-Gloss Glass Shine)
+    float spec_surface = pow(max(dot(N, H_clef), 0.0), 128.0) * 0.60 * fresnel;
+    vec3 reflet_surface = vec3(0.98, 1.00, 1.00) * spec_surface;
 
-    // FRESNEL SUR TOUT LE PERIMETRE (360° du contour de la forme)
-    float fresnel_perimetre = pow(1.0 - NdotV, 3.5) * 0.75;
-    vec3 reflet_perimetre = vec3(0.85, 0.95, 1.00) * fresnel_perimetre;
+    // FRESNEL CONTINU SUR LE PERIMETRE 360° (360° Luminous Crystal Rim)
+    float fresnel_perimetre = pow(1.0 - NdotV, 3.0) * 0.85;
+    vec3 reflet_perimetre = vec3(0.90, 0.96, 1.00) * fresnel_perimetre;
 
-    // Eclat additionnel sur le chanfrein 45°
-    float est_chanfrein = step(0.15, abs(N.z)) * step(abs(N.z), 0.88);
-    float spec_liseré = pow(max(dot(N, H_liseré), 0.0), 120.0) * 80.0;
-    vec3 glow_cyan = vec3(0.60, 0.92, 1.00) * spec_liseré * est_chanfrein;
+    // Liseré spéculaire éclatant additionnel sur la courbure du biseau
+    float spec_liseré = pow(max(dot(N, H_liseré), 0.0), 96.0) * 90.0;
+    vec3 glow_cyan = vec3(0.70, 0.95, 1.00) * spec_liseré * step(0.10, 1.0 - abs(N.z));
 
-    // Assemblage final pure lumière
+    // Assemblage final pure brillance de verre
     vec3 rgb_final = couleur_transmise + reflet_surface + reflet_perimetre + glow_cyan;
 
     out_color = vec4(clamp(rgb_final, 0.0, 1.0), 1.0);

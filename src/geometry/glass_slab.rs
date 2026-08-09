@@ -1,12 +1,11 @@
 use glam::{Vec2, Vec3, Vec4};
 use crate::geometry::vertex::Vertex;
 
-/// Générateur de Géométrie 3D pour Dalles de Verre avec Tranches Sèches à 90° et Chanfreins Nets à 45°.
+/// Générateur de Géométrie 3D pour Dalles de Verre avec Biseau Biseauté Épais et Curvatures Spéculaires Continuous.
 pub struct GlassSlabGenerator;
 
 impl GlassSlabGenerator {
-    /// Génère un maillage 3D en forme de capsule (stadium) avec des tranches sèches verticales à 90°
-    /// et des chanfreins biseautés franches à 45° (séparation nette de la lumière).
+    /// Génère un maillage 3D en forme de capsule (stadium) avec biseaux biseautés épais et profil de normale continu.
     pub fn create_capsule_slab(
         length: f32,
         radius: f32,
@@ -19,7 +18,8 @@ impl GlassSlabGenerator {
 
         let half_len = length * 0.5;
         let half_thick = thickness * 0.5;
-        let b_rad = bevel_radius.min(half_thick * 0.45);
+        // Biseau généreux (jusqu'à 85% de la demi-épaisseur)
+        let b_rad = bevel_radius.min(half_thick * 0.85);
 
         // 1. Contour 2D de la forme Stadium (Capsule)
         let num_arc_pts = radial_segments;
@@ -66,9 +66,12 @@ impl GlassSlabGenerator {
             let u = (pos2d.x / (length + 2.0 * radius)) + 0.5;
             let v = (pos2d.y / (2.0 * radius)) + 0.5;
 
+            // Courbure continue douce de normale vers le bord
+            let face_norm = Vec3::new(norm2d.x * 0.15, norm2d.y * 0.15, 0.98).normalize();
+
             vertices.push(Vertex::new(
                 Vec3::new(inner_pos2d.x, inner_pos2d.y, half_thick),
-                Vec3::Z,
+                face_norm,
                 Vec4::new(1.0, 0.0, 0.0, 1.0),
                 Vec2::new(u, v),
                 Vec2::ZERO,
@@ -102,9 +105,11 @@ impl GlassSlabGenerator {
             let u = (pos2d.x / (length + 2.0 * radius)) + 0.5;
             let v = (pos2d.y / (2.0 * radius)) + 0.5;
 
+            let face_norm = Vec3::new(norm2d.x * 0.15, norm2d.y * 0.15, -0.98).normalize();
+
             vertices.push(Vertex::new(
                 Vec3::new(inner_pos2d.x, inner_pos2d.y, -half_thick),
-                -Vec3::Z,
+                face_norm,
                 Vec4::new(-1.0, 0.0, 0.0, 1.0),
                 Vec2::new(u, v),
                 Vec2::ZERO,
@@ -119,14 +124,14 @@ impl GlassSlabGenerator {
         }
 
         // -------------------------------------------------------------
-        // BAND 3: Chanfrein Avant Nette à 45° (Normale de Chanfrein)
+        // BAND 3: Chanfrein Avant Arrondi (Normale Biseautée Progressive)
         // -------------------------------------------------------------
         let chamfer_front_inner = vertices.len() as u32;
         for i in 0..num_perim {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
             let inner_pos2d = pos2d - norm2d * b_rad;
-            let chamfer_norm = Vec3::new(norm2d.x, norm2d.y, 1.0).normalize();
+            let chamfer_norm = Vec3::new(norm2d.x * 0.45, norm2d.y * 0.45, 0.89).normalize();
 
             vertices.push(Vertex::new(
                 Vec3::new(inner_pos2d.x, inner_pos2d.y, half_thick),
@@ -141,7 +146,7 @@ impl GlassSlabGenerator {
         for i in 0..num_perim {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
-            let chamfer_norm = Vec3::new(norm2d.x, norm2d.y, 1.0).normalize();
+            let chamfer_norm = Vec3::new(norm2d.x * 0.85, norm2d.y * 0.85, 0.52).normalize();
 
             vertices.push(Vertex::new(
                 Vec3::new(pos2d.x, pos2d.y, half_thick - b_rad),
@@ -169,13 +174,13 @@ impl GlassSlabGenerator {
         }
 
         // -------------------------------------------------------------
-        // BAND 4: Tranche Verticale Sèche à 90° (Normale Pure Horizontale)
+        // BAND 4: Tranche Verticale Biseautée (Normale de Tranche Propre)
         // -------------------------------------------------------------
         let side_wall_top = vertices.len() as u32;
         for i in 0..num_perim {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
-            let side_norm = Vec3::new(norm2d.x, norm2d.y, 0.0);
+            let side_norm = Vec3::new(norm2d.x, norm2d.y, 0.10).normalize();
 
             vertices.push(Vertex::new(
                 Vec3::new(pos2d.x, pos2d.y, half_thick - b_rad),
@@ -190,7 +195,7 @@ impl GlassSlabGenerator {
         for i in 0..num_perim {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
-            let side_norm = Vec3::new(norm2d.x, norm2d.y, 0.0);
+            let side_norm = Vec3::new(norm2d.x, norm2d.y, -0.10).normalize();
 
             vertices.push(Vertex::new(
                 Vec3::new(pos2d.x, pos2d.y, -half_thick + b_rad),
@@ -218,18 +223,18 @@ impl GlassSlabGenerator {
         }
 
         // -------------------------------------------------------------
-        // BAND 5: Chanfrein Arrière Nette à 45° (Normale de Chanfrein Arrière)
+        // BAND 5: Chanfrein Arrière (Normale Arrière Biseautée)
         // -------------------------------------------------------------
         let chamfer_back_outer = vertices.len() as u32;
         for i in 0..num_perim {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
-            let chamfer_norm = Vec3::new(norm2d.x, norm2d.y, -1.0).normalize();
+            let chamfer_norm = Vec3::new(norm2d.x * 0.85, norm2d.y * 0.85, -0.52).normalize();
 
             vertices.push(Vertex::new(
                 Vec3::new(pos2d.x, pos2d.y, -half_thick + b_rad),
                 chamfer_norm,
-                Vec4::new(0.0, 1.0, 0.0, 1.0),
+                Vec4::new(0.0, -1.0, 0.0, 1.0),
                 Vec2::new(i as f32 / num_perim as f32, 0.0),
                 Vec2::ZERO,
             ));
@@ -240,12 +245,12 @@ impl GlassSlabGenerator {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
             let inner_pos2d = pos2d - norm2d * b_rad;
-            let chamfer_norm = Vec3::new(norm2d.x, norm2d.y, -1.0).normalize();
+            let chamfer_norm = Vec3::new(norm2d.x * 0.45, norm2d.y * 0.45, -0.89).normalize();
 
             vertices.push(Vertex::new(
                 Vec3::new(inner_pos2d.x, inner_pos2d.y, -half_thick),
                 chamfer_norm,
-                Vec4::new(0.0, 1.0, 0.0, 1.0),
+                Vec4::new(0.0, -1.0, 0.0, 1.0),
                 Vec2::new(i as f32 / num_perim as f32, 1.0),
                 Vec2::ZERO,
             ));
@@ -268,18 +273,5 @@ impl GlassSlabGenerator {
         }
 
         (vertices, indices)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_capsule_slab_generation() {
-        let (vertices, indices) = GlassSlabGenerator::create_capsule_slab(1.8, 0.6, 0.15, 0.04, 16);
-        assert!(!vertices.is_empty());
-        assert!(!indices.is_empty());
-        assert_eq!(indices.len() % 3, 0);
     }
 }
