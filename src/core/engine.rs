@@ -450,7 +450,7 @@ impl GlassSceneRenderPass {
         };
 
         let instances = vec![
-            // 1. Dalle Capsule Arrière (Bas-Gauche, VERT ÉMERAUDE VIF 100% SATURÉ)
+            // 1. Dalle Capsule Arrière (Bas-Gauche, VERT ÉMERAUDE VIF)
             GlassSlabInstance {
                 position: Vec3::new(-0.18, -0.38, -0.40),
                 rotation_z: 34.0f32.to_radians(),
@@ -459,22 +459,22 @@ impl GlassSceneRenderPass {
                 tint: Vec4::new(0.00, 0.95, 0.20, 1.00),
                 rugosite: 0.35,
             },
-            // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, ROUGE RUBIS VIF 100% SATURÉ)
+            // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, ROUGE RUBIS VIF)
             GlassSlabInstance {
                 position: Vec3::new(0.10, -0.05, 0.00),
                 rotation_z: 34.0f32.to_radians(),
                 rotation_x: 2.0f32.to_radians(),
                 scale: Vec3::new(0.70, 0.70, 0.18),
-                tint: Vec4::new(0.95, 0.05, 0.15, 1.00),
+                tint: Vec4::new(0.95, 0.15, 0.25, 1.00),
                 rugosite: 0.25,
             },
-            // 3. Dalle Capsule Premier Plan (BLEU SAPHIR VIF 100% SATURÉ)
+            // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, BLEU SAPHIR VIF)
             GlassSlabInstance {
                 position: Vec3::new(-0.08, 0.28, 0.40),
                 rotation_z: -36.0f32.to_radians(),
                 rotation_x: -2.0f32.to_radians(),
                 scale: Vec3::new(0.68, 0.68, 0.16),
-                tint: Vec4::new(0.00, 0.50, 1.00, 1.00),
+                tint: Vec4::new(0.15, 0.45, 0.95, 1.00),
                 rugosite: 0.10,
             },
         ];
