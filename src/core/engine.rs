@@ -450,26 +450,26 @@ impl GlassSceneRenderPass {
         let instances = vec![
             // 1. Dalle Capsule Arrière (Bas-Droite, au fond)
             GlassSlabInstance {
-                position: Vec3::new(0.35, -0.65, -0.50),
+                position: Vec3::new(0.28, -0.45, -0.40),
                 rotation_z: -36.0f32.to_radians(),
                 rotation_x: -4.0f32.to_radians(),
-                scale: Vec3::new(1.50, 0.52, 0.18),
+                scale: Vec3::new(0.92, 0.38, 0.16),
                 tint: Vec4::new(0.55, 0.78, 0.95, 0.35),
             },
             // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, BLEU SAPHIR PROFOND EN DESSOUS)
             GlassSlabInstance {
-                position: Vec3::new(0.08, -0.05, 0.00),
+                position: Vec3::new(0.05, -0.05, 0.00),
                 rotation_z: 36.0f32.to_radians(),
                 rotation_x: 4.0f32.to_radians(),
-                scale: Vec3::new(1.95, 0.62, 0.24),
+                scale: Vec3::new(1.10, 0.44, 0.20),
                 tint: Vec4::new(0.04, 0.22, 0.78, 0.85),
             },
             // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, VERRE CLAIR CYAN FLOUTÉ AU-DESSUS)
             GlassSlabInstance {
-                position: Vec3::new(-0.25, 0.55, 0.40),
+                position: Vec3::new(-0.15, 0.35, 0.35),
                 rotation_z: -36.0f32.to_radians(),
                 rotation_x: -4.0f32.to_radians(),
-                scale: Vec3::new(1.85, 0.58, 0.22),
+                scale: Vec3::new(1.05, 0.42, 0.18),
                 tint: Vec4::new(0.85, 0.96, 1.00, 0.15),
             },
         ];
@@ -1003,7 +1003,8 @@ impl RenderPass for GlassSceneRenderPass {
                 let model_matrix = Mat4::from_translation(instance.position)
                     * Mat4::from_rotation_z(instance.rotation_z)
                     * Mat4::from_rotation_y(rot_y)
-                    * Mat4::from_rotation_x(instance.rotation_x);
+                    * Mat4::from_rotation_x(instance.rotation_x)
+                    * Mat4::from_scale(instance.scale);
 
                 let mvp_matrix = proj * view_matrix * model_matrix;
                 let normal_matrix = model_matrix.inverse().transpose();
