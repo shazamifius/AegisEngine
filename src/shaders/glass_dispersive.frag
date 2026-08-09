@@ -24,7 +24,7 @@ const float PI = 3.14159265359;
 
 // Formule de Réflexion Spéculaire Fresnel (Approximation de Schlick F0 = 0.08 pour le verre)
 float fresnel_schlick(float cos_theta, float f0) {
-    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 4.0);
 }
 
 void main() {
@@ -39,7 +39,7 @@ void main() {
     float epaisseur = pc.glass_tint.w;
 
     // ------------------------------------------------------------------------
-    // 1. REFRACTION OPTIQUE SNELL-DESCARTES AVEC TORSION GEOMETRIQUE UV
+    // 1. REFRACTION OPTIQUE SNELL-DESCARTES (Torsion & Déformation Optique UV)
     // ------------------------------------------------------------------------
     float eta = 1.0 / ior;
     float k = 1.0 - eta * eta * (1.0 - NdotV * NdotV);
@@ -48,14 +48,14 @@ void main() {
         refract_dir = -V * eta + N * (eta * NdotV - sqrt(k));
     }
 
-    // Déformation optique réelle : décalage UV amplifié selon la normale de surface (Snell Bend)
-    vec2 refraction_offset = refract_dir.xy * (epaisseur * 0.45) + N.xy * (0.08 * (1.0 - NdotV));
+    // Déformation optique continue sur tous les bords
+    vec2 refraction_offset = refract_dir.xy * (epaisseur * 0.40) + N.xy * (0.06 * (1.0 - NdotV));
 
     // ------------------------------------------------------------------------
     // 2. INTEGRALE DE DISPERSION LAITEUSE (Flou Pyramide Mipmaps VRAM)
     // ------------------------------------------------------------------------
-    float mip_level = rugosite * 4.2;
-    float r = rugosite * 0.035;
+    float mip_level = rugosite * 4.0;
+    float r = rugosite * 0.032;
     vec2 offsets[9] = vec2[](
         vec2(0.0, 0.0),
         vec2(-r, -r), vec2(r, -r), vec2(-r, r), vec2(r, r),
@@ -69,17 +69,18 @@ void main() {
     }
 
     // ------------------------------------------------------------------------
-    // 3. TRANSMITTANCE VOLUMETRIQUE BEER-LAMBERT & MECLANGE LUMINEUX
+    // 3. TRANSMISSION LUMINEUSE CONTINU & CONSERVATION DE COULEUR (Pas d'extinction terne)
     // ------------------------------------------------------------------------
     float trajet_optique = epaisseur / (NdotV + 0.10);
-    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 0.5 + vec3(0.005);
+    // Atténuation ultra-doucement dosée pour préserver 90%+ des couleurs sous-jacentes (Rouge, Vert)
+    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 0.15 + vec3(0.002);
     vec3 attenuation_beer_lambert = exp(-sigma_absorption * trajet_optique);
 
     vec3 fond_attenué = fond_transmis * attenuation_beer_lambert;
-    vec3 couleur_transmise = mix(fond_attenué, pc.glass_tint.rgb * fond_attenué, 0.25);
+    vec3 couleur_transmise = mix(fond_attenué, pc.glass_tint.rgb * fond_attenué, 0.15);
 
     // ------------------------------------------------------------------------
-    // 4. FRESNEL & REFLEXIONS SPECULAIRES ECLATANTES (Chanfrein Diamant 45°)
+    // 4. EFFET FRESNEL SUR TOUT LE PERIMETRE & SPECULAIRE STUDIO (360° Rim Light)
     // ------------------------------------------------------------------------
     float fresnel = fresnel_schlick(NdotV, 0.08);
 
@@ -89,22 +90,21 @@ void main() {
     vec3 H_clef = normalize(V + lumière_clef);
     vec3 H_liseré = normalize(V + lumière_liseré);
 
-    // Reflet spéculaire de surface très net
-    float spec_surface = pow(max(dot(N, H_clef), 0.0), 48.0) * 0.40 * fresnel;
+    // Reflet spéculaire de surface
+    float spec_surface = pow(max(dot(N, H_clef), 0.0), 32.0) * 0.35 * fresnel;
     vec3 reflet_surface = vec3(0.96, 0.99, 1.00) * spec_surface;
 
-    // Détection des chanfreins 45° et tranches 90°
+    // FRESNEL SUR TOUT LE PERIMETRE (360° du contour de la forme)
+    float fresnel_perimetre = pow(1.0 - NdotV, 3.5) * 0.75;
+    vec3 reflet_perimetre = vec3(0.85, 0.95, 1.00) * fresnel_perimetre;
+
+    // Eclat additionnel sur le chanfrein 45°
     float est_chanfrein = step(0.15, abs(N.z)) * step(abs(N.z), 0.88);
-    float est_tranche_verticale = step(abs(N.z), 0.15);
+    float spec_liseré = pow(max(dot(N, H_liseré), 0.0), 120.0) * 80.0;
+    vec3 glow_cyan = vec3(0.60, 0.92, 1.00) * spec_liseré * est_chanfrein;
 
-    // Liseré spéculaire éclatant (#88E5FF / #FFFFFF) accroché sur le chanfrein diamant 45°
-    float spec_liseré = pow(max(dot(N, H_liseré), 0.0), 120.0) * 110.0;
-    vec3 glow_cyan = vec3(0.55, 0.92, 1.00) * spec_liseré * est_chanfrein;
-
-    // Réfraction et assombrissement de tranche 90°
-    vec3 couleur_tranche = mix(couleur_transmise, vec3(0.04, 0.18, 0.45) * attenuation_beer_lambert, est_tranche_verticale * 0.65);
-
-    vec3 rgb_final = couleur_tranche + reflet_surface + glow_cyan;
+    // Assemblage final pure lumière
+    vec3 rgb_final = couleur_transmise + reflet_surface + reflet_perimetre + glow_cyan;
 
     out_color = vec4(clamp(rgb_final, 0.0, 1.0), 1.0);
 }
