@@ -11,7 +11,7 @@ layout(push_constant) uniform PushConstants {
     mat4 mvp_matrix;
     mat4 model_matrix;
     mat4 normal_matrix;
-    vec4 glass_tint; // RGB: Couleur de teinte optique du verre
+    vec4 glass_tint; // RGB: Teinte optique du verre
     vec4 params;     // X: Rugosité, Y: IOR (1.48)
 } pc;
 
@@ -46,26 +46,40 @@ void main() {
     vec3 fond_transmis = texture(sampler2D(transmission_texture, transmission_sampler), uv_sample).rgb;
 
     // ------------------------------------------------------------------------
-    // 2. FUSION OPTIQUE SPECTRALE (Mode Multiplication Lumineuse 2.0x / Overlay)
+    // 2. FUSION OPTIQUE SPECTRALE (Multiplication Lumineuse 2.0x Validée)
     // ------------------------------------------------------------------------
-    // Remplacement de la moyenne platte mix() par la vraie multiplication de filtre optique lumineux :
-    // La lumière du fond est filtrée par le verre avec compensation de luminance 2.0x (Pas de gris mort)
     vec3 fusion_optique = 2.0 * fond_transmis * pc.glass_tint.rgb;
     vec3 couleur_transmise = clamp(fusion_optique, vec3(0.0), vec3(1.0));
 
     // ------------------------------------------------------------------------
-    // 3. LIGNE FINE BLANCHE HYPER BRILLANTE SUR TOUT LE CONTOUR (360° Razor-Sharp Rim)
+    // 3. CONTOUR LUMINEUX BLANC SUR 360° (Silhouette Edge Rim)
     // ------------------------------------------------------------------------
-    float contour_brillant = pow(1.0 - NdotV, 8.0) * 4.5;
-    vec3 ligne_blanche = vec3(1.0, 1.0, 1.0) * contour_brillant;
+    // Smoothstep tranchant sur le bord extérieur pour une ligne fine blanche éclatante (#FFFFFF)
+    float fil_blanc_intensité = smoothstep(0.38, 0.05, NdotV) * 1.8;
+    vec3 ligne_blanche = vec3(1.0, 1.0, 1.0) * fil_blanc_intensité;
 
-    // Speculaire de surface polie
-    vec3 lumière_clef = normalize(vec3(3.2, 4.0, 3.0));
-    vec3 H_clef = normalize(V + lumière_clef);
-    float spec_surface = pow(max(dot(N, H_clef), 0.0), 128.0) * 0.85;
-    vec3 reflet_surface = vec3(1.0, 1.0, 1.0) * spec_surface;
+    // ------------------------------------------------------------------------
+    // 4. REFLETS SPÉCULAIRES NETS (Points d'éclat lumineux studio)
+    // ------------------------------------------------------------------------
+    vec3 lumière_spot1 = normalize(vec3(4.0, 5.0, 4.0));
+    vec3 lumière_spot2 = normalize(vec3(-2.0, 3.5, 5.0));
 
-    vec3 rgb_final = couleur_transmise + ligne_blanche + reflet_surface;
+    vec3 H1 = normalize(V + lumière_spot1);
+    vec3 H2 = normalize(V + lumière_spot2);
 
-    out_color = vec4(clamp(rgb_final, 0.0, 1.0), 1.0);
+    // Éclat spéculaire de surface très poli (Spot studio intense)
+    float spec1 = pow(max(dot(N, H1), 0.0), 256.0) * 1.6;
+    float spec2 = pow(max(dot(N, H2), 0.0), 96.0) * 0.5;
+    vec3 reflets_spéculaires = vec3(1.0, 1.0, 1.0) * (spec1 + spec2);
+
+    // ------------------------------------------------------------------------
+    // 5. TRANCHE CRISTALLINE FINESSE (Reflet translucide de la tranche)
+    // ------------------------------------------------------------------------
+    float tranche_finesse = smoothstep(0.65, 0.35, NdotV) * smoothstep(0.05, 0.25, NdotV) * 0.6;
+    vec3 reflet_tranche = vec3(0.90, 0.96, 1.00) * tranche_finesse;
+
+    // Assemblage final pure matière verre
+    vec3 rgb_final = couleur_transmise + ligne_blanche + reflets_spéculaires + reflet_tranche;
+
+    out_color = vec4(clamp(rgb_final, vec3(0.0), vec3(1.0)), 1.0);
 }
