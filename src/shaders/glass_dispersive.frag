@@ -32,9 +32,8 @@ void main() {
     float ior = pc.params.y > 0.0 ? pc.params.y : 1.48;
 
     // ------------------------------------------------------------------------
-    // 1. REFRACTION OPTIQUE LINEAIRE SANS ONDULATION NI VAGUE (Géométrie Droite)
+    // 1. REFRACTION OPTIQUE Snell Vectorielle Lisse
     // ------------------------------------------------------------------------
-    // Réfraction optique Snell vectorielle linéaire constante (Empêche toute vague/bosses sur les masques)
     float eta = 1.0 / ior;
     float k = 1.0 - eta * eta * (1.0 - NdotV * NdotV);
     vec3 refract_dir = -V;
@@ -42,41 +41,37 @@ void main() {
         refract_dir = -V * eta + N * (eta * NdotV - sqrt(k));
     }
 
-    // Offset vectoriel Snell linéaire constant
-    vec2 refraction_offset = refract_dir.xy * 0.08;
+    vec2 refraction_offset = refract_dir.xy * 0.05;
     vec2 uv_sample = clamp(in_screen_uv + refraction_offset, vec2(0.001), vec2(0.999));
     vec3 fond_transmis = texture(sampler2D(transmission_texture, transmission_sampler), uv_sample).rgb;
 
     // ------------------------------------------------------------------------
-    // 2. FUSION OPTIQUE CRISTALLINE (Superposition 2.0x Lumineuse)
+    // 2. FUSION OPTIQUE CRISTALLINE (Mode 2.0x Lumineux Validé)
     // ------------------------------------------------------------------------
-    // La tranche et le corps transmettent tous les deux la lumière avec filtrage optique 2.0x
     vec3 couleur_transmise = clamp(2.0 * fond_transmis * pc.glass_tint.rgb, vec3(0.0), vec3(1.0));
 
-    // Dégradé de lumière studio douce sur la surface
-    float éclairage_studio = 0.85 + 0.30 * max(dot(N, vec3(0.3, 0.6, 0.7)), 0.0);
-    couleur_transmise *= éclairage_studio;
+    // Dégradé doux de surface (Lumière de studio ambiante)
+    float éclairage_ambiant = 0.85 + 0.30 * max(dot(N, vec3(0.3, 0.6, 0.7)), 0.0);
+    couleur_transmise *= éclairage_ambiant;
 
     // ------------------------------------------------------------------------
-    // 3. REFLETS SPÉCULAIRES BLANCS PURS INTENSES (#FFFFFF) SUR LA TRANCHE ET LA SURFACE
+    // 3. INTENSE SPÉCULAIRE BLANC PUR (#FFFFFF) DE TRANCHE ET SURFACE POLIE
     // ------------------------------------------------------------------------
-    vec3 lumière_source1 = normalize(vec3(3.2, 4.5, 4.0));
-    vec3 lumière_source2 = normalize(vec3(-2.8, 3.2, 4.5));
+    vec3 lumière_fenêtre1 = normalize(vec3(4.0, 6.0, 5.0));
+    vec3 lumière_fenêtre2 = normalize(vec3(-3.0, 4.0, 4.5));
 
-    vec3 H1 = normalize(V + lumière_source1);
-    vec3 H2 = normalize(V + lumière_source2);
+    vec3 H1 = normalize(V + lumière_fenêtre1);
+    vec3 H2 = normalize(V + lumière_fenêtre2);
 
-    // Points chauds spéculaires blancs purs hyper intenses
-    float spec_tranche = pow(max(dot(N, H1), 0.0), 128.0) * 2.8;
-    float spec_surface = pow(max(dot(N, H2), 0.0), 256.0) * 1.5;
+    // Éclats spéculaires blancs purs très intenses (#FFFFFF)
+    float spec_spot1 = pow(max(dot(N, H1), 0.0), 256.0) * 3.5;
+    float spec_spot2 = pow(max(dot(N, H2), 0.0), 96.0) * 1.2;
+    vec3 reflets_blancs = vec3(1.0, 1.0, 1.0) * (spec_spot1 + spec_spot2);
 
-    vec3 reflets_blancs = vec3(1.0, 1.0, 1.0) * (spec_tranche + spec_surface);
+    // Liseré blanc pur très lumineux (#FFFFFF) sur la tranche
+    float liseré_tranche = pow(1.0 - NdotV, 6.0) * 4.5;
+    vec3 fil_lumineux = vec3(1.0, 1.0, 1.0) * liseré_tranche;
 
-    // Liseré blanc pur (#FFFFFF) très fin et très lumineux sur le périmètre de la tranche
-    float liseré_périmètre = pow(1.0 - NdotV, 7.0) * 4.0;
-    vec3 fil_lumineux = vec3(1.0, 1.0, 1.0) * liseré_périmètre;
-
-    // Assemblage final pure matière verre
     vec3 rgb_final = couleur_transmise + reflets_blancs + fil_lumineux;
 
     out_color = vec4(clamp(rgb_final, vec3(0.0), vec3(1.0)), 1.0);

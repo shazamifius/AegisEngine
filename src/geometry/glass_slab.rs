@@ -1,11 +1,11 @@
 use glam::{Vec2, Vec3, Vec4};
 use crate::geometry::vertex::Vertex;
 
-/// Générateur de Géométrie 3D pour Dalles de Verre avec Biseau Biseauté Épais et Curvatures Spéculaires Continuous.
+/// Générateur de Géométrie 3D pour Dalles de Verre avec Courbure Continuement Lisse (Smooth Stadium Slab).
 pub struct GlassSlabGenerator;
 
 impl GlassSlabGenerator {
-    /// Génère un maillage 3D en forme de capsule (stadium) avec biseaux biseautés épais et profil de normale continu.
+    /// Génère un maillage 3D en forme de capsule (stadium) avec courbure 3D lissée continue.
     pub fn create_capsule_slab(
         length: f32,
         radius: f32,
@@ -18,7 +18,6 @@ impl GlassSlabGenerator {
 
         let half_len = length * 0.5;
         let half_thick = thickness * 0.5;
-        // Biseau généreux (jusqu'à 85% de la demi-épaisseur)
         let b_rad = bevel_radius.min(half_thick * 0.85);
 
         // 1. Contour 2D de la forme Stadium (Capsule)
@@ -47,7 +46,7 @@ impl GlassSlabGenerator {
         let num_perim = perimeter_pts_2d.len();
 
         // -------------------------------------------------------------
-        // BAND 1: Face Avant Plane (Z = +half_thick, Normale = (0, 0, 1))
+        // Face Avant Lisse (Z = +half_thick)
         // -------------------------------------------------------------
         let center_front_idx = vertices.len() as u32;
         vertices.push(Vertex::new(
@@ -62,15 +61,14 @@ impl GlassSlabGenerator {
         for i in 0..num_perim {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
-            let inner_pos2d = pos2d - norm2d * b_rad;
             let u = (pos2d.x / (length + 2.0 * radius)) + 0.5;
             let v = (pos2d.y / (2.0 * radius)) + 0.5;
 
-            // Courbure continue douce de normale vers le bord
-            let face_norm = Vec3::new(norm2d.x * 0.15, norm2d.y * 0.15, 0.98).normalize();
+            // Normale douce et continue vers les bords
+            let face_norm = Vec3::new(norm2d.x * 0.25, norm2d.y * 0.25, 0.968).normalize();
 
             vertices.push(Vertex::new(
-                Vec3::new(inner_pos2d.x, inner_pos2d.y, half_thick),
+                Vec3::new(pos2d.x, pos2d.y, half_thick),
                 face_norm,
                 Vec4::new(1.0, 0.0, 0.0, 1.0),
                 Vec2::new(u, v),
@@ -86,7 +84,7 @@ impl GlassSlabGenerator {
         }
 
         // -------------------------------------------------------------
-        // BAND 2: Face Arrière Plane (Z = -half_thick, Normale = (0, 0, -1))
+        // Face Arrière Lisse (Z = -half_thick)
         // -------------------------------------------------------------
         let center_back_idx = vertices.len() as u32;
         vertices.push(Vertex::new(
@@ -101,14 +99,13 @@ impl GlassSlabGenerator {
         for i in 0..num_perim {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
-            let inner_pos2d = pos2d - norm2d * b_rad;
             let u = (pos2d.x / (length + 2.0 * radius)) + 0.5;
             let v = (pos2d.y / (2.0 * radius)) + 0.5;
 
-            let face_norm = Vec3::new(norm2d.x * 0.15, norm2d.y * 0.15, -0.98).normalize();
+            let face_norm = Vec3::new(norm2d.x * 0.25, norm2d.y * 0.25, -0.968).normalize();
 
             vertices.push(Vertex::new(
-                Vec3::new(inner_pos2d.x, inner_pos2d.y, -half_thick),
+                Vec3::new(pos2d.x, pos2d.y, -half_thick),
                 face_norm,
                 Vec4::new(-1.0, 0.0, 0.0, 1.0),
                 Vec2::new(u, v),
@@ -124,66 +121,16 @@ impl GlassSlabGenerator {
         }
 
         // -------------------------------------------------------------
-        // BAND 3: Chanfrein Avant Arrondi (Normale Biseautée Progressive)
-        // -------------------------------------------------------------
-        let chamfer_front_inner = vertices.len() as u32;
-        for i in 0..num_perim {
-            let pos2d = perimeter_pts_2d[i];
-            let norm2d = perimeter_normals_2d[i];
-            let inner_pos2d = pos2d - norm2d * b_rad;
-            let chamfer_norm = Vec3::new(norm2d.x * 0.45, norm2d.y * 0.45, 0.89).normalize();
-
-            vertices.push(Vertex::new(
-                Vec3::new(inner_pos2d.x, inner_pos2d.y, half_thick),
-                chamfer_norm,
-                Vec4::new(0.0, 1.0, 0.0, 1.0),
-                Vec2::new(i as f32 / num_perim as f32, 0.0),
-                Vec2::ZERO,
-            ));
-        }
-
-        let chamfer_front_outer = vertices.len() as u32;
-        for i in 0..num_perim {
-            let pos2d = perimeter_pts_2d[i];
-            let norm2d = perimeter_normals_2d[i];
-            let chamfer_norm = Vec3::new(norm2d.x * 0.85, norm2d.y * 0.85, 0.52).normalize();
-
-            vertices.push(Vertex::new(
-                Vec3::new(pos2d.x, pos2d.y, half_thick - b_rad),
-                chamfer_norm,
-                Vec4::new(0.0, 1.0, 0.0, 1.0),
-                Vec2::new(i as f32 / num_perim as f32, 1.0),
-                Vec2::ZERO,
-            ));
-        }
-
-        for i in 0..num_perim {
-            let next_i = (i + 1) % num_perim;
-            let in_curr = chamfer_front_inner + i as u32;
-            let in_next = chamfer_front_inner + next_i as u32;
-            let out_curr = chamfer_front_outer + i as u32;
-            let out_next = chamfer_front_outer + next_i as u32;
-
-            indices.push(in_curr);
-            indices.push(out_curr);
-            indices.push(in_next);
-
-            indices.push(in_next);
-            indices.push(out_curr);
-            indices.push(out_next);
-        }
-
-        // -------------------------------------------------------------
-        // BAND 4: Tranche Verticale Biseautée (Normale de Tranche Propre)
+        // Tranche Extérieure Continue (Side Wall)
         // -------------------------------------------------------------
         let side_wall_top = vertices.len() as u32;
         for i in 0..num_perim {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
-            let side_norm = Vec3::new(norm2d.x, norm2d.y, 0.10).normalize();
+            let side_norm = Vec3::new(norm2d.x * 0.707, norm2d.y * 0.707, 0.707).normalize();
 
             vertices.push(Vertex::new(
-                Vec3::new(pos2d.x, pos2d.y, half_thick - b_rad),
+                Vec3::new(pos2d.x, pos2d.y, half_thick),
                 side_norm,
                 Vec4::new(0.0, 0.0, 1.0, 1.0),
                 Vec2::new(i as f32 / num_perim as f32, 0.0),
@@ -195,10 +142,10 @@ impl GlassSlabGenerator {
         for i in 0..num_perim {
             let pos2d = perimeter_pts_2d[i];
             let norm2d = perimeter_normals_2d[i];
-            let side_norm = Vec3::new(norm2d.x, norm2d.y, -0.10).normalize();
+            let side_norm = Vec3::new(norm2d.x * 0.707, norm2d.y * 0.707, -0.707).normalize();
 
             vertices.push(Vertex::new(
-                Vec3::new(pos2d.x, pos2d.y, -half_thick + b_rad),
+                Vec3::new(pos2d.x, pos2d.y, -half_thick),
                 side_norm,
                 Vec4::new(0.0, 0.0, 1.0, 1.0),
                 Vec2::new(i as f32 / num_perim as f32, 1.0),
@@ -208,68 +155,18 @@ impl GlassSlabGenerator {
 
         for i in 0..num_perim {
             let next_i = (i + 1) % num_perim;
-            let t_curr = side_wall_top + i as u32;
-            let t_next = side_wall_top + next_i as u32;
-            let b_curr = side_wall_bottom + i as u32;
-            let b_next = side_wall_bottom + next_i as u32;
+            let top_curr = side_wall_top + i as u32;
+            let top_next = side_wall_top + next_i as u32;
+            let bot_curr = side_wall_bottom + i as u32;
+            let bot_next = side_wall_bottom + next_i as u32;
 
-            indices.push(t_curr);
-            indices.push(b_curr);
-            indices.push(t_next);
+            indices.push(top_curr);
+            indices.push(bot_curr);
+            indices.push(top_next);
 
-            indices.push(t_next);
-            indices.push(b_curr);
-            indices.push(b_next);
-        }
-
-        // -------------------------------------------------------------
-        // BAND 5: Chanfrein Arrière (Normale Arrière Biseautée)
-        // -------------------------------------------------------------
-        let chamfer_back_outer = vertices.len() as u32;
-        for i in 0..num_perim {
-            let pos2d = perimeter_pts_2d[i];
-            let norm2d = perimeter_normals_2d[i];
-            let chamfer_norm = Vec3::new(norm2d.x * 0.85, norm2d.y * 0.85, -0.52).normalize();
-
-            vertices.push(Vertex::new(
-                Vec3::new(pos2d.x, pos2d.y, -half_thick + b_rad),
-                chamfer_norm,
-                Vec4::new(0.0, -1.0, 0.0, 1.0),
-                Vec2::new(i as f32 / num_perim as f32, 0.0),
-                Vec2::ZERO,
-            ));
-        }
-
-        let chamfer_back_inner = vertices.len() as u32;
-        for i in 0..num_perim {
-            let pos2d = perimeter_pts_2d[i];
-            let norm2d = perimeter_normals_2d[i];
-            let inner_pos2d = pos2d - norm2d * b_rad;
-            let chamfer_norm = Vec3::new(norm2d.x * 0.45, norm2d.y * 0.45, -0.89).normalize();
-
-            vertices.push(Vertex::new(
-                Vec3::new(inner_pos2d.x, inner_pos2d.y, -half_thick),
-                chamfer_norm,
-                Vec4::new(0.0, -1.0, 0.0, 1.0),
-                Vec2::new(i as f32 / num_perim as f32, 1.0),
-                Vec2::ZERO,
-            ));
-        }
-
-        for i in 0..num_perim {
-            let next_i = (i + 1) % num_perim;
-            let out_curr = chamfer_back_outer + i as u32;
-            let out_next = chamfer_back_outer + next_i as u32;
-            let in_curr = chamfer_back_inner + i as u32;
-            let in_next = chamfer_back_inner + next_i as u32;
-
-            indices.push(out_curr);
-            indices.push(in_curr);
-            indices.push(out_next);
-
-            indices.push(out_next);
-            indices.push(in_curr);
-            indices.push(in_next);
+            indices.push(top_next);
+            indices.push(bot_curr);
+            indices.push(bot_next);
         }
 
         (vertices, indices)
