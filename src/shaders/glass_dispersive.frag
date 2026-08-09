@@ -62,13 +62,14 @@ void main() {
         fond_transmis += textureLod(sampler2D(transmission_texture, transmission_sampler), uv_sample, mip_level).rgb * (1.0 / 9.0);
     }
 
-    // 3. Transmittance Volumétrique Beer-Lambert & Pigmentation du Verre
+    // 3. Transmittance Volumétrique & Mélange Lumineux (Pas de multiplication soustractive noire)
     float trajet_optique = epaisseur / (NdotV + 0.10);
-    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 1.2 + vec3(0.01, 0.005, 0.00);
+    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 0.5 + vec3(0.005);
     vec3 attenuation_beer_lambert = exp(-sigma_absorption * trajet_optique);
 
-    // Multiplication par la teinte chromatique de la matière du verre
-    vec3 couleur_transmise = fond_transmis * attenuation_beer_lambert * pc.glass_tint.rgb;
+    // Translucidité physique lumineuse : conserve la clarté du fond tout en infusant la couleur du verre
+    vec3 fond_attenué = fond_transmis * attenuation_beer_lambert;
+    vec3 couleur_transmise = mix(fond_attenué, pc.glass_tint.rgb * fond_attenué, 0.25);
 
     // 4. Spéculaire Studio & Liseré Cyan sur les Tranches 45°
     float fresnel = fresnel_schlick(NdotV, 0.05);
@@ -79,7 +80,7 @@ void main() {
     vec3 H_clef = normalize(V + lumière_clef);
     vec3 H_liseré = normalize(V + lumière_liseré);
 
-    float spec_surface = pow(max(dot(N, H_clef), 0.0), 32.0) * 0.25 * fresnel;
+    float spec_surface = pow(max(dot(N, H_clef), 0.0), 32.0) * 0.22 * fresnel;
     vec3 reflet_surface = vec3(0.95, 0.98, 1.00) * spec_surface;
 
     float est_chanfrein = step(0.15, abs(N.z)) * step(abs(N.z), 0.88);
