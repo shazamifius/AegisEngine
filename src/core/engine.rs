@@ -1089,16 +1089,28 @@ impl Engine {
         })
     }
 
+    pub fn on_resize(&mut self, window: &Window) {
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        self.gpu.resize(window);
+        let memory_props = unsafe { self.gpu.instance.get_physical_device_memory_properties(self.gpu.physical_device) };
+        self.render_pass.recreate_framebuffer_resources(&self.gpu, &memory_props);
+    }
+
     pub fn render_frame(&mut self, window: &Window) {
-        let old_extent = self.gpu.swapchain_extent;
-        if let Ok((cmd, image_index)) = self.gpu.begin_frame(window) {
-            self.render_pass.execute(&self.gpu, cmd, image_index);
-            let _ = self.gpu.end_frame(cmd, image_index, window);
-            if self.gpu.swapchain_extent != old_extent {
-                let memory_props = unsafe { self.gpu.instance.get_physical_device_memory_properties(self.gpu.physical_device) };
-                self.render_pass.recreate_framebuffer_resources(&self.gpu, &memory_props);
+        match self.gpu.begin_frame(window) {
+            Ok((cmd, image_index)) => {
+                self.render_pass.execute(&self.gpu, cmd, image_index);
+                if self.gpu.end_frame(cmd, image_index, window).is_err() {
+                    self.on_resize(window);
+                }
+                self.frame_count += 1;
             }
-            self.frame_count += 1;
+            Err(_) => {
+                self.on_resize(window);
+            }
         }
     }
 

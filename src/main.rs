@@ -62,7 +62,7 @@ impl ApplicationHandler for AegisApp {
                 event_loop.exit();
             }
             WindowEvent::Resized(_new_size) => {
-                engine.gpu.resize(window);
+                engine.on_resize(window);
             }
             WindowEvent::RedrawRequested => {
                 engine.render_frame(window);
