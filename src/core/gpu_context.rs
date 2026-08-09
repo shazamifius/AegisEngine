@@ -243,15 +243,24 @@ impl GpuContext {
         })
     }
 
-    pub fn begin_frame(&mut self) -> Result<(vk::CommandBuffer, usize), Box<dyn std::error::Error>> {
+    pub fn begin_frame(&mut self, window: &Window) -> Result<(vk::CommandBuffer, usize), Box<dyn std::error::Error>> {
         unsafe {
             self.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX)?;
-            let (image_index, _) = self.swapchain_loader.acquire_next_image(
+            let result = self.swapchain_loader.acquire_next_image(
                 self.swapchain,
                 u64::MAX,
                 self.image_available_semaphore,
                 vk::Fence::null(),
-            )?;
+            );
+
+            let (image_index, _is_suboptimal) = match result {
+                Ok((idx, sub)) => (idx, sub),
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    self.resize(window);
+                    return Err("OUT_OF_DATE_KHR".into());
+                }
+                Err(err) => return Err(err.into()),
+            };
 
             self.device.reset_fences(&[self.in_flight_fence])?;
             let cmd = self.command_buffers[image_index as usize];
@@ -300,7 +309,7 @@ impl GpuContext {
 
             let result = self.swapchain_loader.queue_present(self.graphics_queue.queue, &present_info);
 
-            if result == Ok(true) || result == Err(vk::Result::ERROR_OUT_OF_DATE_KHR) {
+            if result == Ok(true) || result == Err(vk::Result::ERROR_OUT_OF_DATE_KHR) || result == Err(vk::Result::SUBOPTIMAL_KHR) {
                 self.resize(window);
             }
         }

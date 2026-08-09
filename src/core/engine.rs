@@ -43,7 +43,7 @@ pub struct GlassSceneRenderPass {
     descriptor_set: vk::DescriptorSet,
 
     transmission_image: vk::Image,
-    _transmission_memory: vk::DeviceMemory,
+    transmission_memory: vk::DeviceMemory,
     transmission_image_view: vk::ImageView,
     transmission_sampler: vk::Sampler,
     transmission_layout: vk::ImageLayout,
@@ -55,7 +55,7 @@ pub struct GlassSceneRenderPass {
     index_count: u32,
 
     depth_image: vk::Image,
-    _depth_memory: vk::DeviceMemory,
+    depth_memory: vk::DeviceMemory,
     depth_image_view: vk::ImageView,
 
     instances: Vec<GlassSlabInstance>,
@@ -485,7 +485,7 @@ impl GlassSceneRenderPass {
             descriptor_pool,
             descriptor_set,
             transmission_image,
-            _transmission_memory: transmission_memory,
+            transmission_memory,
             transmission_image_view,
             transmission_sampler,
             transmission_layout: vk::ImageLayout::UNDEFINED,
@@ -495,11 +495,139 @@ impl GlassSceneRenderPass {
             _index_memory: index_memory,
             index_count,
             depth_image,
-            _depth_memory: depth_memory,
+            depth_memory,
             depth_image_view,
             instances,
             start_time: Instant::now(),
         })
+    }
+
+    pub fn recreate_framebuffer_resources(
+        &mut self,
+        gpu: &GpuContext,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+    ) {
+        unsafe {
+            let _ = gpu.device.device_wait_idle();
+            gpu.device.destroy_image_view(self.transmission_image_view, None);
+            gpu.device.destroy_image(self.transmission_image, None);
+            gpu.device.free_memory(self.transmission_memory, None);
+
+            gpu.device.destroy_image_view(self.depth_image_view, None);
+            gpu.device.destroy_image(self.depth_image, None);
+            gpu.device.free_memory(self.depth_memory, None);
+
+            let mip_levels = 5u32;
+            let trans_img_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(gpu.swapchain_format)
+                .extent(vk::Extent3D {
+                    width: gpu.swapchain_extent.width,
+                    height: gpu.swapchain_extent.height,
+                    depth: 1,
+                })
+                .mip_levels(mip_levels)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+
+            let transmission_image = gpu.device.create_image(&trans_img_info, None).unwrap();
+            let trans_mem_reqs = gpu.device.get_image_memory_requirements(transmission_image);
+
+            let trans_mem_type = MemoryManager::find_memory_type(
+                memory_props,
+                trans_mem_reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            ).unwrap();
+
+            let trans_alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(trans_mem_reqs.size)
+                .memory_type_index(trans_mem_type);
+
+            let transmission_memory = gpu.device.allocate_memory(&trans_alloc_info, None).unwrap();
+            gpu.device.bind_image_memory(transmission_image, transmission_memory, 0).unwrap();
+
+            let trans_view_info = vk::ImageViewCreateInfo::default()
+                .image(transmission_image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(gpu.swapchain_format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: mip_levels,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let transmission_image_view = gpu.device.create_image_view(&trans_view_info, None).unwrap();
+
+            let depth_format = vk::Format::D32_SFLOAT;
+            let depth_img_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(depth_format)
+                .extent(vk::Extent3D {
+                    width: gpu.swapchain_extent.width,
+                    height: gpu.swapchain_extent.height,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+
+            let depth_image = gpu.device.create_image(&depth_img_info, None).unwrap();
+            let depth_mem_reqs = gpu.device.get_image_memory_requirements(depth_image);
+
+            let depth_mem_type = MemoryManager::find_memory_type(
+                memory_props,
+                depth_mem_reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            ).unwrap();
+
+            let depth_alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(depth_mem_reqs.size)
+                .memory_type_index(depth_mem_type);
+
+            let depth_memory = gpu.device.allocate_memory(&depth_alloc_info, None).unwrap();
+            gpu.device.bind_image_memory(depth_image, depth_memory, 0).unwrap();
+
+            let depth_view_info = vk::ImageViewCreateInfo::default()
+                .image(depth_image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(depth_format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::DEPTH,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let depth_image_view = gpu.device.create_image_view(&depth_view_info, None).unwrap();
+
+            let image_info = vk::DescriptorImageInfo::default()
+                .image_view(transmission_image_view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(std::slice::from_ref(&image_info));
+
+            gpu.device.update_descriptor_sets(&[write], &[]);
+
+            self.transmission_image = transmission_image;
+            self.transmission_image_view = transmission_image_view;
+            self.transmission_memory = transmission_memory;
+            self.depth_image = depth_image;
+            self.depth_image_view = depth_image_view;
+            self.depth_memory = depth_memory;
+        }
     }
 }
 
@@ -962,9 +1090,14 @@ impl Engine {
     }
 
     pub fn render_frame(&mut self, window: &Window) {
-        if let Ok((cmd, image_index)) = self.gpu.begin_frame() {
+        let old_extent = self.gpu.swapchain_extent;
+        if let Ok((cmd, image_index)) = self.gpu.begin_frame(window) {
             self.render_pass.execute(&self.gpu, cmd, image_index);
             let _ = self.gpu.end_frame(cmd, image_index, window);
+            if self.gpu.swapchain_extent != old_extent {
+                let memory_props = unsafe { self.gpu.instance.get_physical_device_memory_properties(self.gpu.physical_device) };
+                self.render_pass.recreate_framebuffer_resources(&self.gpu, &memory_props);
+            }
             self.frame_count += 1;
         }
     }
