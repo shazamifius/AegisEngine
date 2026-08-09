@@ -11,7 +11,7 @@ layout(push_constant) uniform PushConstants {
     mat4 mvp_matrix;
     mat4 model_matrix;
     mat4 normal_matrix;
-    vec4 glass_tint; // RGB: Couleur saturée, A: Alpha (1.0)
+    vec4 glass_tint; // RGB: Couleur de teinte optique du verre
     vec4 params;     // X: Rugosité, Y: IOR (1.48)
 } pc;
 
@@ -46,19 +46,20 @@ void main() {
     vec3 fond_transmis = texture(sampler2D(transmission_texture, transmission_sampler), uv_sample).rgb;
 
     // ------------------------------------------------------------------------
-    // 2. TRANSMISSION DIELECTRIQUE SANS EXTINCTION NOIRE (Mélange Magenta/Purple)
+    // 2. FUSION OPTIQUE SPECTRALE (Mode Multiplication Lumineuse 2.0x / Overlay)
     // ------------------------------------------------------------------------
-    // Réfraction lumineuse diélectrique pure : transmet 65% du fond et infuse 35% de la teinte du verre
-    vec3 couleur_transmise = mix(fond_transmis, pc.glass_tint.rgb, 0.35);
+    // Remplacement de la moyenne platte mix() par la vraie multiplication de filtre optique lumineux :
+    // La lumière du fond est filtrée par le verre avec compensation de luminance 2.0x (Pas de gris mort)
+    vec3 fusion_optique = 2.0 * fond_transmis * pc.glass_tint.rgb;
+    vec3 couleur_transmise = clamp(fusion_optique, vec3(0.0), vec3(1.0));
 
     // ------------------------------------------------------------------------
     // 3. LIGNE FINE BLANCHE HYPER BRILLANTE SUR TOUT LE CONTOUR (360° Razor-Sharp Rim)
     // ------------------------------------------------------------------------
-    // Ligne fine brillante très élevée sur la tranche rase (contour 360°)
-    float contour_brillant = pow(1.0 - NdotV, 8.0) * 5.0;
+    float contour_brillant = pow(1.0 - NdotV, 8.0) * 4.5;
     vec3 ligne_blanche = vec3(1.0, 1.0, 1.0) * contour_brillant;
 
-    // Reflet spéculaire de surface polie
+    // Speculaire de surface polie
     vec3 lumière_clef = normalize(vec3(3.2, 4.0, 3.0));
     vec3 H_clef = normalize(V + lumière_clef);
     float spec_surface = pow(max(dot(N, H_clef), 0.0), 128.0) * 0.85;
@@ -66,6 +67,5 @@ void main() {
 
     vec3 rgb_final = couleur_transmise + ligne_blanche + reflet_surface;
 
-    // Alpha = 1.0 : Pas de voile laiteux, pas de baisse d'opacité globale
     out_color = vec4(clamp(rgb_final, 0.0, 1.0), 1.0);
 }
