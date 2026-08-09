@@ -30,19 +30,19 @@ void main() {
     float NdotV = abs(dot(N, V));
 
     // ------------------------------------------------------------------------
-    // 1. RECALAGE PARFAIT DES UV (Suppression totale du décalage/gélule fantôme)
+    // 1. RECALAGE PARFAIT DES UV (0 Offset, alignement 1-to-1)
     // ------------------------------------------------------------------------
-    // Échantillonnage direct 1-to-1 sans offset d'UV décalant le masque
     vec2 uv_sample = clamp(in_screen_uv, vec2(0.001), vec2(0.999));
     vec3 fond_transmis = texture(sampler2D(transmission_texture, transmission_sampler), uv_sample).rgb;
 
     // ------------------------------------------------------------------------
-    // 2. FUSION OPTIQUE CRISTALLINE (Superposition 2.0x Validée à 100%)
+    // 2. TRANSMISSION CRISTALLINE UNIFORME (Élimination de la double-teinte fantôme)
     // ------------------------------------------------------------------------
-    vec3 couleur_transmise = clamp(2.0 * fond_transmis * pc.glass_tint.rgb, vec3(0.0), vec3(1.0));
+    // Maintient la couleur du verre uniforme sur toute la plaque tout en laissant transparaître le fond
+    vec3 couleur_transmise = mix(pc.glass_tint.rgb, fond_transmis * pc.glass_tint.rgb * 1.5, 0.65);
 
     // Dégradé doux de surface (Lumière de studio ambiante)
-    float éclairage_ambiant = 0.85 + 0.30 * max(dot(N, vec3(0.3, 0.6, 0.7)), 0.0);
+    float éclairage_ambiant = 0.88 + 0.25 * max(dot(N, vec3(0.3, 0.6, 0.7)), 0.0);
     couleur_transmise *= éclairage_ambiant;
 
     // ------------------------------------------------------------------------
@@ -59,7 +59,7 @@ void main() {
     float spec_spot2 = pow(max(dot(N, H2), 0.0), 96.0) * 1.2;
     vec3 reflets_blancs = vec3(1.0, 1.0, 1.0) * (spec_spot1 + spec_spot2);
 
-    // FIL BLANC PUR (#FFFFFF) TRES BRILLANT RECALÉ SUR LE BORD EXACT
+    // FIL BLANC PUR (#FFFFFF) TRES BRILLANT RECALÉ SUR LE BORD EXACT (Silhouette 360°)
     float fil_silhouette = pow(1.0 - NdotV, 6.0) * 4.5;
     vec3 fil_lumineux = vec3(1.0, 1.0, 1.0) * fil_silhouette;
 
