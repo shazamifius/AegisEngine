@@ -453,7 +453,7 @@ impl GlassSceneRenderPass {
                 position: Vec3::new(0.28, -0.45, -0.40),
                 rotation_z: -36.0f32.to_radians(),
                 rotation_x: -4.0f32.to_radians(),
-                scale: Vec3::new(0.92, 0.38, 0.16),
+                scale: Vec3::new(0.82, 0.82, 0.16),
                 tint: Vec4::new(0.55, 0.78, 0.95, 0.35),
             },
             // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, BLEU SAPHIR PROFOND EN DESSOUS)
@@ -461,7 +461,7 @@ impl GlassSceneRenderPass {
                 position: Vec3::new(0.05, -0.05, 0.00),
                 rotation_z: 36.0f32.to_radians(),
                 rotation_x: 4.0f32.to_radians(),
-                scale: Vec3::new(1.10, 0.44, 0.20),
+                scale: Vec3::new(0.95, 0.95, 0.20),
                 tint: Vec4::new(0.04, 0.22, 0.78, 0.85),
             },
             // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, VERRE CLAIR CYAN FLOUTÉ AU-DESSUS)
@@ -469,7 +469,7 @@ impl GlassSceneRenderPass {
                 position: Vec3::new(-0.15, 0.35, 0.35),
                 rotation_z: -36.0f32.to_radians(),
                 rotation_x: -4.0f32.to_radians(),
-                scale: Vec3::new(1.05, 0.42, 0.18),
+                scale: Vec3::new(0.88, 0.88, 0.18),
                 tint: Vec4::new(0.85, 0.96, 1.00, 0.15),
             },
         ];
