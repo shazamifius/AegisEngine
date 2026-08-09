@@ -11,8 +11,8 @@ layout(push_constant) uniform PushConstants {
     mat4 mvp_matrix;
     mat4 model_matrix;
     mat4 normal_matrix;
-    vec4 glass_tint; // RGB: Couleur de teinte / Absorption, A: Épaisseur (d)
-    vec4 params;     // X: Rugosité Dépolie (0.0 = Cristallin, 1.0 = Sablé), Y: Indice Réfraction (IOR = 1.48)
+    vec4 glass_tint; // RGB: Teinte / Absorption, A: Épaisseur (d)
+    vec4 params;     // X: Rugosité (0.0 = Cristallin, 1.0 = Dépoli), Y: IOR (1.48)
 } pc;
 
 layout(set = 0, binding = 0) uniform texture2D transmission_texture;
@@ -30,7 +30,7 @@ float fresnel_schlick(float cos_theta, float f0) {
 
 void main() {
     vec3 N = normalize(in_world_normal);
-    vec3 camera_pos = vec3(0.0, 0.0, 4.4);
+    vec3 camera_pos = vec3(0.0, 0.25, 5.8);
     vec3 V = normalize(camera_pos - in_world_position);
 
     float NdotV = abs(dot(N, V));
@@ -52,14 +52,12 @@ void main() {
 
     // ------------------------------------------------------------------------
     // 2. INTEGRALE DE DISPERSION LAITEUSE (Flou du Verre Sablé / Dépoli)
-    // Le flou laiteux est obtenu par l'échantillonnage de la pyramide d'images
-    // Mipmaps générée en matériel GPU (Vulkan vkCmdBlitImage).
     // ------------------------------------------------------------------------
-    float mip_level = rugosite * 4.5;
-    vec2 refraction_offset = refract_dir.xy * (epaisseur * 0.12);
+    float mip_level = rugosite * 4.2;
+    vec2 refraction_offset = refract_dir.xy * (epaisseur * 0.10);
 
-    // Noyau de convolution 9-Taps autour du rayon réfracté
-    float r = rugosite * 0.040;
+    // Noyau 9-Taps dynamique autour du rayon réfracté
+    float r = rugosite * 0.035;
     vec2 offsets[9] = vec2[](
         vec2(0.0, 0.0),
         vec2(-r, -r), vec2(r, -r), vec2(-r, r), vec2(r, r),
@@ -73,19 +71,19 @@ void main() {
     }
 
     // ------------------------------------------------------------------------
-    // 3. LOI DE BEER-LAMBERT (Absorption Volumétrique de la Lumière)
+    // 3. LOI DE BEER-LAMBERT (Absorption Volumétrique Cristalline Pure)
     // I(d) = I0 * exp(-sigma * d)
     // ------------------------------------------------------------------------
     float trajet_optique = epaisseur / (NdotV + 0.10);
-    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 1.4 + vec3(0.02, 0.01, 0.00);
+    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 0.8 + vec3(0.01, 0.005, 0.00);
     vec3 attenuation_beer_lambert = exp(-sigma_absorption * trajet_optique);
 
     vec3 couleur_transmise = fond_transmis * attenuation_beer_lambert;
 
     // ------------------------------------------------------------------------
-    // 4. REFLEXION SPECULAIRE & LISERE CYAN (Chanfrein 45° et Lumière Studio)
+    // 4. REFLEXION SPECULAIRE & LISERE CYAN (Tranches Poli Diamant 45°)
     // ------------------------------------------------------------------------
-    float fresnel = fresnel_schlick(NdotV, 0.06);
+    float fresnel = fresnel_schlick(NdotV, 0.05);
 
     vec3 lumière_clef = normalize(vec3(3.2, 4.0, 3.0));
     vec3 lumière_liseré = normalize(vec3(-3.5, -2.0, 3.0));
@@ -93,20 +91,20 @@ void main() {
     vec3 H_clef = normalize(V + lumière_clef);
     vec3 H_liseré = normalize(V + lumière_liseré);
 
-    // Reflet spéculaire sur la face plate
-    float spec_surface = pow(max(dot(N, H_clef), 0.0), 32.0) * 0.25 * fresnel;
+    // Reflet spéculaire doux sur la face plate
+    float spec_surface = pow(max(dot(N, H_clef), 0.0), 32.0) * 0.22 * fresnel;
     vec3 reflet_surface = vec3(0.95, 0.98, 1.00) * spec_surface;
 
     // Détection géométrique des chanfreins à 45° et tranches à 90°
     float est_chanfrein = step(0.15, abs(N.z)) * step(abs(N.z), 0.88);
     float est_tranche_verticale = step(abs(N.z), 0.15);
 
-    // Liseré Cyan Électrique 1-Pixel (#00E5FF) accroché sur le chanfrein 45°
-    float spec_liseré = pow(max(dot(N, H_liseré), 0.0), 160.0) * 80.0;
+    // Liseré Cyan Électrique ultra-net (#00E5FF) sur la tranche 45°
+    float spec_liseré = pow(max(dot(N, H_liseré), 0.0), 180.0) * 90.0;
     vec3 glow_cyan = vec3(0.00, 0.95, 1.00) * spec_liseré * est_chanfrein;
 
     // Assombrissement réaliste de la tranche 90°
-    vec3 couleur_tranche = mix(couleur_transmise, vec3(0.04, 0.18, 0.45) * attenuation_beer_lambert, est_tranche_verticale * 0.70);
+    vec3 couleur_tranche = mix(couleur_transmise, vec3(0.04, 0.18, 0.45) * attenuation_beer_lambert, est_tranche_verticale * 0.65);
 
     // Assemblage final pure lumière
     vec3 rgb_final = couleur_tranche + reflet_surface + glow_cyan;

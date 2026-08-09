@@ -450,32 +450,32 @@ impl GlassSceneRenderPass {
         };
 
         let instances = vec![
-            // 1. Dalle Capsule Arrière (Bas-Droite, au fond, Rugosité = 0.40)
+            // 1. Dalle Capsule Arrière (Bas-Gauche, au fond, Rugosité = 0.35)
             GlassSlabInstance {
-                position: Vec3::new(0.28, -0.45, -0.40),
-                rotation_z: -36.0f32.to_radians(),
-                rotation_x: -4.0f32.to_radians(),
-                scale: Vec3::new(0.82, 0.82, 0.16),
+                position: Vec3::new(-0.18, -0.38, -0.40),
+                rotation_z: 34.0f32.to_radians(),
+                rotation_x: 2.0f32.to_radians(),
+                scale: Vec3::new(0.62, 0.62, 0.14),
                 tint: Vec4::new(0.55, 0.78, 0.95, 0.35),
-                rugosite: 0.40,
+                rugosite: 0.35,
             },
-            // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, BLEU SAPHIR PROFOND, Rugosité = 0.30)
+            // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, BLEU SAPHIR D'EAU EN DESSOUS)
             GlassSlabInstance {
-                position: Vec3::new(0.05, -0.05, 0.00),
-                rotation_z: 36.0f32.to_radians(),
-                rotation_x: 4.0f32.to_radians(),
-                scale: Vec3::new(0.95, 0.95, 0.20),
-                tint: Vec4::new(0.04, 0.22, 0.78, 0.85),
-                rugosite: 0.30,
+                position: Vec3::new(0.10, -0.05, 0.00),
+                rotation_z: 34.0f32.to_radians(),
+                rotation_x: 2.0f32.to_radians(),
+                scale: Vec3::new(0.70, 0.70, 0.18),
+                tint: Vec4::new(0.08, 0.35, 0.85, 0.70),
+                rugosite: 0.25,
             },
-            // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, VERRE CLAIR CYAN FLOUTÉ, Rugosité = 0.15)
+            // 3. Dalle Capsule Premier Plan (VERRE CRISTALLIN TRANSPARENT EN HAUT, Transmittance 98%)
             GlassSlabInstance {
-                position: Vec3::new(-0.15, 0.35, 0.35),
+                position: Vec3::new(-0.08, 0.28, 0.40),
                 rotation_z: -36.0f32.to_radians(),
-                rotation_x: -4.0f32.to_radians(),
-                scale: Vec3::new(0.88, 0.88, 0.18),
-                tint: Vec4::new(0.85, 0.96, 1.00, 0.15),
-                rugosite: 0.15,
+                rotation_x: -2.0f32.to_radians(),
+                scale: Vec3::new(0.68, 0.68, 0.16),
+                tint: Vec4::new(0.95, 0.99, 1.00, 0.05),
+                rugosite: 0.10,
             },
         ];
 
@@ -648,9 +648,9 @@ impl RenderPass for GlassSceneRenderPass {
         let elapsed = self.start_time.elapsed().as_secs_f32();
         let osc = (elapsed * 0.35).sin() * 0.035;
 
-        let view_matrix = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 4.4), Vec3::new(0.0, 0.0, 0.0), Vec3::Y);
+        let view_matrix = Mat4::look_at_rh(Vec3::new(0.0, 0.25, 5.8), Vec3::new(0.0, 0.0, 0.0), Vec3::Y);
         let aspect_ratio = context.swapchain_extent.width as f32 / context.swapchain_extent.height as f32;
-        let mut proj = Mat4::perspective_rh(42.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
+        let mut proj = Mat4::perspective_rh(28.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
         proj.y_axis.y *= -1.0;
 
         unsafe {
