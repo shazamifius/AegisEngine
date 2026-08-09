@@ -71,7 +71,7 @@ impl GlassSceneRenderPass {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Initialisation de la Scène de Verre Dépoli Vulkan 1.4 Native (GLSL + Mipmap Chain)...");
 
-        let (vertices, indices) = GlassSlabGenerator::create_capsule_slab(2.8, 0.62, 0.12, 0.05, 36);
+        let (vertices, indices) = GlassSlabGenerator::create_capsule_slab(2.8, 0.62, 0.16, 0.08, 36);
         let index_count = indices.len() as u32;
 
         let vertex_bytes = bytemuck::cast_slice(&vertices);
