@@ -68,9 +68,10 @@ void main() {
     float spec_spot2 = pow(max(dot(N, H2), 0.0), 96.0) * 1.2;
     vec3 reflets_blancs = vec3(1.0, 1.0, 1.0) * (spec_spot1 + spec_spot2);
 
-    // Liseré blanc pur très lumineux (#FFFFFF) sur la tranche
-    float liseré_tranche = pow(1.0 - NdotV, 6.0) * 4.5;
-    vec3 fil_lumineux = vec3(1.0, 1.0, 1.0) * liseré_tranche;
+    // LISERÉ BLANC PUR (#FFFFFF) TRES BRILLANT SUR 100% DE LA TRANCHE CÔTÉ (side wall rim)
+    float fil_tranche = pow(length(N.xy), 3.5) * 2.8;
+    float fil_silhouette = pow(1.0 - NdotV, 6.0) * 3.5;
+    vec3 fil_lumineux = vec3(1.0, 1.0, 1.0) * (fil_tranche + fil_silhouette);
 
     vec3 rgb_final = couleur_transmise + reflets_blancs + fil_lumineux;
 
