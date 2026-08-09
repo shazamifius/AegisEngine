@@ -34,7 +34,7 @@ pub struct GpuContext {
 
 impl GpuContext {
     /// Initialise une instance Vulkan 1.4 native pure, sélectionne le GPU et crée le Swapchain.
-    pub async fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Initialisation de l'API Vulkan 1.4 Native via ash (Pure From Scratch)...");
 
         // 1. Chargement de la bibliothèque dynamique Vulkan

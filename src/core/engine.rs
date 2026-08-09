@@ -71,7 +71,7 @@ impl GlassSceneRenderPass {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Initialisation de la Scène de Verre Dépoli Vulkan 1.4 Native (GLSL + Mipmap Chain)...");
 
-        let (vertices, indices) = GlassSlabGenerator::create_capsule_slab(2.8, 0.62, 0.16, 0.08, 36);
+        let (vertices, indices) = GlassSlabGenerator::create_capsule_slab(2.2, 0.52, 0.20, 0.08, 48);
         let index_count = indices.len() as u32;
 
         let vertex_bytes = bytemuck::cast_slice(&vertices);
@@ -267,18 +267,12 @@ impl GlassSceneRenderPass {
 
         unsafe { gpu.device.update_descriptor_sets(&descriptor_writes, &[]) };
 
-        // 4. Compilation des Shaders GLSL Native vers Vulkan SPIR-V
-        let bg_vert_spv = PipelineFactory::compile_glsl_to_spirv(
-            include_str!("../shaders/background.vert"),
-            naga::ShaderStage::Vertex,
-        )?;
-        let bg_frag_spv = PipelineFactory::compile_glsl_to_spirv(
-            include_str!("../shaders/background.frag"),
-            naga::ShaderStage::Fragment,
-        )?;
+        // 4. Chargement des Shaders SPIR-V précompilés (Build-time)
+        let bg_vert_spv = include_bytes!(concat!(env!("OUT_DIR"), "/background.vert.spv"));
+        let bg_frag_spv = include_bytes!(concat!(env!("OUT_DIR"), "/background.frag.spv"));
 
-        let bg_vert_module = PipelineFactory::create_shader_module(&gpu.device, &bg_vert_spv)?;
-        let bg_frag_module = PipelineFactory::create_shader_module(&gpu.device, &bg_frag_spv)?;
+        let bg_vert_module = PipelineFactory::create_shader_module_from_bytes(&gpu.device, bg_vert_spv)?;
+        let bg_frag_module = PipelineFactory::create_shader_module_from_bytes(&gpu.device, bg_frag_spv)?;
 
         let bg_pipeline_layout = PipelineFactory::create_pipeline_layout(&gpu.device, &[], &[])?;
 
@@ -358,18 +352,13 @@ impl GlassSceneRenderPass {
         };
         let bg_pipeline = bg_pipelines[0];
 
-        // 5. Pipeline Verre Dépoli GLSL Native
-        let glass_vert_spv = PipelineFactory::compile_glsl_to_spirv(
-            include_str!("../shaders/glass_dispersive.vert"),
-            naga::ShaderStage::Vertex,
-        )?;
-        let glass_frag_spv = PipelineFactory::compile_glsl_to_spirv(
-            include_str!("../shaders/glass_dispersive.frag"),
-            naga::ShaderStage::Fragment,
-        )?;
+        // 5. Pipeline Verre Dépoli GLSL Native SPIR-V (Build-time)
+        let glass_vert_spv = include_bytes!(concat!(env!("OUT_DIR"), "/glass_dispersive.vert.spv"));
+        let glass_frag_spv = include_bytes!(concat!(env!("OUT_DIR"), "/glass_dispersive.frag.spv"));
 
-        let glass_vert_module = PipelineFactory::create_shader_module(&gpu.device, &glass_vert_spv)?;
-        let glass_frag_module = PipelineFactory::create_shader_module(&gpu.device, &glass_frag_spv)?;
+        let glass_vert_module = PipelineFactory::create_shader_module_from_bytes(&gpu.device, glass_vert_spv)?;
+        let glass_frag_module = PipelineFactory::create_shader_module_from_bytes(&gpu.device, glass_frag_spv)?;
+
 
         let push_constant_range = PipelineFactory::create_push_constant_range(
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
@@ -456,32 +445,32 @@ impl GlassSceneRenderPass {
         };
 
         let instances = vec![
-            // 1. Dalle Capsule Arrière (Bas-Gauche, VERT ÉMERAUDE VIF)
+            // 1. Dalle Capsule Arrière-Plan (Bleu Cyan Translucide)
             GlassSlabInstance {
-                position: Vec3::new(-0.18, -0.32, -0.40),
-                rotation_z: 32.0f32.to_radians(),
+                position: Vec3::new(-0.25, -0.40, -0.40),
+                rotation_z: 34.0f32.to_radians(),
                 rotation_x: 0.0f32.to_radians(),
-                scale: Vec3::new(0.75, 0.72, 0.06),
-                tint: Vec4::new(0.05, 0.95, 0.40, 1.00),
+                scale: Vec3::ONE,
+                tint: Vec4::new(0.25, 0.55, 0.85, 0.25),
                 rugosite: 0.35,
             },
-            // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, ROSE RUBIS VIF)
+            // 2. Dalle Capsule Intermédiaire (Bleu Saphir Glacé)
             GlassSlabInstance {
-                position: Vec3::new(0.12, -0.02, 0.00),
-                rotation_z: 32.0f32.to_radians(),
+                position: Vec3::new(0.20, 0.08, 0.00),
+                rotation_z: 34.0f32.to_radians(),
                 rotation_x: 0.0f32.to_radians(),
-                scale: Vec3::new(0.82, 0.75, 0.06),
-                tint: Vec4::new(0.98, 0.15, 0.50, 1.00),
-                rugosite: 0.25,
+                scale: Vec3::ONE,
+                tint: Vec4::new(0.18, 0.48, 0.80, 0.28),
+                rugosite: 0.22,
             },
-            // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, VIOLET SAPHIR VIF)
+            // 3. Dalle Capsule Premier Plan (Verre Cristallin Glacé à Biseaux Brillants)
             GlassSlabInstance {
-                position: Vec3::new(-0.05, 0.15, 0.40),
+                position: Vec3::new(-0.10, 0.25, 0.40),
                 rotation_z: -38.0f32.to_radians(),
                 rotation_x: 0.0f32.to_radians(),
-                scale: Vec3::new(0.88, 0.75, 0.06),
-                tint: Vec4::new(0.35, 0.20, 0.98, 1.00),
-                rugosite: 0.10,
+                scale: Vec3::ONE,
+                tint: Vec4::new(0.80, 0.92, 0.98, 0.18),
+                rugosite: 0.05,
             },
         ];
 
@@ -654,7 +643,7 @@ impl RenderPass for GlassSceneRenderPass {
         let elapsed = self.start_time.elapsed().as_secs_f32();
         let osc = (elapsed * 0.35).sin() * 0.035;
 
-        let view_matrix = Mat4::look_at_rh(Vec3::new(0.0, 0.25, 5.8), Vec3::new(0.0, 0.0, 0.0), Vec3::Y);
+        let view_matrix = Mat4::look_at_rh(Vec3::new(0.0, 0.25, 7.2), Vec3::new(0.0, 0.0, 0.0), Vec3::Y);
         let aspect_ratio = context.swapchain_extent.width as f32 / context.swapchain_extent.height as f32;
         let mut proj = Mat4::perspective_rh(28.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
         proj.y_axis.y *= -1.0;
@@ -847,23 +836,33 @@ impl RenderPass for GlassSceneRenderPass {
                 let mut mip_w = context.swapchain_extent.width as i32;
                 let mut mip_h = context.swapchain_extent.height as i32;
 
-                for i in 1..mip_levels {
-                    let prev_barrier = vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                        .image(self.transmission_image)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: i - 1,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        });
+                let barrier_mip0_src = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .image(self.transmission_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
 
+                context.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_mip0_src],
+                );
+
+                for i in 1..mip_levels {
                     let next_barrier = vk::ImageMemoryBarrier::default()
-                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .old_layout(self.transmission_layout)
                         .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                         .src_access_mask(vk::AccessFlags::NONE)
                         .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -876,7 +875,6 @@ impl RenderPass for GlassSceneRenderPass {
                             layer_count: 1,
                         });
 
-                    let mip_barriers = [prev_barrier, next_barrier];
                     context.device.cmd_pipeline_barrier(
                         cmd,
                         vk::PipelineStageFlags::TRANSFER,
@@ -884,7 +882,7 @@ impl RenderPass for GlassSceneRenderPass {
                         vk::DependencyFlags::empty(),
                         &[],
                         &[],
-                        &mip_barriers,
+                        &[next_barrier],
                     );
 
                     let next_w = if mip_w > 1 { mip_w / 2 } else { 1 };
@@ -922,12 +920,36 @@ impl RenderPass for GlassSceneRenderPass {
                         vk::Filter::LINEAR,
                     );
 
+                    let to_src_barrier = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                        .image(self.transmission_image)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: i,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        });
+
+                    context.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[to_src_barrier],
+                    );
+
                     mip_w = next_w;
                     mip_h = next_h;
                 }
 
-                // 4. Transition Mip 0..3 et Mip 4 -> SHADER_READ_ONLY_OPTIMAL
-                let barrier_mip_0_to_3 = vk::ImageMemoryBarrier::default()
+                // 4. Transition TOUS les Mip levels (0..5) -> SHADER_READ_ONLY_OPTIMAL
+                let barrier_all_mips = vk::ImageMemoryBarrier::default()
                     .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                     .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                     .src_access_mask(vk::AccessFlags::TRANSFER_READ)
@@ -936,21 +958,7 @@ impl RenderPass for GlassSceneRenderPass {
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         base_mip_level: 0,
-                        level_count: mip_levels - 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    });
-
-                let barrier_mip_4 = vk::ImageMemoryBarrier::default()
-                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                    .image(self.transmission_image)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: mip_levels - 1,
-                        level_count: 1,
+                        level_count: mip_levels,
                         base_array_layer: 0,
                         layer_count: 1,
                     });
@@ -969,7 +977,7 @@ impl RenderPass for GlassSceneRenderPass {
                         layer_count: 1,
                     });
 
-                let barriers_post_copy = [barrier_mip_0_to_3, barrier_mip_4, barrier_swapchain_back];
+                let barriers_post_copy = [barrier_all_mips, barrier_swapchain_back];
                 context.device.cmd_pipeline_barrier(
                     cmd,
                     vk::PipelineStageFlags::TRANSFER,
@@ -1090,8 +1098,8 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub async fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
-        let gpu = GpuContext::new(window).await?;
+    pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
+        let gpu = GpuContext::new(window)?;
         let memory_props = unsafe { gpu.instance.get_physical_device_memory_properties(gpu.physical_device) };
         let render_pass = GlassSceneRenderPass::new(&gpu, &memory_props)?;
 
@@ -1250,16 +1258,42 @@ impl Engine {
         }
 
         std::fs::write(&temp_ppm, ppm_data)?;
-        let convert_status = std::process::Command::new("magick")
-            .arg("convert")
+
+        let py_script = format!(
+            "import zlib, struct, binascii, sys\n\
+            with open(sys.argv[1], 'rb') as f:\n\
+            \tline1 = f.readline()\n\
+            \tline2 = f.readline()\n\
+            \twhile line2.startswith(b'#'): line2 = f.readline()\n\
+            \tw, h = map(int, line2.split())\n\
+            \tf.readline()\n\
+            \trgb = f.read()\n\
+            raw = bytearray()\n\
+            for y in range(h):\n\
+            \traw.append(0)\n\
+            \traw.extend(rgb[y*w*3:(y+1)*w*3])\n\
+            def chunk(t, d):\n\
+            \treturn struct.pack('>I', len(d)) + t + d + struct.pack('>I', binascii.crc32(t + d) & 0xffffffff)\n\
+            png = bytearray(b'\\x89PNG\\r\\n\\x1a\\n')\n\
+            png += chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))\n\
+            png += chunk(b'IDAT', zlib.compress(bytes(raw)))\n\
+            png += chunk(b'IEND', b'')\n\
+            with open(sys.argv[2], 'wb') as f: f.write(png)\n"
+        );
+
+        let temp_py = format!("{}.py", path);
+        let _ = std::fs::write(&temp_py, py_script);
+
+        let status = std::process::Command::new("python3")
+            .arg(&temp_py)
             .arg(&temp_ppm)
             .arg(path)
-            .status()
-            .or_else(|_| std::process::Command::new("convert").arg(&temp_ppm).arg(path).status())?;
+            .status();
 
         let _ = std::fs::remove_file(&temp_ppm);
+        let _ = std::fs::remove_file(&temp_py);
 
-        if convert_status.success() {
+        if status.as_ref().map(|s| s.success()).unwrap_or(false) {
             log::info!("Screenshot PNG VRAM Vulkan 1.4 généré avec succès : {}", path);
         }
 

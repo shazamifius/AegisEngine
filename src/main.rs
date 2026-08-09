@@ -41,7 +41,7 @@ impl ApplicationHandler for AegisApp {
             };
 
             log::info!("Fenêtre créée avec succès. Initialisation du moteur Vulkan 1.4 Native...");
-            let engine = pollster::block_on(Engine::new(window.clone())).expect("Échec de l'initialisation du moteur Vulkan 1.4");
+            let engine = Engine::new(window.clone()).expect("Échec de l'initialisation du moteur Vulkan 1.4");
 
             self.window = Some(window);
             self.engine = Some(engine);
@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     let screenshot_mode = args.iter().any(|arg| arg == "--screenshot");
-    let screenshot_path = "/home/shaza/.gemini/antigravity/brain/be4b586e-1267-43c4-9e28-de1e7a81a4c5/screenshot.png".to_string();
+    let screenshot_path = "/home/shaza/.gemini/antigravity/brain/a583107a-47cc-411b-84a4-969fd78a0aa3/screenshot_glass_v4.png".to_string();
 
     log::info!("=== Démarrage d'AegisEngine v1.0.0 (Pure Vulkan 1.4 From Scratch) ===");
     if screenshot_mode {
