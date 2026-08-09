@@ -32,8 +32,9 @@ void main() {
     float ior = pc.params.y > 0.0 ? pc.params.y : 1.48;
 
     // ------------------------------------------------------------------------
-    // 1. REFRACTION OPTIQUE SNELL-DESCARTES (Déformation des contours UV)
+    // 1. REFRACTION OPTIQUE LISSE SANS CROCHET ESCALIER
     // ------------------------------------------------------------------------
+    // Déplacement optique vectoriel Snell basé sur le rayon de visée V (Continu sans cassure d'escalier)
     float eta = 1.0 / ior;
     float k = 1.0 - eta * eta * (1.0 - NdotV * NdotV);
     vec3 refract_dir = -V;
@@ -41,45 +42,48 @@ void main() {
         refract_dir = -V * eta + N * (eta * NdotV - sqrt(k));
     }
 
-    vec2 refraction_offset = (N.xy * 0.16 + refract_dir.xy * 0.18) * (1.0 - N.z * N.z * 0.65);
+    vec2 refraction_offset = refract_dir.xy * 0.12 * (1.0 - NdotV * 0.5);
     vec2 uv_sample = clamp(in_screen_uv + refraction_offset, vec2(0.001), vec2(0.999));
     vec3 fond_transmis = texture(sampler2D(transmission_texture, transmission_sampler), uv_sample).rgb;
 
     // ------------------------------------------------------------------------
-    // 2. FUSION OPTIQUE SPECTRALE (Multiplication Lumineuse 2.0x Validée)
+    // 2. FUSION OPTIQUE & TRANSLUCIDITÉ DU BISEAU (Élimination du plastique opaque)
     // ------------------------------------------------------------------------
-    vec3 fusion_optique = 2.0 * fond_transmis * pc.glass_tint.rgb;
-    vec3 couleur_transmise = clamp(fusion_optique, vec3(0.0), vec3(1.0));
+    // Détection physique de la pente du biseau (tranche inclinée vs face centrale)
+    float est_biseau = smoothstep(0.96, 0.75, abs(N.z));
+
+    // Corps de la plaque : fusion optique 2.0x lumineuse
+    vec3 couleur_corps = clamp(2.0 * fond_transmis * pc.glass_tint.rgb, vec3(0.0), vec3(1.0));
+
+    // Tranche biseautée : translucide cristalline (laisse parfaitement voir le fond rose à travers)
+    vec3 couleur_biseau = mix(fond_transmis, pc.glass_tint.rgb, 0.28);
+
+    vec3 couleur_transmise = mix(couleur_corps, couleur_biseau, est_biseau);
+
+    // Dégradé de lumière ambiante sur la surface (Lumière de studio douce)
+    float éclairage_ambiant = 0.85 + 0.30 * max(dot(N, vec3(0.3, 0.6, 0.7)), 0.0);
+    couleur_transmise *= éclairage_ambiant;
 
     // ------------------------------------------------------------------------
-    // 3. CONTOUR LUMINEUX BLANC SUR 360° (Silhouette Edge Rim)
+    // 3. SPÉCULAIRES BRILLANTS ET LISERÉ LUMINEUX BLANC SUR 360° (Matière Verre Polie)
     // ------------------------------------------------------------------------
-    // Smoothstep tranchant sur le bord extérieur pour une ligne fine blanche éclatante (#FFFFFF)
-    float fil_blanc_intensité = smoothstep(0.38, 0.05, NdotV) * 1.8;
-    vec3 ligne_blanche = vec3(1.0, 1.0, 1.0) * fil_blanc_intensité;
+    // Reflet spéculaire d'une fenêtre / softbox de studio sur la surface polie
+    vec3 lumière_fenêtre1 = normalize(vec3(3.5, 4.5, 4.0));
+    vec3 lumière_fenêtre2 = normalize(vec3(-2.5, 3.0, 5.0));
 
-    // ------------------------------------------------------------------------
-    // 4. REFLETS SPÉCULAIRES NETS (Points d'éclat lumineux studio)
-    // ------------------------------------------------------------------------
-    vec3 lumière_spot1 = normalize(vec3(4.0, 5.0, 4.0));
-    vec3 lumière_spot2 = normalize(vec3(-2.0, 3.5, 5.0));
+    vec3 H1 = normalize(V + lumière_fenêtre1);
+    vec3 H2 = normalize(V + lumière_fenêtre2);
 
-    vec3 H1 = normalize(V + lumière_spot1);
-    vec3 H2 = normalize(V + lumière_spot2);
-
-    // Éclat spéculaire de surface très poli (Spot studio intense)
-    float spec1 = pow(max(dot(N, H1), 0.0), 256.0) * 1.6;
-    float spec2 = pow(max(dot(N, H2), 0.0), 96.0) * 0.5;
+    float spec1 = pow(max(dot(N, H1), 0.0), 128.0) * 1.35; // Éclat intense de fenêtre
+    float spec2 = pow(max(dot(N, H2), 0.0), 64.0) * 0.45;  // Reflet secondaire
     vec3 reflets_spéculaires = vec3(1.0, 1.0, 1.0) * (spec1 + spec2);
 
-    // ------------------------------------------------------------------------
-    // 5. TRANCHE CRISTALLINE FINESSE (Reflet translucide de la tranche)
-    // ------------------------------------------------------------------------
-    float tranche_finesse = smoothstep(0.65, 0.35, NdotV) * smoothstep(0.05, 0.25, NdotV) * 0.6;
-    vec3 reflet_tranche = vec3(0.90, 0.96, 1.00) * tranche_finesse;
+    // Liseré lumineux blanc pur (#FFFFFF) très vif et ultra-fin le long de la tranche
+    float liseré_tranche = pow(1.0 - NdotV, 6.0) * 3.8;
+    vec3 fil_lumineux = vec3(1.0, 1.0, 1.0) * liseré_tranche;
 
     // Assemblage final pure matière verre
-    vec3 rgb_final = couleur_transmise + ligne_blanche + reflets_spéculaires + reflet_tranche;
+    vec3 rgb_final = couleur_transmise + reflets_spéculaires + fil_lumineux;
 
     out_color = vec4(clamp(rgb_final, vec3(0.0), vec3(1.0)), 1.0);
 }
