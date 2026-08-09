@@ -448,29 +448,29 @@ impl GlassSceneRenderPass {
         };
 
         let instances = vec![
-            // 1. Dalle Capsule Diagonale Haut-Gauche (BLEU SAPHIR PROFOND AU FOND)
-            GlassSlabInstance {
-                position: Vec3::new(-0.35, 0.45, -0.30),
-                rotation_z: -36.0f32.to_radians(),
-                rotation_x: -4.0f32.to_radians(),
-                scale: Vec3::new(1.85, 0.58, 0.22),
-                tint: Vec4::new(0.04, 0.22, 0.78, 0.85),
-            },
-            // 2. Dalle Capsule Premier Plan (Diagonale Haut-Droite, VERRE CLAIR CYAN AU-DESSUS)
-            GlassSlabInstance {
-                position: Vec3::new(0.05, -0.05, 0.35),
-                rotation_z: 36.0f32.to_radians(),
-                rotation_x: 4.0f32.to_radians(),
-                scale: Vec3::new(2.10, 0.65, 0.25),
-                tint: Vec4::new(0.85, 0.96, 1.00, 0.15),
-            },
-            // 3. Dalle Capsule Arrière (Bas-Droite)
+            // 1. Dalle Capsule Arrière (Bas-Droite, au fond)
             GlassSlabInstance {
                 position: Vec3::new(0.35, -0.65, -0.50),
                 rotation_z: -36.0f32.to_radians(),
                 rotation_x: -4.0f32.to_radians(),
                 scale: Vec3::new(1.50, 0.52, 0.18),
                 tint: Vec4::new(0.55, 0.78, 0.95, 0.35),
+            },
+            // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, BLEU SAPHIR PROFOND EN DESSOUS)
+            GlassSlabInstance {
+                position: Vec3::new(0.08, -0.05, 0.00),
+                rotation_z: 36.0f32.to_radians(),
+                rotation_x: 4.0f32.to_radians(),
+                scale: Vec3::new(1.95, 0.62, 0.24),
+                tint: Vec4::new(0.04, 0.22, 0.78, 0.85),
+            },
+            // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, VERRE CLAIR CYAN FLOUTÉ AU-DESSUS)
+            GlassSlabInstance {
+                position: Vec3::new(-0.25, 0.55, 0.40),
+                rotation_z: -36.0f32.to_radians(),
+                rotation_x: -4.0f32.to_radians(),
+                scale: Vec3::new(1.85, 0.58, 0.22),
+                tint: Vec4::new(0.85, 0.96, 1.00, 0.15),
             },
         ];
 
