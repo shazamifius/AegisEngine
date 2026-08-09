@@ -458,28 +458,28 @@ impl GlassSceneRenderPass {
         let instances = vec![
             // 1. Dalle Capsule Arrière (Bas-Gauche, VERT ÉMERAUDE VIF)
             GlassSlabInstance {
-                position: Vec3::new(-0.22, -0.22, -0.40),
-                rotation_z: 38.0f32.to_radians(),
+                position: Vec3::new(-0.18, -0.32, -0.40),
+                rotation_z: 32.0f32.to_radians(),
                 rotation_x: 0.0f32.to_radians(),
-                scale: Vec3::new(0.65, 0.42, 0.04),
+                scale: Vec3::new(0.75, 0.72, 0.06),
                 tint: Vec4::new(0.05, 0.95, 0.40, 1.00),
                 rugosite: 0.35,
             },
             // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, ROSE RUBIS VIF)
             GlassSlabInstance {
-                position: Vec3::new(0.08, -0.05, 0.00),
-                rotation_z: 38.0f32.to_radians(),
+                position: Vec3::new(0.12, -0.02, 0.00),
+                rotation_z: 32.0f32.to_radians(),
                 rotation_x: 0.0f32.to_radians(),
-                scale: Vec3::new(0.72, 0.42, 0.04),
+                scale: Vec3::new(0.82, 0.75, 0.06),
                 tint: Vec4::new(0.98, 0.15, 0.50, 1.00),
                 rugosite: 0.25,
             },
             // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, VIOLET SAPHIR VIF)
             GlassSlabInstance {
-                position: Vec3::new(-0.02, 0.08, 0.40),
+                position: Vec3::new(-0.05, 0.15, 0.40),
                 rotation_z: -38.0f32.to_radians(),
                 rotation_x: 0.0f32.to_radians(),
-                scale: Vec3::new(0.78, 0.42, 0.04),
+                scale: Vec3::new(0.88, 0.75, 0.06),
                 tint: Vec4::new(0.35, 0.20, 0.98, 1.00),
                 rugosite: 0.10,
             },

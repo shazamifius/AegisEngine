@@ -30,40 +30,31 @@ void main() {
     float NdotV = abs(dot(N, V));
 
     // ------------------------------------------------------------------------
-    // 1. RECALAGE PARFAIT DES UV (0 Offset, alignement 1-to-1)
+    // 1. RECALAGE UV 1-TO-1 SANS OFFSET
     // ------------------------------------------------------------------------
     vec2 uv_sample = clamp(in_screen_uv, vec2(0.001), vec2(0.999));
     vec3 fond_transmis = texture(sampler2D(transmission_texture, transmission_sampler), uv_sample).rgb;
 
     // ------------------------------------------------------------------------
-    // 2. TRANSMISSION CRISTALLINE UNIFORME (Élimination de la double-teinte fantôme)
+    // 2. PURE TRANSMISSION CRISTALLINE OPTIQUE (100% Fond Filtré par Absorption)
     // ------------------------------------------------------------------------
-    // Maintient la couleur du verre uniforme sur toute la plaque tout en laissant transparaître le fond
-    vec3 couleur_transmise = mix(pc.glass_tint.rgb, fond_transmis * pc.glass_tint.rgb * 1.5, 0.65);
-
-    // Dégradé doux de surface (Lumière de studio ambiante)
-    float éclairage_ambiant = 0.88 + 0.25 * max(dot(N, vec3(0.3, 0.6, 0.7)), 0.0);
-    couleur_transmise *= éclairage_ambiant;
+    // Le verre est 100% la lumière du fond filtrée par sa couleur pure sans mix() opaque
+    vec3 couleur_transmise = clamp(1.8 * fond_transmis * pc.glass_tint.rgb + 0.08 * pc.glass_tint.rgb, vec3(0.0), vec3(1.0));
 
     // ------------------------------------------------------------------------
-    // 3. REFLETS SPÉCULAIRES ET LISERÉ LUMINEUX BLANC PUR (#FFFFFF) SUR 360°
+    // 3. LISERÉ LUMINEUX BLANC PUR (#FFFFFF) 360° ET SPÉCULAIRES NETS DE SURFACE
     // ------------------------------------------------------------------------
-    vec3 lumière_fenêtre1 = normalize(vec3(4.0, 6.0, 5.0));
-    vec3 lumière_fenêtre2 = normalize(vec3(-3.0, 4.0, 4.5));
+    // Liseré blanc pur (#FFFFFF) d'une finesse extrême cernant 100% de la tranche 360°
+    float liseré_tranche = pow(1.0 - NdotV, 7.0) * 5.0;
+    vec3 fil_blanc = vec3(1.0, 1.0, 1.0) * liseré_tranche;
 
-    vec3 H1 = normalize(V + lumière_fenêtre1);
-    vec3 H2 = normalize(V + lumière_fenêtre2);
+    // Point chaud spéculaire blanc pur studio très vif
+    vec3 lumière_fenêtre = normalize(vec3(3.5, 5.5, 4.0));
+    vec3 H = normalize(V + lumière_fenêtre);
+    float spec_spot = pow(max(dot(N, H), 0.0), 256.0) * 4.0;
+    vec3 eclat_blanc = vec3(1.0, 1.0, 1.0) * spec_spot;
 
-    // Points chauds spéculaires blancs purs très intenses (#FFFFFF)
-    float spec_spot1 = pow(max(dot(N, H1), 0.0), 256.0) * 3.5;
-    float spec_spot2 = pow(max(dot(N, H2), 0.0), 96.0) * 1.2;
-    vec3 reflets_blancs = vec3(1.0, 1.0, 1.0) * (spec_spot1 + spec_spot2);
-
-    // FIL BLANC PUR (#FFFFFF) TRES BRILLANT RECALÉ SUR LE BORD EXACT (Silhouette 360°)
-    float fil_silhouette = pow(1.0 - NdotV, 6.0) * 4.5;
-    vec3 fil_lumineux = vec3(1.0, 1.0, 1.0) * fil_silhouette;
-
-    vec3 rgb_final = couleur_transmise + reflets_blancs + fil_lumineux;
+    vec3 rgb_final = couleur_transmise + fil_blanc + eclat_blanc;
 
     out_color = vec4(clamp(rgb_final, vec3(0.0), vec3(1.0)), 1.0);
 }
