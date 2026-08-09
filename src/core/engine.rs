@@ -17,8 +17,8 @@ pub struct GlassPushConstants {
     pub mvp_matrix: Mat4,
     pub model_matrix: Mat4,
     pub normal_matrix: Mat4,
-    pub glass_tint: Vec4,
-    pub params: Vec4, // x: roughness, y: glossiness, z: ior, w: thickness
+    pub glass_tint: Vec4, // RGB: Teinte / Absorption, A: Épaisseur (d)
+    pub params: Vec4,     // X: Rugosité (0.0 = Cristallin, 1.0 = Dépoli), Y: IOR (1.48)
 }
 
 unsafe impl bytemuck::Pod for GlassPushConstants {}
@@ -31,8 +31,7 @@ pub struct GlassSlabInstance {
     pub rotation_x: f32,
     pub scale: Vec3,
     pub tint: Vec4,
-    pub glossiness: f32,
-    pub roughness: f32,
+    pub rugosite: f32,
 }
 
 /// Dynamic Glass Scene Render Pass (Native Vulkan 1.4 + GLSL + Hardware Mipmap Chain Frosted Blur)
@@ -451,35 +450,32 @@ impl GlassSceneRenderPass {
         };
 
         let instances = vec![
-            // 1. Dalle Capsule Arrière (Bas-Droite, au fond, Glossiness = 0.60, Roughness = 0.40)
+            // 1. Dalle Capsule Arrière (Bas-Droite, au fond, Rugosité = 0.40)
             GlassSlabInstance {
                 position: Vec3::new(0.28, -0.45, -0.40),
                 rotation_z: -36.0f32.to_radians(),
                 rotation_x: -4.0f32.to_radians(),
                 scale: Vec3::new(0.82, 0.82, 0.16),
                 tint: Vec4::new(0.55, 0.78, 0.95, 0.35),
-                glossiness: 0.60,
-                roughness: 0.40,
+                rugosite: 0.40,
             },
-            // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, BLEU SAPHIR PROFOND, Glossiness = 0.70, Roughness = 0.30)
+            // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, BLEU SAPHIR PROFOND, Rugosité = 0.30)
             GlassSlabInstance {
                 position: Vec3::new(0.05, -0.05, 0.00),
                 rotation_z: 36.0f32.to_radians(),
                 rotation_x: 4.0f32.to_radians(),
                 scale: Vec3::new(0.95, 0.95, 0.20),
                 tint: Vec4::new(0.04, 0.22, 0.78, 0.85),
-                glossiness: 0.70,
-                roughness: 0.30,
+                rugosite: 0.30,
             },
-            // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, VERRE CLAIR CYAN FLOUTÉ, Glossiness = 0.85, Roughness = 0.15)
+            // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, VERRE CLAIR CYAN FLOUTÉ, Rugosité = 0.15)
             GlassSlabInstance {
                 position: Vec3::new(-0.15, 0.35, 0.35),
                 rotation_z: -36.0f32.to_radians(),
                 rotation_x: -4.0f32.to_radians(),
                 scale: Vec3::new(0.88, 0.88, 0.18),
                 tint: Vec4::new(0.85, 0.96, 1.00, 0.15),
-                glossiness: 0.85,
-                roughness: 0.15,
+                rugosite: 0.15,
             },
         ];
 
@@ -1023,7 +1019,7 @@ impl RenderPass for GlassSceneRenderPass {
                     model_matrix,
                     normal_matrix,
                     glass_tint: instance.tint,
-                    params: Vec4::new(instance.roughness, instance.glossiness, 1.48, instance.scale.z),
+                    params: Vec4::new(instance.rugosite, 1.48, 0.0, 0.0),
                 };
 
                 let push_bytes = bytemuck::bytes_of(&push_constants);
