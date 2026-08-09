@@ -22,8 +22,6 @@ layout(location = 0) out vec4 out_color;
 
 const float PI = 3.14159265359;
 
-// Formule de Réflexion Spéculaire Fresnel (Approximation de Schlick)
-// F(θ) = F0 + (1 - F0) * (1 - cos(θ))^5
 float fresnel_schlick(float cos_theta, float f0) {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
@@ -39,24 +37,18 @@ void main() {
     float ior = pc.params.y > 0.0 ? pc.params.y : 1.48; // Indice de réfraction du verre = 1.48
     float epaisseur = pc.glass_tint.w;
 
-    // ------------------------------------------------------------------------
-    // 1. LOI VECTORIELLE DE SNELL-DESCARTES (Réfraction Optique Exacte)
-    // T = η*V + (η*(N·V) - sqrt(1 - η²*(1 - (N·V)²))) * N
-    // ------------------------------------------------------------------------
-    float eta = 1.0 / ior; // Air (1.0) vers Verre (1.48)
+    // 1. Réfraction Vectorielle de Snell-Descartes
+    float eta = 1.0 / ior;
     float k = 1.0 - eta * eta * (1.0 - NdotV * NdotV);
     vec3 refract_dir = -V;
     if (k >= 0.0) {
         refract_dir = -V * eta + N * (eta * NdotV - sqrt(k));
     }
 
-    // ------------------------------------------------------------------------
-    // 2. INTEGRALE DE DISPERSION LAITEUSE (Flou du Verre Sablé / Dépoli)
-    // ------------------------------------------------------------------------
+    // 2. Échantillonnage de la pyramide Mipmap VRAM (Flou Dépoli)
     float mip_level = rugosite * 4.2;
     vec2 refraction_offset = refract_dir.xy * (epaisseur * 0.10);
 
-    // Noyau 9-Taps dynamique autour du rayon réfracté
     float r = rugosite * 0.035;
     vec2 offsets[9] = vec2[](
         vec2(0.0, 0.0),
@@ -70,19 +62,15 @@ void main() {
         fond_transmis += textureLod(sampler2D(transmission_texture, transmission_sampler), uv_sample, mip_level).rgb * (1.0 / 9.0);
     }
 
-    // ------------------------------------------------------------------------
-    // 3. LOI DE BEER-LAMBERT (Absorption Volumétrique Cristalline Pure)
-    // I(d) = I0 * exp(-sigma * d)
-    // ------------------------------------------------------------------------
+    // 3. Transmittance Volumétrique Beer-Lambert & Pigmentation du Verre
     float trajet_optique = epaisseur / (NdotV + 0.10);
-    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 0.8 + vec3(0.01, 0.005, 0.00);
+    vec3 sigma_absorption = (vec3(1.0) - pc.glass_tint.rgb) * 1.2 + vec3(0.01, 0.005, 0.00);
     vec3 attenuation_beer_lambert = exp(-sigma_absorption * trajet_optique);
 
-    vec3 couleur_transmise = fond_transmis * attenuation_beer_lambert;
+    // Multiplication par la teinte chromatique de la matière du verre
+    vec3 couleur_transmise = fond_transmis * attenuation_beer_lambert * pc.glass_tint.rgb;
 
-    // ------------------------------------------------------------------------
-    // 4. REFLEXION SPECULAIRE & LISERE CYAN (Tranches Poli Diamant 45°)
-    // ------------------------------------------------------------------------
+    // 4. Spéculaire Studio & Liseré Cyan sur les Tranches 45°
     float fresnel = fresnel_schlick(NdotV, 0.05);
 
     vec3 lumière_clef = normalize(vec3(3.2, 4.0, 3.0));
@@ -91,22 +79,17 @@ void main() {
     vec3 H_clef = normalize(V + lumière_clef);
     vec3 H_liseré = normalize(V + lumière_liseré);
 
-    // Reflet spéculaire doux sur la face plate
-    float spec_surface = pow(max(dot(N, H_clef), 0.0), 32.0) * 0.22 * fresnel;
+    float spec_surface = pow(max(dot(N, H_clef), 0.0), 32.0) * 0.25 * fresnel;
     vec3 reflet_surface = vec3(0.95, 0.98, 1.00) * spec_surface;
 
-    // Détection géométrique des chanfreins à 45° et tranches à 90°
     float est_chanfrein = step(0.15, abs(N.z)) * step(abs(N.z), 0.88);
     float est_tranche_verticale = step(abs(N.z), 0.15);
 
-    // Liseré Cyan Électrique ultra-net (#00E5FF) sur la tranche 45°
     float spec_liseré = pow(max(dot(N, H_liseré), 0.0), 180.0) * 90.0;
     vec3 glow_cyan = vec3(0.00, 0.95, 1.00) * spec_liseré * est_chanfrein;
 
-    // Assombrissement réaliste de la tranche 90°
     vec3 couleur_tranche = mix(couleur_transmise, vec3(0.04, 0.18, 0.45) * attenuation_beer_lambert, est_tranche_verticale * 0.65);
 
-    // Assemblage final pure lumière
     vec3 rgb_final = couleur_tranche + reflet_surface + glow_cyan;
 
     out_color = vec4(clamp(rgb_final, 0.0, 1.0), 1.0);

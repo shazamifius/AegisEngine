@@ -456,7 +456,7 @@ impl GlassSceneRenderPass {
                 rotation_z: 34.0f32.to_radians(),
                 rotation_x: 2.0f32.to_radians(),
                 scale: Vec3::new(0.62, 0.62, 0.14),
-                tint: Vec4::new(0.00, 0.95, 0.20, 0.85), // VERT ÉMERAUDE PURE
+                tint: Vec4::new(0.10, 0.95, 0.30, 0.85), // VERT ÉMERAUDE VIF
                 rugosite: 0.35,
             },
             // 2. Dalle Capsule Intermédiaire (Diagonale Haut-Droite, ROUGE RUBIS, Rugosité = 0.25)
@@ -465,16 +465,16 @@ impl GlassSceneRenderPass {
                 rotation_z: 34.0f32.to_radians(),
                 rotation_x: 2.0f32.to_radians(),
                 scale: Vec3::new(0.70, 0.70, 0.18),
-                tint: Vec4::new(0.95, 0.05, 0.10, 0.85), // ROUGE RUBIS PURE
+                tint: Vec4::new(0.95, 0.15, 0.20, 0.85), // ROUGE RUBIS VIF
                 rugosite: 0.25,
             },
-            // 3. Dalle Capsule Premier Plan (BLEU CYAN CLAIR TRANSPARENT, Rugosité = 0.10)
+            // 3. Dalle Capsule Premier Plan (BLEU SAPHIR/CYAN, Rugosité = 0.10)
             GlassSlabInstance {
                 position: Vec3::new(-0.08, 0.28, 0.40),
                 rotation_z: -36.0f32.to_radians(),
                 rotation_x: -2.0f32.to_radians(),
                 scale: Vec3::new(0.68, 0.68, 0.16),
-                tint: Vec4::new(0.00, 0.60, 1.00, 0.15), // BLEU CYAN CLAIR PURE
+                tint: Vec4::new(0.10, 0.50, 0.98, 0.70), // BLEU SAPHIR VIF
                 rugosite: 0.10,
             },
         ];
