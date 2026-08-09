@@ -11,7 +11,7 @@ layout(push_constant) uniform PushConstants {
     mat4 mvp_matrix;
     mat4 model_matrix;
     mat4 normal_matrix;
-    vec4 glass_tint; // RGB: Couleur du verre, A: Translucidité
+    vec4 glass_tint; // RGB: Couleur saturée, A: Alpha (1.0)
     vec4 params;     // X: Rugosité, Y: IOR (1.48)
 } pc;
 
@@ -22,10 +22,6 @@ layout(location = 0) out vec4 out_color;
 
 const float PI = 3.14159265359;
 
-float fresnel_schlick(float cos_theta, float f0) {
-    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 3.5);
-}
-
 void main() {
     vec3 N = normalize(in_world_normal);
     vec3 camera_pos = vec3(0.0, 0.25, 5.8);
@@ -33,10 +29,10 @@ void main() {
 
     float NdotV = abs(dot(N, V));
 
-    float ior = pc.params.y > 0.0 ? pc.params.y : 1.48; // Indice de réfraction du verre = 1.48
+    float ior = pc.params.y > 0.0 ? pc.params.y : 1.48;
 
     // ------------------------------------------------------------------------
-    // 1. REFRACTION OPTIQUE SNELL-DESCARTES (Déformation des contours sous le verre)
+    // 1. REFRACTION OPTIQUE SNELL-DESCARTES (Déformation des contours UV)
     // ------------------------------------------------------------------------
     float eta = 1.0 / ior;
     float k = 1.0 - eta * eta * (1.0 - NdotV * NdotV);
@@ -45,34 +41,31 @@ void main() {
         refract_dir = -V * eta + N * (eta * NdotV - sqrt(k));
     }
 
-    // Déplacement optique Snell accentué par la normale biseautée
-    vec2 refraction_offset = refract_dir.xy * 0.28 + N.xy * 0.18;
+    vec2 refraction_offset = (N.xy * 0.16 + refract_dir.xy * 0.18) * (1.0 - N.z * N.z * 0.65);
     vec2 uv_sample = clamp(in_screen_uv + refraction_offset, vec2(0.001), vec2(0.999));
     vec3 fond_transmis = texture(sampler2D(transmission_texture, transmission_sampler), uv_sample).rgb;
 
     // ------------------------------------------------------------------------
-    // 2. TRANSMISSION CRISTALLINE (Conservation des couleurs vives sous-jacentes)
+    // 2. TRANSMISSION DIELECTRIQUE SANS EXTINCTION NOIRE (Mélange Magenta/Purple)
     // ------------------------------------------------------------------------
-    vec3 couleur_transmise = mix(fond_transmis, pc.glass_tint.rgb, 0.22);
+    // Réfraction lumineuse diélectrique pure : transmet 65% du fond et infuse 35% de la teinte du verre
+    vec3 couleur_transmise = mix(fond_transmis, pc.glass_tint.rgb, 0.35);
 
     // ------------------------------------------------------------------------
-    // 3. FIL LUMINEUX CONTINU FRESNEL SUR 360° (Tranche Cristalline hyper brillante)
+    // 3. LIGNE FINE BLANCHE HYPER BRILLANTE SUR TOUT LE CONTOUR (360° Razor-Sharp Rim)
     // ------------------------------------------------------------------------
-    float fresnel = fresnel_schlick(NdotV, 0.08);
+    // Ligne fine brillante très élevée sur la tranche rase (contour 360°)
+    float contour_brillant = pow(1.0 - NdotV, 8.0) * 5.0;
+    vec3 ligne_blanche = vec3(1.0, 1.0, 1.0) * contour_brillant;
 
+    // Reflet spéculaire de surface polie
     vec3 lumière_clef = normalize(vec3(3.2, 4.0, 3.0));
     vec3 H_clef = normalize(V + lumière_clef);
-
-    // Reflet spéculaire de surface très poli
-    float spec_surface = pow(max(dot(N, H_clef), 0.0), 128.0) * 0.75 * fresnel;
+    float spec_surface = pow(max(dot(N, H_clef), 0.0), 128.0) * 0.85;
     vec3 reflet_surface = vec3(1.0, 1.0, 1.0) * spec_surface;
 
-    // FIL LUMINEUX CONTINU TRES FIN ET HYPER BRILLANT (360° Perimeter Crystal Rim)
-    float fil_lumineux = pow(1.0 - NdotV, 6.0) * 2.8;
-    vec3 rim_cristallin = vec3(0.85, 0.94, 1.00) * fil_lumineux;
+    vec3 rgb_final = couleur_transmise + ligne_blanche + reflet_surface;
 
-    // Assemblage final pure matière verre
-    vec3 rgb_final = couleur_transmise + reflet_surface + rim_cristallin;
-
-    out_color = vec4(clamp(rgb_final, vec3(0.0), vec3(1.0)), 0.65);
+    // Alpha = 1.0 : Pas de voile laiteux, pas de baisse d'opacité globale
+    out_color = vec4(clamp(rgb_final, 0.0, 1.0), 1.0);
 }
