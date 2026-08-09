@@ -460,8 +460,8 @@ impl GlassSceneRenderPass {
             GlassSlabInstance {
                 position: Vec3::new(-0.18, -0.38, -0.40),
                 rotation_z: 34.0f32.to_radians(),
-                rotation_x: 2.0f32.to_radians(),
-                scale: Vec3::new(0.62, 0.62, 0.14),
+                rotation_x: 0.0f32.to_radians(),
+                scale: Vec3::new(0.62, 0.62, 0.04),
                 tint: Vec4::new(0.10, 0.95, 0.35, 1.00),
                 rugosite: 0.35,
             },
@@ -469,17 +469,17 @@ impl GlassSceneRenderPass {
             GlassSlabInstance {
                 position: Vec3::new(0.10, -0.05, 0.00),
                 rotation_z: 34.0f32.to_radians(),
-                rotation_x: 2.0f32.to_radians(),
-                scale: Vec3::new(0.70, 0.70, 0.18),
+                rotation_x: 0.0f32.to_radians(),
+                scale: Vec3::new(0.70, 0.70, 0.04),
                 tint: Vec4::new(0.98, 0.15, 0.45, 1.00),
                 rugosite: 0.25,
             },
             // 3. Dalle Capsule Premier Plan (Diagonale Haut-Gauche, VIOLET SAPHIR VIF)
             GlassSlabInstance {
-                position: Vec3::new(-0.05, 0.22, 0.40),
+                position: Vec3::new(-0.08, 0.25, 0.40),
                 rotation_z: -36.0f32.to_radians(),
-                rotation_x: -2.0f32.to_radians(),
-                scale: Vec3::new(0.88, 0.68, 0.16),
+                rotation_x: 0.0f32.to_radians(),
+                scale: Vec3::new(0.72, 0.68, 0.04),
                 tint: Vec4::new(0.35, 0.25, 0.98, 1.00),
                 rugosite: 0.10,
             },
