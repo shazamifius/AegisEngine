@@ -186,4 +186,27 @@ impl ParticleEffectManager {
             });
         }
     }
+
+    // 5. Explosion d'Énergie au Boost Wall Jump (Rebond Mural à Haute Vélocité)
+    pub fn spawn_boost_wall_jump_burst(&mut self, wall_x: f32, contact_y: f32, push_away_dir: f32, intensity: f32) {
+        let count = (16.0 + intensity * 16.0) as usize;
+        for _ in 0..count {
+            let r1 = self.next_rand();
+            let r2 = self.next_rand();
+            let r3 = self.next_rand();
+
+            let speed_x = push_away_dir * (3.5 + r1 * 11.0 * intensity);
+            let speed_y = (r2 - 0.3) * 8.0 * intensity;
+
+            self.particles.push(Particle {
+                pos: Vec3::new(wall_x, contact_y + (r2 - 0.5) * 0.4, 0.22),
+                vel: Vec3::new(speed_x, speed_y, (r3 - 0.5) * 2.0),
+                size: Vec3::splat(0.08 + r2 * 0.08),
+                color: Vec4::new(0.98, 0.85, 0.15, 1.0), // Or Émissif Énergétique
+                emissive: 8.0,
+                life: 0.0,
+                max_life: 0.25 + r3 * 0.20,
+            });
+        }
+    }
 }

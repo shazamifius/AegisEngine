@@ -107,6 +107,8 @@ pub struct Player {
     pub anim_leg_back: f32,
     pub particles: crate::particles::ParticleEffectManager,
     pub prev_vel_x: f32,
+    pub stored_fall_momentum: f32,
+    pub boost_window_timer: f32,
     pub ragdoll: Ragdoll,
 }
 
@@ -144,6 +146,8 @@ impl Player {
             anim_leg_back: 0.0,
             particles: crate::particles::ParticleEffectManager::new(),
             prev_vel_x: 0.0,
+            stored_fall_momentum: 0.0,
+            boost_window_timer: 0.0,
             ragdoll: Ragdoll::default(),
         }
     }
@@ -220,7 +224,12 @@ impl Player {
             }
         }
 
-        // 3. Wall-Slide Detection
+        if self.boost_window_timer > 0.0 {
+            self.boost_window_timer = (self.boost_window_timer - dt).max(0.0);
+        }
+
+        // 3. Wall-Slide Detection & Capture de la Vélocité de Chute
+        let entry_fall_speed = (-self.velocity.y).max(0.0);
         let checking_left = grid.check_solid_collision(self.position + Vec2::new(-0.06, 0.1), Vec2::new(self.size.x, self.size.y - 0.2));
         let checking_right = grid.check_solid_collision(self.position + Vec2::new(0.06, 0.1), Vec2::new(self.size.x, self.size.y - 0.2));
 
@@ -234,6 +243,13 @@ impl Player {
 
         if can_wall_slide {
             let left_wall = pushing_into_left;
+            if !matches!(self.state, PlayerState::WallSliding { .. }) {
+                // Instamment à l'accroche murale : capture de l'élan de chute accumulé !
+                if entry_fall_speed > 7.5 {
+                    self.stored_fall_momentum = (entry_fall_speed - 5.5).clamp(0.0, 24.0);
+                    self.boost_window_timer = 0.38; // Fenêtre de saut boosté ouverte pendant 0.38s !
+                }
+            }
             self.state = PlayerState::WallSliding { left_wall };
             self.velocity.y = self.velocity.y.max(-Self::WALL_SLIDE_SPEED);
 
@@ -249,7 +265,7 @@ impl Player {
         // 4. Gravity
         self.velocity.y -= Self::GRAVITY * dt;
 
-        // 5. Jump Execution
+        // 5. Jump Execution (Avec Mécanique de BOOST WALL JUMP)
         if self.jump_buffer > 0.0 {
             if self.state == PlayerState::OnGround || self.coyote_timer > 0.0 {
                 self.velocity.y = Self::JUMP_VELOCITY;
@@ -259,10 +275,29 @@ impl Player {
             } else if was_wall_sliding {
                 let push_away_dir = if left_wall_saved { 1.0 } else { -1.0 };
                 
-                self.velocity.x = push_away_dir * Self::WALL_KICK_SPEED;
-                self.velocity.y = Self::JUMP_VELOCITY;
+                // Calcul du BOOST WALL JUMP basé sur la vélocité de chute accumulée !
+                let is_boosted = self.boost_window_timer > 0.0 && self.stored_fall_momentum > 2.0;
+                let (kick_speed, jump_vel, intensity) = if is_boosted {
+                    let boost_factor = (self.stored_fall_momentum / 18.0).clamp(0.20, 1.20);
+                    let k = Self::WALL_KICK_SPEED + boost_factor * 12.0; // Propulsé bien plus loin dans la direction inverse (jusqu'à 21.0 !)
+                    let j = Self::JUMP_VELOCITY + boost_factor * 7.5;   // Propulsé bien plus haut ! (jusqu'à 21.0 !)
+                    (k, j, boost_factor)
+                } else {
+                    (Self::WALL_KICK_SPEED, Self::JUMP_VELOCITY, 0.0)
+                };
+
+                self.velocity.x = push_away_dir * kick_speed;
+                self.velocity.y = jump_vel;
                 self.facing_right = left_wall_saved;
                 
+                if is_boosted {
+                    let wall_x = if left_wall_saved { self.position.x - 0.40 } else { self.position.x + 0.40 };
+                    self.particles.spawn_boost_wall_jump_burst(wall_x, self.position.y + 0.5, push_away_dir, intensity);
+                    self.tilt_angle = push_away_dir * -0.45; // Inclinaison dynamique très prononcée vers la trajectoire !
+                }
+
+                self.stored_fall_momentum = 0.0;
+                self.boost_window_timer = 0.0;
                 self.jump_buffer = 0.0;
                 self.wall_cooldown = 0.12;
                 self.state = PlayerState::InAir;
@@ -416,6 +451,7 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::TileType;
 
     #[test]
     fn test_player_dimensions() {
@@ -439,5 +475,34 @@ mod tests {
         assert_eq!(player.state, PlayerState::InAir);
         assert!(player.velocity.x > 0.0);
         assert!(player.velocity.y > 0.0);
+    }
+
+    #[test]
+    fn test_boost_wall_jump_momentum() {
+        let mut player = Player::new(Vec2::new(4.4, 5.0));
+        let mut grid = TileGrid::new(32, 18);
+        grid.set_tile(3, 5, TileType::SolidBlock); // Mur solide [3.0, 4.0] à gauche
+        let traps = TrapManager::new();
+
+        // 1. Chute rapide avec accumulation de vélocité
+        player.velocity.y = -22.0;
+        let mut input = InputState::default();
+        input.left = true; // S'accroche au mur gauche
+
+        // Simulation d'accroche murale
+        player.state = PlayerState::InAir;
+        player.update(0.016, &input, &grid, &traps);
+
+        // La vélocité de chute a été capturée dans le réservoir de boost !
+        assert!(player.stored_fall_momentum > 5.0);
+        assert!(player.boost_window_timer > 0.0);
+
+        // 2. Exécution du BOOST WALL JUMP (Saut au mur)
+        input.jump = true;
+        player.update(0.016, &input, &grid, &traps);
+
+        // La vélocité horizontale (direction inverse) et verticale doit être significativement supérieure à un Wall Jump standard !
+        assert!(player.velocity.x > Player::WALL_KICK_SPEED);
+        assert!(player.velocity.y > Player::JUMP_VELOCITY);
     }
 }
