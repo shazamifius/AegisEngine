@@ -308,7 +308,7 @@ impl Player {
         self.move_and_slide(dt, grid);
 
         // 7. Hazards & Finish Flag (Déclenchement du Ragdoll de mort)
-        if grid.check_hazard_collision(self.position, self.size) || traps.check_player_death(self.position, self.size).is_some() {
+        if grid.check_hazard_collision(self.position, self.size) || traps.check_player_death(self.position, self.size, grid).is_some() {
             if self.state != PlayerState::Dead {
                 self.state = PlayerState::Dead;
                 self.ragdoll.trigger(self.position, self.velocity);

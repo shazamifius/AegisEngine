@@ -9,6 +9,7 @@ mod mystery_box;
 mod party_game;
 mod party_render_pass;
 mod objects;
+mod web3_integration;
 
 use std::sync::Arc;
 use aegis_engine::Engine;
@@ -17,7 +18,7 @@ use party_render_pass::PartyRenderPass;
 use player::InputState;
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent},
+    event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     platform::x11::EventLoopBuilderExtX11,
@@ -32,6 +33,8 @@ struct AegisApp {
     input_state: InputState,
     screenshot_mode: bool,
     screenshot_path: String,
+    /// Position de la souris en pixels (pour la sélection d'items par clic)
+    mouse_pos: (f32, f32),
 }
 
 impl AegisApp {
@@ -44,6 +47,122 @@ impl AegisApp {
             input_state: InputState::default(),
             screenshot_mode,
             screenshot_path,
+            mouse_pos: (0.0, 0.0),
+        }
+    }
+
+    /// Traite un clic gauche en phase Draft ou Placement.
+    fn handle_left_click(&mut self) {
+        match self.party_game.phase {
+            party_game::GamePhase::Drafting => {
+                if let (Some(engine), Some(render_pass)) =
+                    (self.engine.as_ref(), self.party_render_pass.as_ref())
+                {
+                    let w = engine.gpu.swapchain_extent.width as f32;
+                    let h = engine.gpu.swapchain_extent.height as f32;
+                    let (mx, my) = self.mouse_pos;
+                    let total = self.party_game.mystery_box.available_items.len();
+                    if total == 0 { return; }
+
+                    let aspect = w / h;
+                    let view = aegis_engine::math::Mat4::look_at_rh(
+                        render_pass.camera_pos,
+                        render_pass.camera_target,
+                        aegis_engine::math::Vec3::Y,
+                    );
+                    let proj = aegis_engine::math::Mat4::perspective_rh(
+                        38.0f32.to_radians(), aspect, 0.1, 500.0,
+                    );
+                    let vp = proj * view;
+
+                    let box_pos = aegis_engine::math::Vec3::new(
+                        self.party_game.grid.width as f32 / 2.0,
+                        self.party_game.grid.height as f32 / 2.0,
+                        0.0,
+                    );
+                    let t = self.party_game.round_timer;
+
+                    let mut best_idx = None;
+                    let mut min_dist_sq = 90.0 * 90.0; // Rayon de clic généreux de 90 pixels
+
+                    for i in 0..total {
+                        let (offset_vec, _) = crate::mystery_box::compute_box_item_offset(i, total);
+                        let item_world = box_pos + offset_vec;
+
+                        let clip = vp * aegis_engine::math::Vec4::new(item_world.x, item_world.y, item_world.z, 1.0);
+                        if clip.w > 0.0 {
+                            let ndc_x = clip.x / clip.w;
+                            let ndc_y = clip.y / clip.w;
+                            let sx = (ndc_x + 1.0) * 0.5 * w;
+                            let sy = (1.0 - ndc_y) * 0.5 * h;
+                            let dx = mx - sx;
+                            let dy = my - sy;
+                            let dist_sq = dx * dx + dy * dy;
+                            if dist_sq < min_dist_sq {
+                                min_dist_sq = dist_sq;
+                                best_idx = Some(i);
+                            }
+                        }
+                    }
+
+                    if let Some(idx) = best_idx {
+                        self.party_game.mystery_box.select_item(idx);
+                        // Validation directe de l'objet par clic -> Passage immédiat en phase Placement !
+                        self.party_game.phase = party_game::GamePhase::Placement;
+                        let (gw, gh) = (self.party_game.grid.width, self.party_game.grid.height);
+                        self.party_game.editor.cursor = ((gw / 2) as i32, (gh / 2) as i32);
+                        log::info!("🖱️ Clic 3D → Item {} ({}) CHOISI ! Passage immédiat en Phase Placement.", idx, self.party_game.mystery_box.available_items[idx].name());
+                    }
+                }
+            }
+            party_game::GamePhase::Placement => {
+                // Convertir la position souris en coordonnées grille
+                if let (Some(engine), Some(render_pass)) =
+                    (self.engine.as_ref(), self.party_render_pass.as_ref())
+                {
+                    let (mx, my) = self.mouse_pos;
+                    let w = engine.gpu.swapchain_extent.width as f32;
+                    let h = engine.gpu.swapchain_extent.height as f32;
+                    // Coordonnées NDC [-1, 1]
+                    let ndc_x = (mx / w) * 2.0 - 1.0;
+                    let ndc_y = 1.0 - (my / h) * 2.0;
+                    // Matrice VP inverse pour retrouver la position monde
+                    let aspect = w / h;
+                    let view = aegis_engine::math::Mat4::look_at_rh(
+                        render_pass.camera_pos,
+                        render_pass.camera_target,
+                        aegis_engine::math::Vec3::Y,
+                    );
+                    let proj = aegis_engine::math::Mat4::perspective_rh(
+                        38.0f32.to_radians(), aspect, 0.1, 500.0,
+                    );
+                    let vp = proj * view;
+                    let inv_vp = vp.inverse();
+                    {
+                        // Ray depuis NDC (Z=0 = near plane)
+                        let near = inv_vp * aegis_engine::math::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+                        let far  = inv_vp * aegis_engine::math::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+                        let near_w = aegis_engine::math::Vec3::new(near.x / near.w, near.y / near.w, near.z / near.w);
+                        let far_w  = aegis_engine::math::Vec3::new(far.x  / far.w,  far.y  / far.w,  far.z  / far.w);
+                        // Intersection avec le plan Z=0 (la map)
+                        let dz = far_w.z - near_w.z;
+                        if dz.abs() > 1e-6 {
+                            let t = -near_w.z / dz;
+                            let world_x = near_w.x + t * (far_w.x - near_w.x);
+                            let world_y = near_w.y + t * (far_w.y - near_w.y);
+                            let gx = world_x.floor() as usize;
+                            let gy = world_y.floor() as usize;
+                            if gx < self.party_game.grid.width && gy < self.party_game.grid.height {
+                                self.party_game.editor.cursor = (gx as i32, gy as i32);
+                                self.party_game.placement_place_request = true;
+                                log::info!("🖱️ Clic Placement → case ({}, {})", gx, gy);
+                            }
+
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -128,6 +247,19 @@ impl ApplicationHandler for AegisApp {
                     party_pass.recreate_framebuffer_resources(&engine.gpu, &memory_props);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_pos = (position.x as f32, position.y as f32);
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Pressed {
+                    if button == MouseButton::Left {
+                        self.handle_left_click();
+                    } else if button == MouseButton::Right && self.party_game.phase == crate::party_game::GamePhase::Placement {
+                        self.party_game.placement_dir = self.party_game.placement_dir.rotate_cw();
+                        log::info!("🔄 Clic Droit → Rotation du Piège en Direction {:?}", self.party_game.placement_dir);
+                    }
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll_y = match delta {
                     MouseScrollDelta::LineDelta(_x, y) => y,
@@ -165,21 +297,30 @@ impl ApplicationHandler for AegisApp {
                     }
                     KeyCode::Enter => {}
 
-                    // Sélection du Type de Bloc Éditeur (Touches 1, 2, 3, 4, 5)
-                    KeyCode::Digit1 => if is_pressed { self.party_game.editor.selected_block = crate::party_game::EditorBlockType::Grass; log::info!("Bloc Sélectionné : 1 - HERBE VERTE"); },
-                    KeyCode::Digit2 => if is_pressed { self.party_game.editor.selected_block = crate::party_game::EditorBlockType::Dirt; log::info!("Bloc Sélectionné : 2 - TERRE MARRON"); },
-                    KeyCode::Digit3 => if is_pressed { self.party_game.editor.selected_block = crate::party_game::EditorBlockType::Stone; log::info!("Bloc Sélectionné : 3 - PIERRE GRISE"); },
-                    KeyCode::Digit4 => if is_pressed { self.party_game.editor.selected_block = crate::party_game::EditorBlockType::Start; log::info!("Bloc Sélectionné : 4 - POINT DE SPAWN"); },
-                    KeyCode::Digit5 => if is_pressed { self.party_game.editor.selected_block = crate::party_game::EditorBlockType::Finish; log::info!("Bloc Sélectionné : 5 - POINT D'ARRIVÉE"); },
+                    // Sélection directe d'un item du carton par touche 1-0 en phase Draft
+                    KeyCode::Digit1 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(0); log::info!("Item 1 sélectionné"); },
+                    KeyCode::Digit2 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(1); log::info!("Item 2 sélectionné"); },
+                    KeyCode::Digit3 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(2); log::info!("Item 3 sélectionné"); },
+                    KeyCode::Digit4 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(3); log::info!("Item 4 sélectionné"); },
+                    KeyCode::Digit5 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(4); log::info!("Item 5 sélectionné"); },
+                    KeyCode::Digit6 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(5); log::info!("Item 6 sélectionné"); },
+                    KeyCode::Digit7 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(6); log::info!("Item 7 sélectionné"); },
+                    KeyCode::Digit8 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(7); log::info!("Item 8 sélectionné"); },
+                    KeyCode::Digit9 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(8); log::info!("Item 9 sélectionné"); },
+                    KeyCode::Digit0 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(9); log::info!("Item 10 sélectionné"); },
 
-                    // Bascule de Mode (Mode Éditeur <-> Mode Jeu Direct) sur Tab ou F1
-                    KeyCode::Tab | KeyCode::F1 => if is_pressed { self.party_game.toggle_mode(); },
+                    // Rotation du piège sur R (Phase de Placement) ou Reset du joueur (Phase Running)
+                    KeyCode::KeyR => {
+                        if is_pressed {
+                            if self.party_game.phase == crate::party_game::GamePhase::Placement {
+                                self.party_game.placement_dir = self.party_game.placement_dir.rotate_cw();
+                                log::info!("🔄 Touche R → Rotation du Piège en Direction {:?}", self.party_game.placement_dir);
+                            } else {
+                                self.party_game.reset_player_to_spawn();
+                            }
+                        }
+                    }
 
-                    // Re-spawn / Reset du Joueur sur R
-                    KeyCode::KeyR => if is_pressed { self.party_game.reset_player_to_spawn(); },
-
-                    // Suppression de bloc visé sur Suppr / Retour Arrière
-                    KeyCode::Delete | KeyCode::Backspace => if is_pressed { self.party_game.delete_selected_block(); },
 
                     _ => {}
                 }

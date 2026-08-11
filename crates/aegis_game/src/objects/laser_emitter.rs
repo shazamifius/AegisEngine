@@ -19,16 +19,23 @@ impl LaserEmitterObject {
         Ok(Self { mesh })
     }
 
-    pub fn draw(
+    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer, pipeline_layout: vk::PipelineLayout, cube_mesh: &GpuMesh, vp: Mat4, pos: Vec2, dir: Direction, active: bool, beam_length: f32, time: f32) {
+        self.draw_at_3d(device, cmd, pipeline_layout, cube_mesh, vp, Vec3::new(pos.x, pos.y, 0.1), dir, 1.0, active, beam_length, time);
+    }
+
+    pub fn draw_at_3d(
         &self,
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         pipeline_layout: vk::PipelineLayout,
         cube_mesh: &GpuMesh,
         vp: Mat4,
-        pos: Vec2,
+        pos: Vec3,
         dir: Direction,
+        scale: f32,
         active: bool,
+        beam_length: f32,
+        time: f32,
     ) {
         // En position verticale d'origine Blender, +Y est orienté vers le haut!
         let rot_z = match dir {
@@ -38,9 +45,9 @@ impl LaserEmitterObject {
             Direction::Down => 180.0f32.to_radians(),
         };
 
-        let model = Mat4::from_translation(Vec3::new(pos.x, pos.y, 0.1))
+        let model = Mat4::from_translation(pos)
             * Mat4::from_rotation_z(rot_z)
-            * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0));
+            * Mat4::from_scale(Vec3::splat(scale));
 
         let push = PartyPushConstants {
             mvp_matrix: vp * model,
@@ -54,16 +61,17 @@ impl LaserEmitterObject {
         }
         self.mesh.draw(device, cmd);
 
-        // Faisceau Laser Cyan Vertical Éclatant (projeté vers le haut!)
+        // Faisceau Laser Cyan Continu Raycasté & Particules en Spirale
         if active {
+            let half_len = beam_length * 0.5;
             let (beam_center, beam_scale) = match dir {
-                Direction::Up => (pos + Vec2::new(0.0, 5.0), Vec3::new(0.18, 10.0, 0.18)),
-                Direction::Down => (pos - Vec2::new(0.0, 5.0), Vec3::new(0.18, 10.0, 0.18)),
-                Direction::Right => (pos + Vec2::new(5.0, 0.0), Vec3::new(10.0, 0.18, 0.18)),
-                Direction::Left => (pos - Vec2::new(5.0, 0.0), Vec3::new(10.0, 0.18, 0.18)),
+                Direction::Up => (pos + Vec3::new(0.0, half_len, 0.0), Vec3::new(0.18, beam_length, 0.18)),
+                Direction::Down => (pos - Vec3::new(0.0, half_len, 0.0), Vec3::new(0.18, beam_length, 0.18)),
+                Direction::Right => (pos + Vec3::new(half_len, 0.0, 0.0), Vec3::new(beam_length, 0.18, 0.18)),
+                Direction::Left => (pos - Vec3::new(half_len, 0.0, 0.0), Vec3::new(beam_length, 0.18, 0.18)),
             };
 
-            let beam_model = Mat4::from_translation(Vec3::new(beam_center.x, beam_center.y, 0.2))
+            let beam_model = Mat4::from_translation(beam_center + Vec3::new(0.0, 0.0, 0.1))
                 * Mat4::from_scale(beam_scale);
 
             let push_beam = PartyPushConstants {
@@ -77,6 +85,55 @@ impl LaserEmitterObject {
                 device.cmd_push_constants(cmd, pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_beam));
             }
             cube_mesh.draw(device, cmd);
+
+            // Essaim d'Énergie Dense & Organique (9x plus de particules en vortex cyan/blanc)
+            let particle_count = (beam_length * 18.0).clamp(60.0, 220.0) as usize;
+            for i in 0..particle_count {
+                let fi = i as f32;
+                // Emplacement le long du faisceau avec micro-bruit organique
+                let frac = (fi / particle_count as f32 + (fi * 12.9898).sin() * 0.015).clamp(0.0, 1.0);
+                let dist_along = frac * beam_length;
+
+                // Variations pseudo-aléatoires déterministes par particule
+                let speed_mult = 3.5 + (i % 5) as f32 * 1.25;
+                let phase_offset = fi * 0.85 + (i % 3) as f32 * 2.094;
+                let angle = time * speed_mult + phase_offset;
+
+                // Rayon et taille organiques variés
+                let radius = 0.12 + ((i * 13) % 9) as f32 * 0.035;
+                let p_scale = 0.05 + ((i * 17) % 7) as f32 * 0.018;
+
+                let (offset_x, offset_y, offset_z) = match dir {
+                    Direction::Up => (angle.cos() * radius, dist_along, angle.sin() * radius),
+                    Direction::Down => (angle.cos() * radius, -dist_along, angle.sin() * radius),
+                    Direction::Right => (dist_along, angle.cos() * radius, angle.sin() * radius),
+                    Direction::Left => (-dist_along, angle.cos() * radius, angle.sin() * radius),
+                };
+
+                let p_pos = pos + Vec3::new(offset_x, offset_y, offset_z + 0.15);
+                let p_model = Mat4::from_translation(p_pos) * Mat4::from_scale(Vec3::splat(p_scale));
+
+                // Couleur Cyan Électrique Étincelante identique au Faisceau Laser
+                let p_color = if i % 3 == 0 {
+                    Vec4::new(0.00, 1.00, 0.92, 1.0) // Cyan Turquoise Néon Étincelant
+                } else if i % 2 == 0 {
+                    Vec4::new(0.00, 0.95, 1.00, 1.0) // Bleu Cyan Électrique Laser
+                } else {
+                    Vec4::new(0.10, 0.85, 1.00, 1.0) // Cyan Bleu Brillant
+                };
+
+                let push_particle = PartyPushConstants {
+                    mvp_matrix: vp * p_model,
+                    model_matrix: p_model,
+                    color_tint: p_color,
+                    params: Vec4::new(0.0, 14.0, 0.0, 0.0), // Émission maximale !
+                };
+
+                unsafe {
+                    device.cmd_push_constants(cmd, pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_particle));
+                }
+                cube_mesh.draw(device, cmd);
+            }
         }
     }
 }

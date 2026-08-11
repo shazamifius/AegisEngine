@@ -289,16 +289,17 @@ impl PartyRenderPass {
         let view = context.swapchain_image_views[image_index];
         let image = context.swapchain_images[image_index];
 
-        // Suivi de caméra fluide (Full Dézoomée centrée sur la Map en GamePhase::Drafting)
+        // Suivi de caméra fluide (Drafting = vue d'ensemble dézoommée de la map, Placement = suit le curseur d'édition avec Zoom, Running = suit le joueur)
         let (target_x, target_y, target_dist) = if game.phase == crate::party_game::GamePhase::Drafting {
-            (game.grid.width as f32 / 2.0, game.grid.height as f32 / 2.0, 26.0)
-        } else if game.is_play_mode {
-            let p_pos = game.human_player().position;
-            (p_pos.x, p_pos.y + 0.85, 18.0 * self.zoom_level)
-        } else {
+            (game.grid.width as f32 / 2.0, game.grid.height as f32 / 2.0, 42.0)
+        } else if game.phase == crate::party_game::GamePhase::Placement || !game.is_play_mode {
             let (cx, cy) = game.editor.cursor;
             (cx as f32 + 0.5, cy as f32 + 0.5, 18.0 * self.zoom_level)
+        } else {
+            let p_pos = game.human_player().position;
+            (p_pos.x, p_pos.y + 0.85, 18.0 * self.zoom_level)
         };
+
 
         self.camera_target = self.camera_target.lerp(Vec3::new(target_x, target_y, 0.0), 0.18);
         self.camera_pos = self.camera_target + Vec3::new(0.0, 0.5, target_dist);
@@ -378,7 +379,7 @@ impl PartyRenderPass {
                     let xi = x as i32;
                     let yi = y as i32;
                     let tile = game.grid.get_tile(xi, yi);
-                    if tile != TileType::Air {
+                    if tile != TileType::Air && tile != TileType::StartPoint {
                         let model = Mat4::from_translation(Vec3::new(x as f32 + 0.5, y as f32 + 0.5, 0.0))
                             * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0));
 
@@ -489,7 +490,79 @@ impl PartyRenderPass {
             context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_void));
             self.cube_mesh.draw(&context.device, cmd);
 
-            // Rendu du Carton Mystère 3D Animé au Centre de l'Écran (boxfermer.glb -> box.glb avec Secousse 0.8s)
+            // ─── Rendu des Pièges et Objets 3D Posés            // ─── Rendu des Pièges et Objets 3D Posés sur la Carte ─────────────────────
+            let trap_t = game.round_timer;
+            for trap in &game.traps.traps {
+                match &trap.kind {
+                    crate::traps::TrapKind::SawBlade { rotation, .. } => {
+                        self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, vp, trap.position, *rotation);
+                    }
+                    crate::traps::TrapKind::CannonTurret { dir, .. } => {
+                        self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, Some(&self.cube_mesh), vp, trap.position, *dir, false);
+                    }
+                    crate::traps::TrapKind::SpikeTrap => {
+                        self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, vp, trap.position);
+                    }
+                    crate::traps::TrapKind::LaserEmitter { dir, active, .. } => {
+                        let beam_len = crate::traps::compute_laser_beam_length(trap.position, *dir, &game.grid);
+                        let is_active = *active && game.phase == crate::party_game::GamePhase::Running;
+                        self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, trap.position, *dir, is_active, beam_len, trap_t);
+                    }
+                    crate::traps::TrapKind::Flamethrower { dir, active, .. } => {
+                        let is_active = *active && game.phase == crate::party_game::GamePhase::Running;
+                        self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, trap.position, *dir, is_active, trap_t);
+                    }
+                    _ => {}
+                }
+            }
+
+            // ─── Rendu des Projectiles Cinétiques (Balles & Traînée Voxel Lumineuse) ────
+            for proj in &game.traps.projectiles {
+                let dir_norm = proj.velocity.normalize_or_zero();
+
+                // 1. Tête de Balle Cinétique Compacte et Brillante (Or Incandescent)
+                let bullet_m = Mat4::from_translation(Vec3::new(proj.position.x, proj.position.y, 0.2))
+                    * Mat4::from_scale(Vec3::splat(0.22)); // Compacte et légère !
+                let push_bullet = PartyPushConstants {
+                    mvp_matrix: vp * bullet_m,
+                    model_matrix: bullet_m,
+                    color_tint: Vec4::new(1.00, 0.85, 0.20, 1.0), // Or Incandescent Vif
+                    params: Vec4::new(0.0, 14.0, 0.0, 0.0),        // Lueur émissive
+                };
+                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_bullet));
+                self.cube_mesh.draw(&context.device, cmd);
+
+                // 2. Traînée de Balle Voxel Décroissante (Trail)
+                let trail_steps = 7;
+                for step in 1..=trail_steps {
+                    let step_f = step as f32;
+                    let trail_pos = proj.position - dir_norm * (step_f * 0.12);
+                    let trail_scale = 0.18 * (1.0 - step_f / (trail_steps as f32 + 1.0));
+
+                    let trail_m = Mat4::from_translation(Vec3::new(trail_pos.x, trail_pos.y, 0.18))
+                        * Mat4::from_scale(Vec3::splat(trail_scale));
+
+                    let alpha = 0.95 - (step_f / trail_steps as f32) * 0.75;
+                    let trail_color = if step <= 2 {
+                        Vec4::new(1.00, 0.55, 0.05, alpha) // Orange Feu
+                    } else if step <= 4 {
+                        Vec4::new(0.90, 0.25, 0.05, alpha) // Rouge Incandescent
+                    } else {
+                        Vec4::new(0.50, 0.50, 0.55, alpha * 0.5) // Fumée Grise
+                    };
+
+                    let push_trail = PartyPushConstants {
+                        mvp_matrix: vp * trail_m,
+                        model_matrix: trail_m,
+                        color_tint: trail_color,
+                        params: Vec4::new(0.0, 8.0, 0.0, 0.0),
+                    };
+                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_trail));
+                    self.cube_mesh.draw(&context.device, cmd);
+                }
+            }
+
+            // ─── Rendu du Carton Mystère 3D (Phase Drafting) ───────────────────────────
             if game.phase == crate::party_game::GamePhase::Drafting {
                 let box_pos = Vec3::new(game.grid.width as f32 / 2.0, game.grid.height as f32 / 2.0, 0.0);
                 self.box_obj.update(0.016);
@@ -502,66 +575,110 @@ impl PartyRenderPass {
                 }
                 self.box_obj.draw(&context.device, cmd, self.pipeline_layout, vp, box_pos);
 
-                // Objets 3D Disponibles DANS le Carton Ouvert (Surface grillmax)
+                // Objets 3D Disponibles éparpillés DANS l'intérieur du carton ouvert sans piédestaux
                 if self.box_obj.is_opened {
                     let items = &game.mystery_box.available_items;
-                    let total = items.len();
-                    let t = game.round_timer;
 
                     for (i, item) in items.iter().enumerate() {
-                        let spacing = 0.45;
-                        let x_offset = box_pos.x + (i as f32 - (total as f32 - 1.0) / 2.0) * spacing;
-                        let item_pos = Vec3::new(x_offset, box_pos.y + 0.35 + (t * 3.0 + i as f32).sin() * 0.05, 0.1);
+                        let (offset_vec, scale_factor) = crate::mystery_box::compute_box_item_offset(i, items.len());
+                        let item_pos = box_pos + offset_vec;
 
                         let is_selected = game.mystery_box.selected_index == Some(i);
 
-                        let item_p2 = Vec2::new(item_pos.x, item_pos.y);
+                        // Rendu Distinct de l'Objet 3D ou du Bloc Coloré avec échelle adaptative
+                        let scale_mult = if is_selected { scale_factor * 1.25 } else { scale_factor };
 
-                        // Rendu des Objets 3D par Type
                         match item {
-                            crate::mystery_box::ItemType::SawBlade => self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_p2, t * 8.0),
-                            crate::mystery_box::ItemType::CannonTurret => self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_p2, crate::traps::Direction::Right),
-                            crate::mystery_box::ItemType::SpikeTrap => self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_p2),
-                            crate::mystery_box::ItemType::LaserEmitter => self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_p2, crate::traps::Direction::Up, true),
-                            crate::mystery_box::ItemType::Flamethrower => self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_p2, crate::traps::Direction::Right, true),
+                            crate::mystery_box::ItemType::SawBlade => self.saw_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, vp, item_pos, scale_mult, 0.0),
+                            crate::mystery_box::ItemType::CannonTurret => self.cannon_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, None, vp, item_pos, crate::traps::Direction::Right, scale_mult, false),
+                            crate::mystery_box::ItemType::SpikeTrap => self.spike_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, vp, item_pos, scale_mult),
+                            crate::mystery_box::ItemType::LaserEmitter => self.laser_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Up, scale_mult, false, 0.0, 0.0),
+                            crate::mystery_box::ItemType::Flamethrower => self.flame_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Right, scale_mult, false, 0.0),
                             _ => {
-                                let item_m = Mat4::from_translation(item_pos) * Mat4::from_scale(Vec3::splat(0.40));
+                                let block_color = match item {
+                                    crate::mystery_box::ItemType::SolidBlock => Vec4::new(0.55, 0.35, 0.20, 1.0), // Terre / Marron
+                                    crate::mystery_box::ItemType::GrassBlock => Vec4::new(0.30, 0.75, 0.25, 1.0), // Herbe / Vert
+                                    crate::mystery_box::ItemType::MetalBlock => Vec4::new(0.70, 0.75, 0.80, 1.0), // Métal / Gris acier
+                                    crate::mystery_box::ItemType::IceBlock => Vec4::new(0.40, 0.85, 0.98, 1.0),   // Glace / Cyan translucent
+                                    crate::mystery_box::ItemType::LavaBlock => Vec4::new(0.95, 0.35, 0.10, 1.0),  // Lave / Rouge-Orange
+                                    _ => Vec4::new(0.60, 0.60, 0.60, 1.0),
+                                };
+
+                                let item_m = Mat4::from_translation(item_pos) * Mat4::from_scale(Vec3::splat(0.70 * scale_mult));
                                 let push_item = PartyPushConstants {
                                     mvp_matrix: vp * item_m,
                                     model_matrix: item_m,
-                                    color_tint: Vec4::new(0.35, 0.75, 0.95, 1.0),
-                                    params: Vec4::new(0.3, 0.0, 0.0, 0.0),
+                                    color_tint: block_color,
+                                    params: Vec4::new(0.3, 1.0, 0.0, 0.0),
                                 };
                                 context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_item));
                                 self.cube_mesh.draw(&context.device, cmd);
                             }
                         }
 
-                        // Anneau d'Or de Sélection pour l'Objet Choisi !
+                        // 3. Petite Gemme d'Or au-dessus de l'objet sélectionné
                         if is_selected {
-                            let ring_m = Mat4::from_translation(item_pos + Vec3::new(0.0, 0.38, 0.05))
-                                * Mat4::from_rotation_z(t * 5.0)
-                                * Mat4::from_scale(Vec3::new(0.12, 0.12, 0.12));
-                            let push_ring = PartyPushConstants {
-                                mvp_matrix: vp * ring_m,
-                                model_matrix: ring_m,
-                                color_tint: Vec4::new(0.98, 0.85, 0.15, 1.0), // Or Émissif
+                            let gem_m = Mat4::from_translation(item_pos + Vec3::new(0.0, 0.65, 0.1))
+                                * Mat4::from_rotation_z(trap_t * 3.0)
+                                * Mat4::from_scale(Vec3::splat(0.18));
+                            let push_gem = PartyPushConstants {
+                                mvp_matrix: vp * gem_m,
+                                model_matrix: gem_m,
+                                color_tint: Vec4::new(0.98, 0.85, 0.15, 1.0),
                                 params: Vec4::new(0.0, 8.0, 0.0, 0.0),
                             };
-                            context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_ring));
+                            context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_gem));
                             self.cube_mesh.draw(&context.device, cmd);
                         }
                     }
                 }
             }
 
-            // Rendu du Personnage Joueur (Héros Aventurier 3D - Activé & Spawné uniquement en GamePhase::Running)
-            if game.phase == crate::party_game::GamePhase::Running {
-                for session in &game.players {
+            // ─── Rendu Phase de Placement : Aperçu Semi-Transparent Fixe sur la Grille ────
+            if game.phase == crate::party_game::GamePhase::Placement {
+                let (gx, gy) = (game.editor.cursor.0 as usize, game.editor.cursor.1 as usize);
+                let item_pos_2d = Vec2::new(gx as f32 + 0.5, gy as f32 + 0.5);
+                let t = game.round_timer;
+                let dir = game.placement_dir;
+
+                if let Some(idx) = game.mystery_box.selected_index {
+                    if let Some(item) = game.mystery_box.available_items.get(idx) {
+                        match item {
+                            crate::mystery_box::ItemType::SawBlade =>
+                                self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_pos_2d, t * 8.0),
+                            crate::mystery_box::ItemType::CannonTurret =>
+                                self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, Some(&self.cube_mesh), vp, item_pos_2d, dir, true),
+                            crate::mystery_box::ItemType::SpikeTrap =>
+                                self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_pos_2d),
+                            crate::mystery_box::ItemType::LaserEmitter =>
+                                self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0, 0.0),
+                            crate::mystery_box::ItemType::Flamethrower =>
+                                self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0),
+                            _ => {
+                                let item_m = Mat4::from_translation(Vec3::new(gx as f32 + 0.5, gy as f32 + 0.5, 0.3))
+                                    * Mat4::from_scale(Vec3::splat(0.90));
+                                let push_item = PartyPushConstants {
+                                    mvp_matrix: vp * item_m,
+                                    model_matrix: item_m,
+                                    color_tint: Vec4::new(0.35, 0.75, 0.95, 0.5), // Semi-transparence 50%
+                                    params: Vec4::new(0.0, 2.0, 0.0, 0.0),
+                                };
+                                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_item));
+                                self.cube_mesh.draw(&context.device, cmd);
+                            }
+                        }
+                    }
+                }
+            }
+
+
+            // ─── Rendu du Personnage Joueur (VISIBLE DANS TOUTES LES PHASES !) ────────
+            for session in &game.players {
                 let player = &session.player;
                 let p_pos = player.position;
                 let facing_sign = if player.facing_right { 1.0 } else { -1.0 };
                 let t = game.round_timer;
+
 
                 // 1. Rendu du Ragdoll de Mort 3D si le joueur est mort
                 if player.state == crate::player::PlayerState::Dead && player.ragdoll.active {
@@ -816,9 +933,102 @@ impl PartyRenderPass {
                     self.cube_mesh.draw(&context.device, cmd);
                 }
             }
-        }
 
-        // 3. Pipeline Particules / Transparence : Bloc Preview Wireframe en Mode Éditeur uniquement
+            // ─── Rendu 3D du Leaderboard & Tableau des Scores en Phase Leaderboard ────────
+            if game.phase == crate::party_game::GamePhase::Leaderboard {
+                let center_x = game.grid.width as f32 / 2.0;
+                let center_y = game.grid.height as f32 / 2.0;
+                let t = game.round_timer;
+
+                // 1. Panneau Fond Sombre du Leaderboard (Z = 12.0)
+                let panel_m = Mat4::from_translation(Vec3::new(center_x, center_y, 12.0))
+                    * Mat4::from_scale(Vec3::new(8.5, 5.5, 0.1));
+                let push_panel = PartyPushConstants {
+                    mvp_matrix: vp * panel_m,
+                    model_matrix: panel_m,
+                    color_tint: Vec4::new(0.08, 0.10, 0.16, 0.92), // Bleuté Sombre Haute Lisibilité
+                    params: Vec4::new(0.3, 0.0, 0.0, 0.0),
+                };
+                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_panel));
+                self.cube_mesh.draw(&context.device, cmd);
+
+                // 2. Bannière de Titre / Gagnant du Match (Or Émissif)
+                let title_text = if let Some(winner_name) = &game.match_winner {
+                    Vec4::new(0.98, 0.85, 0.15, 1.0) // Or Victoire
+                } else {
+                    Vec4::new(0.35, 0.75, 0.98, 1.0) // Bleu Manche
+                };
+
+                let title_m = Mat4::from_translation(Vec3::new(center_x, center_y + 2.2, 12.1))
+                    * Mat4::from_scale(Vec3::new(7.5, 0.55, 0.05));
+                let push_title = PartyPushConstants {
+                    mvp_matrix: vp * title_m,
+                    model_matrix: title_m,
+                    color_tint: title_text,
+                    params: Vec4::new(0.0, 8.0, 0.0, 0.0), // Lueur Émissive
+                };
+                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_title));
+                self.cube_mesh.draw(&context.device, cmd);
+
+                // 3. Affichage des Rangées des Joueurs triés par Score Total
+                let mut sorted_players = game.players.clone();
+                sorted_players.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap_or(std::cmp::Ordering::Equal));
+
+                for (rank_idx, player_session) in sorted_players.iter().take(6).enumerate() {
+                    let row_y = center_y + 1.2 - (rank_idx as f32 * 0.70);
+
+                    // Couleur du Rang (1er = Or, 2ème = Argent, 3ème = Bronze, Autres = Acier)
+                    let rank_color = match rank_idx {
+                        0 => Vec4::new(0.98, 0.85, 0.15, 1.0), // Or
+                        1 => Vec4::new(0.85, 0.88, 0.92, 1.0), // Argent
+                        2 => Vec4::new(0.85, 0.52, 0.25, 1.0), // Bronze
+                        _ => Vec4::new(0.55, 0.60, 0.65, 1.0),
+                    };
+
+                    // Pill / Bar de Rangée Joueur
+                    let row_m = Mat4::from_translation(Vec3::new(center_x, row_y, 12.15))
+                        * Mat4::from_scale(Vec3::new(7.2, 0.48, 0.05));
+                    let push_row = PartyPushConstants {
+                        mvp_matrix: vp * row_m,
+                        model_matrix: row_m,
+                        color_tint: Vec4::new(0.14, 0.16, 0.24, 0.90),
+                        params: Vec4::new(0.2, 0.0, 0.0, 0.0),
+                    };
+                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_row));
+                    self.cube_mesh.draw(&context.device, cmd);
+
+                    // Badge de Médaille / Rang à gauche
+                    let badge_m = Mat4::from_translation(Vec3::new(center_x - 3.1, row_y, 12.2))
+                        * Mat4::from_scale(Vec3::splat(0.35));
+                    let push_badge = PartyPushConstants {
+                        mvp_matrix: vp * badge_m,
+                        model_matrix: badge_m,
+                        color_tint: rank_color,
+                        params: Vec4::new(0.0, 5.0, 0.0, 0.0),
+                    };
+                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_badge));
+                    self.cube_mesh.draw(&context.device, cmd);
+
+                    // Gemmes de Score Total à droite (Nombre de gemmes proportionnel au score)
+                    let score_gems = (player_session.total_score.max(0.0) as usize).min(10);
+                    for g in 0..score_gems {
+                        let gem_x = center_x + 1.2 + (g as f32 * 0.22);
+                        let gem_m = Mat4::from_translation(Vec3::new(gem_x, row_y, 12.2))
+                            * Mat4::from_rotation_z(t * 4.0 + g as f32)
+                            * Mat4::from_scale(Vec3::splat(0.12));
+                        let push_score_gem = PartyPushConstants {
+                            mvp_matrix: vp * gem_m,
+                            model_matrix: gem_m,
+                            color_tint: Vec4::new(0.98, 0.85, 0.15, 1.0), // Gemme d'Or
+                            params: Vec4::new(0.0, 8.0, 0.0, 0.0),
+                        };
+                        context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_score_gem));
+                        self.cube_mesh.draw(&context.device, cmd);
+                    }
+                }
+            }
+
+            // 3. Pipeline Particules / Transparence : Bloc Preview Wireframe en Mode Éditeur uniquement
             if !game.is_play_mode {
                 context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.particle_pipeline);
 

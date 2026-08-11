@@ -27,9 +27,23 @@ impl SawBladeObject {
         pos: Vec2,
         rotation: f32,
     ) {
-        let model = Mat4::from_translation(Vec3::new(pos.x, pos.y, 0.1))
+        self.draw_at_3d(device, cmd, pipeline_layout, vp, Vec3::new(pos.x, pos.y, 0.1), 1.0, rotation);
+    }
+
+    pub fn draw_at_3d(
+        &self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        pipeline_layout: vk::PipelineLayout,
+        vp: Mat4,
+        pos: Vec3,
+        scale: f32,
+        rotation: f32,
+    ) {
+        let model = Mat4::from_translation(pos)
             * Mat4::from_rotation_z(rotation)
-            * Mat4::from_rotation_x(90.0f32.to_radians());
+            * Mat4::from_rotation_x(90.0f32.to_radians())
+            * Mat4::from_scale(Vec3::splat(scale));
 
         let push = PartyPushConstants {
             mvp_matrix: vp * model,

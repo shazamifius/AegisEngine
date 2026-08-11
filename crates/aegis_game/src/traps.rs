@@ -8,6 +8,46 @@ pub enum Direction {
     Right,
 }
 
+impl Direction {
+    pub fn rotate_cw(self) -> Self {
+        match self {
+            Direction::Up => Direction::Right,
+            Direction::Right => Direction::Down,
+            Direction::Down => Direction::Left,
+            Direction::Left => Direction::Up,
+        }
+    }
+}
+
+pub fn compute_laser_beam_length(pos: Vec2, dir: Direction, grid: &crate::grid::TileGrid) -> f32 {
+    let start_x = pos.x.floor() as i32;
+    let start_y = pos.y.floor() as i32;
+    let mut step = 1;
+    let max_steps = 60;
+
+    while step < max_steps {
+        let (check_x, check_y) = match dir {
+            Direction::Up => (start_x, start_y + step),
+            Direction::Down => (start_x, start_y - step),
+            Direction::Right => (start_x + step, start_y),
+            Direction::Left => (start_x - step, start_y),
+        };
+
+        if check_x < 0 || check_x >= grid.width as i32 || check_y < 0 || check_y >= grid.height as i32 {
+            return step as f32 - 0.5;
+        }
+
+        let tile = grid.get_tile(check_x, check_y);
+        if tile.is_solid() {
+            return step as f32 - 0.5;
+        }
+
+        step += 1;
+    }
+
+    max_steps as f32
+}
+
 #[derive(Debug, Clone)]
 pub enum TrapKind {
     SawBlade { radius: f32, rotation: f32 },
@@ -84,12 +124,9 @@ impl TrapManager {
                     }
                 }
                 TrapKind::SpikeTrap => {}
-                TrapKind::LaserEmitter { timer, active, .. } => {
-                    *timer += dt;
-                    if *timer >= 2.0 {
-                        *timer = 0.0;
-                        *active = !*active;
-                    }
+                TrapKind::LaserEmitter { active, .. } => {
+                    // Laser continu en jeu !
+                    *active = true;
                 }
                 TrapKind::Flamethrower { timer, active, .. } => {
                     *timer += dt;
@@ -131,7 +168,7 @@ impl TrapManager {
 
     /// Checks if a player box collides with a lethal trap or projectile.
     /// Returns Some(owner_id) if killed by a trap/projectile belonging to `owner_id`.
-    pub fn check_player_death(&self, player_pos: Vec2, player_size: Vec2) -> Option<u32> {
+    pub fn check_player_death(&self, player_pos: Vec2, player_size: Vec2, grid: &crate::grid::TileGrid) -> Option<u32> {
         let half_w = player_size.x * 0.5;
         let p_center = player_pos + Vec2::new(0.0, player_size.y * 0.5);
 
@@ -151,12 +188,13 @@ impl TrapManager {
                 }
                 TrapKind::LaserEmitter { active, dir, .. } => {
                     if *active {
+                        let beam_len = compute_laser_beam_length(trap.position, *dir, grid);
                         let diff = p_center - trap.position;
                         let hit = match dir {
-                            Direction::Up => diff.x.abs() < 0.4 && diff.y > 0.0 && diff.y < 8.0,
-                            Direction::Down => diff.x.abs() < 0.4 && diff.y < 0.0 && diff.y > -8.0,
-                            Direction::Left => diff.y.abs() < 0.4 && diff.x < 0.0 && diff.x > -8.0,
-                            Direction::Right => diff.y.abs() < 0.4 && diff.x > 0.0 && diff.x < 8.0,
+                            Direction::Up => diff.x.abs() < 0.45 && diff.y > 0.0 && diff.y < beam_len,
+                            Direction::Down => diff.x.abs() < 0.45 && diff.y < 0.0 && diff.y > -beam_len,
+                            Direction::Left => diff.y.abs() < 0.45 && diff.x < 0.0 && diff.x > -beam_len,
+                            Direction::Right => diff.y.abs() < 0.45 && diff.x > 0.0 && diff.x < beam_len,
                         };
                         if hit {
                             return Some(trap.owner_id);
@@ -202,7 +240,8 @@ mod tests {
         let mut mgr = TrapManager::new();
         mgr.add_trap(Vec2::new(5.0, 5.0), TrapKind::SawBlade { radius: 0.75, rotation: 0.0 }, 42);
 
-        let killer = mgr.check_player_death(Vec2::new(5.0, 4.5), Vec2::new(0.8, 1.75));
+        let grid = crate::grid::TileGrid::new(32, 18);
+        let killer = mgr.check_player_death(Vec2::new(5.0, 4.5), Vec2::new(0.8, 1.75), &grid);
         assert_eq!(killer, Some(42));
     }
 }

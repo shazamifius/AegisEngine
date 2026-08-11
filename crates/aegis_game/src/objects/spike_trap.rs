@@ -18,17 +18,22 @@ impl SpikeTrapObject {
         Ok(Self { mesh })
     }
 
-    pub fn draw(
+    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer, pipeline_layout: vk::PipelineLayout, vp: Mat4, pos: Vec2) {
+        self.draw_at_3d(device, cmd, pipeline_layout, vp, Vec3::new(pos.x, pos.y, 0.1), 1.0);
+    }
+
+    pub fn draw_at_3d(
         &self,
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         pipeline_layout: vk::PipelineLayout,
         vp: Mat4,
-        pos: Vec2,
+        pos: Vec3,
+        scale: f32,
     ) {
-        // Échelle exacte d'un bloc standard (1.0 x 1.0 x 1.0)
-        let model = Mat4::from_translation(Vec3::new(pos.x, pos.y, 0.1))
-            * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0));
+        // Échelle adaptative appliquée
+        let model = Mat4::from_translation(pos)
+            * Mat4::from_scale(Vec3::splat(scale));
 
         let push = PartyPushConstants {
             mvp_matrix: vp * model,

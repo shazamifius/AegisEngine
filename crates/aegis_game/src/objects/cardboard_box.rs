@@ -8,6 +8,10 @@ use crate::party_render_pass::{GpuMesh, PartyPushConstants};
 pub struct CardboardBoxObject {
     pub mesh_closed: GpuMesh,
     pub mesh_open: GpuMesh,
+    pub offset_closed: Vec3,
+    pub offset_open: Vec3,
+    pub scale_closed: Vec3,
+    pub scale_open: Vec3,
     pub anim_timer: f32,
     pub is_opened: bool,
     pub burst_triggered: bool,
@@ -21,11 +25,41 @@ impl CardboardBoxObject {
         let (vo, io) = GlbLoader::load_glb("/home/shaza/Documents/asset/box.glb")?;
         let mesh_open = GpuMesh::upload(gpu, memory_props, &vo, &io)?;
 
-        log::info!("Carton Mystère 3D (boxfermer.glb & box.glb) initialisé.");
+        let compute_bounds = |verts: &[aegis_engine::geometry::vertex::Vertex]| -> (Vec3, Vec3, Vec3) {
+            let mut min = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+            let mut max = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+            for v in verts {
+                min.x = min.x.min(v.position[0]);
+                min.y = min.y.min(v.position[1]);
+                min.z = min.z.min(v.position[2]);
+                max.x = max.x.max(v.position[0]);
+                max.y = max.y.max(v.position[1]);
+                max.z = max.z.max(v.position[2]);
+            }
+            let center = (min + max) * 0.5;
+            (min, max, center)
+        };
+
+        let (_min_c, _max_c, center_c) = compute_bounds(&vc);
+        let (min_o, max_o, _center_o) = compute_bounds(&vo);
+
+        // Center base cube of both boxes at origin (0,0,0)
+        let offset_closed = -center_c;
+        let offset_open = -Vec3::new(0.0, center_c.y, (min_o.z + max_o.z) * 0.5);
+
+        // Échelle fermée (9.0) vs Échelle ouverte parfaitement recadrée (11.5)
+        let scale_closed = Vec3::splat(9.0);
+        let scale_open = Vec3::splat(11.5);
+
+        log::info!("Carton Mystère initialisé - Scale fermé: {:?}, Scale ouvert: {:?}", scale_closed, scale_open);
 
         Ok(Self {
             mesh_closed,
             mesh_open,
+            offset_closed,
+            offset_open,
+            scale_closed,
+            scale_open,
             anim_timer: 0.0,
             is_opened: false,
             burst_triggered: false,
@@ -40,7 +74,8 @@ impl CardboardBoxObject {
 
     pub fn update(&mut self, dt: f32) {
         self.anim_timer += dt;
-        if self.anim_timer >= 0.8 {
+        // Animation de secousse pendant 2.0 secondes exactes, puis la boîte s'ouvre !
+        if self.anim_timer >= 2.0 {
             self.is_opened = true;
         }
     }
@@ -54,25 +89,41 @@ impl CardboardBoxObject {
         pos: Vec3,
     ) {
         let (shake_offset_x, shake_offset_y, shake_rot_z) = if !self.is_opened {
-            // Secousse dynamique pendant 0.8 seconde (Shake phase)
-            let intensity = (0.8 - self.anim_timer).max(0.0) / 0.8;
-            let sx = (self.anim_timer * 42.0).sin() * 0.10 * intensity;
-            let sy = (self.anim_timer * 55.0).cos().abs() * 0.12 * intensity;
-            let rz = (self.anim_timer * 35.0).sin() * 0.15 * intensity;
+            // Secousse dynamique pendant 2 secondes (Shake phase)
+            let intensity = (2.0 - self.anim_timer).max(0.0) / 2.0;
+            let sx = (self.anim_timer * 42.0).sin() * 0.12 * intensity;
+            let sy = (self.anim_timer * 55.0).cos().abs() * 0.14 * intensity;
+            let rz = (self.anim_timer * 35.0).sin() * 0.16 * intensity;
             (sx, sy, rz)
         } else {
             (0.0, 0.0, 0.0)
         };
 
-        let model = Mat4::from_translation(pos + Vec3::new(shake_offset_x, shake_offset_y, 0.0))
+        // Position du carton au centre parfait du champ de vision (Y offset -0.5, Z +12.0)
+        let box_depth_pos = Vec3::new(pos.x + shake_offset_x, pos.y + shake_offset_y - 0.5, pos.z + 12.0);
+
+        let (mesh_to_draw, offset, scale) = if !self.is_opened {
+            (&self.mesh_closed, self.offset_closed, self.scale_closed)
+        } else {
+            (&self.mesh_open, self.offset_open, self.scale_open)
+        };
+
+        // Rotation X (90°) puis Z (90°) pour orienter l'ouverture vers la caméra et les rabats vers GAUCHE/DROITE !
+        let rot_x = Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let rot_z = Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2);
+
+        let model = Mat4::from_translation(box_depth_pos)
+            * rot_z
+            * rot_x
             * Mat4::from_rotation_z(shake_rot_z)
-            * Mat4::from_scale(Vec3::new(3.5, 3.5, 3.5));
+            * Mat4::from_scale(scale)
+            * Mat4::from_translation(offset);
 
         // Couleur Kraft Carton Warm Naturelle
         let push = PartyPushConstants {
             mvp_matrix: vp * model,
             model_matrix: model,
-            color_tint: Vec4::new(0.74, 0.54, 0.34, 1.0), // Kraft Carton
+            color_tint: Vec4::new(0.78, 0.58, 0.36, 1.0), // Kraft Carton Chaud
             params: Vec4::new(0.3, 0.0, 0.0, 0.0),
         };
 
@@ -80,10 +131,6 @@ impl CardboardBoxObject {
             device.cmd_push_constants(cmd, pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
         }
 
-        if !self.is_opened {
-            self.mesh_closed.draw(device, cmd);
-        } else {
-            self.mesh_open.draw(device, cmd);
-        }
+        mesh_to_draw.draw(device, cmd);
     }
 }
