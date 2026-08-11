@@ -209,4 +209,33 @@ impl ParticleEffectManager {
             });
         }
     }
+
+    // 6. Explosion de Particules à l'Ouverture du Carton Mystère (Cardboard Open Burst)
+    pub fn spawn_box_open_burst(&mut self, box_pos: Vec3) {
+        for _ in 0..24 {
+            let r1 = self.next_rand();
+            let r2 = self.next_rand();
+            let r3 = self.next_rand();
+
+            let (color, emissive) = match (r1 * 4.0) as usize {
+                0 => (Vec4::new(0.85, 0.65, 0.42, 1.0), 0.0), // Éclat de Carton Kraft
+                1 => (Vec4::new(0.98, 0.85, 0.20, 1.0), 6.0), // Étoile d'Or Mystère
+                2 => (Vec4::new(0.30, 0.90, 0.95, 1.0), 4.0), // Énergie Cyan
+                _ => (Vec4::new(0.95, 0.30, 0.30, 1.0), 4.0), // Énergie Rouge
+            };
+
+            let speed_x = (r1 - 0.5) * 7.0;
+            let speed_y = 2.5 + r2 * 6.0;
+
+            self.particles.push(Particle {
+                pos: Vec3::new(box_pos.x + (r2 - 0.5) * 0.4, box_pos.y + 0.5, 0.25),
+                vel: Vec3::new(speed_x, speed_y, (r3 - 0.5) * 2.0),
+                size: Vec3::splat(0.08 + r2 * 0.08),
+                color,
+                emissive,
+                life: 0.0,
+                max_life: 0.35 + r3 * 0.25,
+            });
+        }
+    }
 }

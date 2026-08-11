@@ -6,3 +6,4 @@ pub mod laser_emitter;
 pub mod flamethrower;
 pub mod plants;
 pub mod rock;
+pub mod cardboard_box;

@@ -17,6 +17,7 @@ use crate::objects::{
     flamethrower::FlamethrowerObject,
     plants::PlantsObject,
     rock::RockObject,
+    cardboard_box::CardboardBoxObject,
 };
 
 fn tile_hash(x: i32, y: i32, seed: u32) -> u32 {
@@ -116,6 +117,7 @@ pub struct PartyRenderPass {
     pub spike_obj: SpikeTrapObject,
     pub laser_obj: LaserEmitterObject,
     pub flame_obj: FlamethrowerObject,
+    pub box_obj: CardboardBoxObject,
 
     depth_image: vk::Image,
     depth_memory: vk::DeviceMemory,
@@ -147,6 +149,7 @@ impl PartyRenderPass {
         let spike_obj = SpikeTrapObject::new(gpu, memory_props)?;
         let laser_obj = LaserEmitterObject::new(gpu, memory_props)?;
         let flame_obj = FlamethrowerObject::new(gpu, memory_props)?;
+        let box_obj = CardboardBoxObject::new(gpu, memory_props)?;
 
         let depth_format = vk::Format::D32_SFLOAT;
         let image_info = vk::ImageCreateInfo::default()
@@ -270,6 +273,7 @@ impl PartyRenderPass {
             spike_obj,
             laser_obj,
             flame_obj,
+            box_obj,
 
             depth_image,
             depth_memory,
@@ -483,6 +487,19 @@ impl PartyRenderPass {
 
             context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_void));
             self.cube_mesh.draw(&context.device, cmd);
+
+            // Rendu du Carton Mystère 3D Animé (boxfermer.glb -> box.glb avec Secousse 0.8s et Ouverture)
+            let box_pos = Vec3::new(game.grid.start_pos.x + 3.0, game.grid.start_pos.y + 0.60, 0.0);
+            self.box_obj.update(0.016);
+            if self.box_obj.is_opened && !self.box_obj.burst_triggered {
+                self.box_obj.burst_triggered = true;
+                if let Some(player_mut) = game.players.get(0) {
+                    // Explosion de particules dorées et kraft à l'ouverture du carton !
+                    let mut p_mgr = player_mut.player.particles.clone();
+                    p_mgr.spawn_box_open_burst(box_pos);
+                }
+            }
+            self.box_obj.draw(&context.device, cmd, self.pipeline_layout, vp, box_pos);
 
             // Rendu du Personnage Joueur (Héros Aventurier 3D avec Articulations Précises et Ragdoll de Mort)
             for session in &game.players {
