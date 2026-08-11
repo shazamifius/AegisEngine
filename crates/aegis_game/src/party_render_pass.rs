@@ -1,5 +1,5 @@
 use ash::vk;
-use aegis_engine::math::{Mat4, Vec3, Vec4};
+use aegis_engine::math::{Mat4, Vec2, Vec3, Vec4};
 use aegis_engine::bytes::{as_bytes, cast_slice};
 use aegis_engine::GpuContext;
 use aegis_engine::core::memory::MemoryManager;
@@ -289,18 +289,19 @@ impl PartyRenderPass {
         let view = context.swapchain_image_views[image_index];
         let image = context.swapchain_images[image_index];
 
-        // Suivi de caméra fluide du curseur de preview Éditeur ZQSD !
-        let (target_x, target_y) = if game.is_play_mode {
+        // Suivi de caméra fluide (Full Dézoomée centrée sur la Map en GamePhase::Drafting)
+        let (target_x, target_y, target_dist) = if game.phase == crate::party_game::GamePhase::Drafting {
+            (game.grid.width as f32 / 2.0, game.grid.height as f32 / 2.0, 26.0)
+        } else if game.is_play_mode {
             let p_pos = game.human_player().position;
-            (p_pos.x, p_pos.y + 0.85)
+            (p_pos.x, p_pos.y + 0.85, 18.0 * self.zoom_level)
         } else {
             let (cx, cy) = game.editor.cursor;
-            (cx as f32 + 0.5, cy as f32 + 0.5)
+            (cx as f32 + 0.5, cy as f32 + 0.5, 18.0 * self.zoom_level)
         };
 
         self.camera_target = self.camera_target.lerp(Vec3::new(target_x, target_y, 0.0), 0.18);
-        let cam_dist = 18.0 * self.zoom_level;
-        self.camera_pos = self.camera_target + Vec3::new(0.0, 0.5, cam_dist);
+        self.camera_pos = self.camera_target + Vec3::new(0.0, 0.5, target_dist);
 
         let view_matrix = Mat4::look_at_rh(self.camera_pos, self.camera_target, Vec3::Y);
         let aspect = context.swapchain_extent.width as f32 / context.swapchain_extent.height as f32;
@@ -488,21 +489,75 @@ impl PartyRenderPass {
             context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_void));
             self.cube_mesh.draw(&context.device, cmd);
 
-            // Rendu du Carton Mystère 3D Animé (boxfermer.glb -> box.glb avec Secousse 0.8s et Ouverture)
-            let box_pos = Vec3::new(game.grid.start_pos.x + 3.0, game.grid.start_pos.y + 0.60, 0.0);
-            self.box_obj.update(0.016);
-            if self.box_obj.is_opened && !self.box_obj.burst_triggered {
-                self.box_obj.burst_triggered = true;
-                if let Some(player_mut) = game.players.get(0) {
-                    // Explosion de particules dorées et kraft à l'ouverture du carton !
-                    let mut p_mgr = player_mut.player.particles.clone();
-                    p_mgr.spawn_box_open_burst(box_pos);
+            // Rendu du Carton Mystère 3D Animé au Centre de l'Écran (boxfermer.glb -> box.glb avec Secousse 0.8s)
+            if game.phase == crate::party_game::GamePhase::Drafting {
+                let box_pos = Vec3::new(game.grid.width as f32 / 2.0, game.grid.height as f32 / 2.0, 0.0);
+                self.box_obj.update(0.016);
+                if self.box_obj.is_opened && !self.box_obj.burst_triggered {
+                    self.box_obj.burst_triggered = true;
+                    if let Some(player_mut) = game.players.get(0) {
+                        let mut p_mgr = player_mut.player.particles.clone();
+                        p_mgr.spawn_box_open_burst(box_pos);
+                    }
+                }
+                self.box_obj.draw(&context.device, cmd, self.pipeline_layout, vp, box_pos);
+
+                // Objets 3D Disponibles DANS le Carton Ouvert (Surface grillmax)
+                if self.box_obj.is_opened {
+                    let items = &game.mystery_box.available_items;
+                    let total = items.len();
+                    let t = game.round_timer;
+
+                    for (i, item) in items.iter().enumerate() {
+                        let spacing = 0.45;
+                        let x_offset = box_pos.x + (i as f32 - (total as f32 - 1.0) / 2.0) * spacing;
+                        let item_pos = Vec3::new(x_offset, box_pos.y + 0.35 + (t * 3.0 + i as f32).sin() * 0.05, 0.1);
+
+                        let is_selected = game.mystery_box.selected_index == Some(i);
+
+                        let item_p2 = Vec2::new(item_pos.x, item_pos.y);
+
+                        // Rendu des Objets 3D par Type
+                        match item {
+                            crate::mystery_box::ItemType::SawBlade => self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_p2, t * 8.0),
+                            crate::mystery_box::ItemType::CannonTurret => self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_p2, crate::traps::Direction::Right),
+                            crate::mystery_box::ItemType::SpikeTrap => self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_p2),
+                            crate::mystery_box::ItemType::LaserEmitter => self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_p2, crate::traps::Direction::Up, true),
+                            crate::mystery_box::ItemType::Flamethrower => self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_p2, crate::traps::Direction::Right, true),
+                            _ => {
+                                let item_m = Mat4::from_translation(item_pos) * Mat4::from_scale(Vec3::splat(0.40));
+                                let push_item = PartyPushConstants {
+                                    mvp_matrix: vp * item_m,
+                                    model_matrix: item_m,
+                                    color_tint: Vec4::new(0.35, 0.75, 0.95, 1.0),
+                                    params: Vec4::new(0.3, 0.0, 0.0, 0.0),
+                                };
+                                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_item));
+                                self.cube_mesh.draw(&context.device, cmd);
+                            }
+                        }
+
+                        // Anneau d'Or de Sélection pour l'Objet Choisi !
+                        if is_selected {
+                            let ring_m = Mat4::from_translation(item_pos + Vec3::new(0.0, 0.38, 0.05))
+                                * Mat4::from_rotation_z(t * 5.0)
+                                * Mat4::from_scale(Vec3::new(0.12, 0.12, 0.12));
+                            let push_ring = PartyPushConstants {
+                                mvp_matrix: vp * ring_m,
+                                model_matrix: ring_m,
+                                color_tint: Vec4::new(0.98, 0.85, 0.15, 1.0), // Or Émissif
+                                params: Vec4::new(0.0, 8.0, 0.0, 0.0),
+                            };
+                            context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_ring));
+                            self.cube_mesh.draw(&context.device, cmd);
+                        }
+                    }
                 }
             }
-            self.box_obj.draw(&context.device, cmd, self.pipeline_layout, vp, box_pos);
 
-            // Rendu du Personnage Joueur (Héros Aventurier 3D avec Articulations Précises et Ragdoll de Mort)
-            for session in &game.players {
+            // Rendu du Personnage Joueur (Héros Aventurier 3D - Activé & Spawné uniquement en GamePhase::Running)
+            if game.phase == crate::party_game::GamePhase::Running {
+                for session in &game.players {
                 let player = &session.player;
                 let p_pos = player.position;
                 let facing_sign = if player.facing_right { 1.0 } else { -1.0 };
@@ -761,8 +816,9 @@ impl PartyRenderPass {
                     self.cube_mesh.draw(&context.device, cmd);
                 }
             }
+        }
 
-            // 3. Pipeline Particules / Transparence : Bloc Preview Wireframe en Mode Éditeur uniquement
+        // 3. Pipeline Particules / Transparence : Bloc Preview Wireframe en Mode Éditeur uniquement
             if !game.is_play_mode {
                 context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.particle_pipeline);
 

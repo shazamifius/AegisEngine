@@ -89,6 +89,8 @@ pub struct PartyGame {
     pub phase: GamePhase,
     pub round_number: u32,
     pub round_timer: f32,
+    pub draft_timer: f32,
+    pub draft_cooldown: f32,
 }
 
 impl PartyGame {
@@ -118,10 +120,12 @@ impl PartyGame {
             mystery_box,
             particles,
             editor,
-            is_play_mode: true, // Démarrage direct en Mode JEU sur la Map créée !
-            phase: GamePhase::Running,
+            is_play_mode: true,
+            phase: GamePhase::Drafting, // Démarrage par la Phase de Draft 10s !
             round_number: 1,
             round_timer: 0.0,
+            draft_timer: 10.0, // 10 secondes pour choisir son item !
+            draft_cooldown: 0.0,
         }
     }
 
@@ -165,6 +169,39 @@ impl PartyGame {
     pub fn update(&mut self, dt: f32, input: &InputState) {
         self.round_timer += dt;
 
+        // 1. Phase de Draft du Carton Mystère (10 Secondes)
+        if self.phase == GamePhase::Drafting {
+            self.draft_timer = (self.draft_timer - dt).max(0.0);
+            if self.draft_cooldown > 0.0 {
+                self.draft_cooldown -= dt;
+            }
+
+            // Navigation dans les items du carton avec Gauche / Droite (Q / D)
+            if self.draft_cooldown <= 0.0 {
+                let items_count = self.mystery_box.available_items.len();
+                if items_count > 0 {
+                    let mut curr_idx = self.mystery_box.selected_index.unwrap_or(0);
+                    if input.left {
+                        curr_idx = if curr_idx == 0 { items_count - 1 } else { curr_idx - 1 };
+                        self.mystery_box.selected_index = Some(curr_idx);
+                        self.draft_cooldown = 0.18;
+                    } else if input.right {
+                        curr_idx = (curr_idx + 1) % items_count;
+                        self.mystery_box.selected_index = Some(curr_idx);
+                        self.draft_cooldown = 0.18;
+                    }
+                }
+            }
+
+            // Fin des 10s de draft ou validation anticipée par la touche Saut (Espace / Entrée)
+            if self.draft_timer <= 0.0 || (input.jump && self.draft_cooldown <= 0.0) {
+                self.phase = GamePhase::Running;
+                self.reset_player_to_spawn();
+                log::info!("🏁 Phase de Draft Terminée ! Lancement de la partie et spawn du joueur !");
+            }
+            return;
+        }
+
         if self.is_play_mode {
             // MODE JEU DIRECT SUR LA MAP : Contrôle physique du personnage joueur
             self.players[0].player.update(dt, input, &self.grid, &self.traps);
@@ -204,8 +241,13 @@ mod tests {
 
     #[test]
     fn test_party_game_loop() {
-        let game = PartyGame::new(32, 18);
+        let mut game = PartyGame::new(32, 18);
         assert_eq!(game.players.len(), 1);
+        assert_eq!(game.phase, GamePhase::Drafting);
+
+        // Simulation de fin de timer de draft (10s)
+        let input = InputState::default();
+        game.update(10.5, &input);
         assert_eq!(game.phase, GamePhase::Running);
     }
 }
