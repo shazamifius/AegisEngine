@@ -23,9 +23,14 @@ use winit::{
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    platform::x11::EventLoopBuilderExtX11,
     window::{Window, WindowId},
 };
+
+// X11 est une API de Linux : l'importer sans condition rendait le jeu INCOMPILABLE sous Windows —
+// mesuré le 12 août 2026, à la première tentative de compilation croisée. Ce n'était pas un choix,
+// personne n'avait encore essayé. Or c'est là que sont les 39 personnes qui doivent y jouer.
+#[cfg(target_os = "linux")]
+use winit::platform::x11::EventLoopBuilderExtX11;
 
 struct AegisApp {
     window: Option<Arc<Window>>,
@@ -400,9 +405,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::info!("Mode Capture d'Écran Autonome Activé : Exportation vers {}", screenshot_path);
     }
 
-    let event_loop = EventLoop::builder()
-        .with_x11()
-        .build()?;
+    // Le choix du backend est une affaire de Linux (X11 plutôt que Wayland, qui interdit au jeu de
+    // se placer lui-même à l'écran). Ailleurs, winit n'a qu'un seul backend : rien à choisir.
+    let mut builder = EventLoop::builder();
+    #[cfg(target_os = "linux")]
+    builder.with_x11();
+    let event_loop = builder.build()?;
 
     let mut app = AegisApp::new(screenshot_mode, screenshot_path);
     event_loop.run_app(&mut app)?;
