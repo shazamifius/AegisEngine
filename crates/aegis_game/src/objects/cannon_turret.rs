@@ -12,7 +12,7 @@ pub struct CannonTurretObject {
 
 impl CannonTurretObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
-        let (v, i) = GlbLoader::load_glb("/home/shaza/Documents/asset/cannon_turret.glb")?;
+        let (v, i) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/cannon_turret.glb"))?;
         let mesh = GpuMesh::upload(gpu, memory_props, &v, &i)?;
         log::info!("Tourelle Canon 3D (cannon_turret.glb) initialisée.");
 

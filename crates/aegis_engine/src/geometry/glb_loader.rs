@@ -17,11 +17,37 @@ impl GlbLoader {
         Self::load_glb_internal(path, true)
     }
 
+    /// Charge un modèle depuis des octets DÉJÀ EN MÉMOIRE — typiquement `include_bytes!`, donc un
+    /// modèle embarqué dans le binaire.
+    ///
+    /// ⚠ C'EST LA VOIE NORMALE DEPUIS LE 12 AOÛT 2026, et voici pourquoi. Les treize modèles du jeu
+    /// étaient chargés depuis `/home/shaza/Documents/asset/…` — un chemin absolu vers UNE machine.
+    /// Sur n'importe quel autre ordinateur, aucun décor, aucun piège, aucune tourelle : rien ne se
+    /// serait affiché, et rien ne l'aurait dit. Ils n'étaient même pas dans le dépôt, donc ni
+    /// distribuables ni sauvegardés.
+    ///
+    /// Embarquer coûte 316 Ko dans un binaire de 4 Mo, et supprime le problème au lieu de le
+    /// déplacer : plus de chemin à résoudre, plus de dossier à installer à côté, plus de « fichier
+    /// manquant » possible. Un seul fichier à distribuer — la même règle que la police et les
+    /// données pays/villes du launcher web3.
+    pub fn load_glb_bytes(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>), Box<dyn std::error::Error>> {
+        Self::parse_glb(bytes.to_vec(), true)
+    }
+
+    /// Comme `load_glb_bytes`, mais SANS normaliser la taille : pour les modèles dont les dimensions
+    /// réelles comptent (le décor, qui doit s'accorder à la grille du jeu).
+    pub fn load_glb_raw_bytes(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>), Box<dyn std::error::Error>> {
+        Self::parse_glb(bytes.to_vec(), false)
+    }
+
     fn load_glb_internal(path: impl AsRef<Path>, normalize: bool) -> Result<(Vec<Vertex>, Vec<u32>), Box<dyn std::error::Error>> {
         let mut file = File::open(path)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
+        Self::parse_glb(buffer, normalize)
+    }
 
+    fn parse_glb(buffer: Vec<u8>, normalize: bool) -> Result<(Vec<Vertex>, Vec<u32>), Box<dyn std::error::Error>> {
         if buffer.len() < 20 {
             return Err("Fichier GLB trop court.".into());
         }
@@ -167,21 +193,24 @@ mod tests {
 
     #[test]
     fn test_load_all_blender_glb_assets() {
-        let assets = [
-            "saw_blade.glb",
-            "cannon_turret.glb",
-            "spike_trap.glb",
-            "laser_emitter.glb",
-            "flamethrower.glb",
-            "map.glb",
-            "plantedecendente.glb",
-            "rockbasdroit.glb",
+        let assets: [(&str, &[u8]); 8] = [
+            ("saw_blade.glb", include_bytes!("../../../../assets/modeles/saw_blade.glb")),
+            ("cannon_turret.glb", include_bytes!("../../../../assets/modeles/cannon_turret.glb")),
+            ("spike_trap.glb", include_bytes!("../../../../assets/modeles/spike_trap.glb")),
+            ("laser_emitter.glb", include_bytes!("../../../../assets/modeles/laser_emitter.glb")),
+            ("flamethrower.glb", include_bytes!("../../../../assets/modeles/flamethrower.glb")),
+            ("map.glb", include_bytes!("../../../../assets/modeles/map.glb")),
+            ("plantedecendente.glb", include_bytes!("../../../../assets/modeles/plantedecendente.glb")),
+            ("rockbasdroit.glb", include_bytes!("../../../../assets/modeles/rockbasdroit.glb")),
         ];
 
-        for asset in assets {
-            let path = format!("/home/shaza/Documents/asset/{}", asset);
-            let res = GlbLoader::load_glb_raw(&path);
-            assert!(res.is_ok(), "Échec du chargement de {}", path);
+        // ⚠ Ce test lisait `/home/shaza/Documents/asset/…` : il ne pouvait donc passer QUE sur la
+        // machine de l'auteur, et aurait échoué sur toute autre — y compris en intégration continue.
+        // Un test qui ne s'exécute que chez une personne ne prouve rien sur ce qu'on distribue.
+        // Il travaille désormais sur les modèles EMBARQUÉS, ceux qui partiront réellement.
+        for (asset, octets) in assets {
+            let res = GlbLoader::load_glb_raw_bytes(octets);
+            assert!(res.is_ok(), "Échec du chargement de {}", asset);
             let (vertices, indices) = res.unwrap();
             let mut min_p = Vec3::splat(f32::MAX);
             let mut max_p = Vec3::splat(f32::MIN);

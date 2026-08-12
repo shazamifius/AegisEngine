@@ -19,10 +19,10 @@ pub struct CardboardBoxObject {
 
 impl CardboardBoxObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
-        let (vc, ic) = GlbLoader::load_glb("/home/shaza/Documents/asset/boxfermer.glb")?;
+        let (vc, ic) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/boxfermer.glb"))?;
         let mesh_closed = GpuMesh::upload(gpu, memory_props, &vc, &ic)?;
 
-        let (vo, io) = GlbLoader::load_glb("/home/shaza/Documents/asset/box.glb")?;
+        let (vo, io) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/box.glb"))?;
         let mesh_open = GpuMesh::upload(gpu, memory_props, &vo, &io)?;
 
         let compute_bounds = |verts: &[aegis_engine::geometry::vertex::Vertex]| -> (Vec3, Vec3, Vec3) {

@@ -12,7 +12,7 @@ pub struct LaserEmitterObject {
 
 impl LaserEmitterObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
-        let (v, i) = GlbLoader::load_glb("/home/shaza/Documents/asset/laser_emitter.glb")?;
+        let (v, i) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/laser_emitter.glb"))?;
         let mesh = GpuMesh::upload(gpu, memory_props, &v, &i)?;
         log::info!("Émetteur Laser 3D (laser_emitter.glb) initialisé.");
 

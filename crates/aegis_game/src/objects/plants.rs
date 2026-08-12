@@ -11,7 +11,7 @@ pub struct PlantsObject {
 
 impl PlantsObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
-        let (v, i) = GlbLoader::load_glb("/home/shaza/Documents/asset/plantedecendente.glb")?;
+        let (v, i) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/plantedecendente.glb"))?;
         let mesh = GpuMesh::upload(gpu, memory_props, &v, &i)?;
         log::info!("Plantes Suspendues 3D (plantedecendente.glb) initialisées.");
 

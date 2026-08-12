@@ -1,7 +1,7 @@
 use aegis_engine::geometry::glb_loader::GlbLoader;
 
 fn main() {
-    if let Ok((v_closed, _)) = GlbLoader::load_glb("/home/shaza/Documents/asset/boxfermer.glb") {
+    if let Ok((v_closed, _)) = GlbLoader::load_glb_bytes(include_bytes!("../../../assets/modeles/boxfermer.glb")) {
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];
         for v in &v_closed {
@@ -13,7 +13,7 @@ fn main() {
         println!("BOX CLOSED bounds: min={:?}, max={:?}, size=[{}, {}, {}]", 
             min, max, max[0]-min[0], max[1]-min[1], max[2]-min[2]);
     }
-    if let Ok((v_open, _)) = GlbLoader::load_glb("/home/shaza/Documents/asset/box.glb") {
+    if let Ok((v_open, _)) = GlbLoader::load_glb_bytes(include_bytes!("../../../assets/modeles/box.glb")) {
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];
         for v in &v_open {

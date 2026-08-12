@@ -11,7 +11,7 @@ pub struct RockObject {
 
 impl RockObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
-        let (v, i) = GlbLoader::load_glb("/home/shaza/Documents/asset/rockbasdroit.glb")?;
+        let (v, i) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/rockbasdroit.glb"))?;
         let mesh = GpuMesh::upload(gpu, memory_props, &v, &i)?;
         log::info!("Rocher Bas Droit 3D (rockbasdroit.glb) initialisé.");
 

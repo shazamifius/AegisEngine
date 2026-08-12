@@ -13,7 +13,7 @@ pub struct MapObject {
 
 impl MapObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
-        let (v, i) = GlbLoader::load_glb_raw("/home/shaza/Documents/asset/map.glb")?;
+        let (v, i) = GlbLoader::load_glb_raw_bytes(include_bytes!("../../../../assets/modeles/map.glb"))?;
         let mesh = GpuMesh::upload(gpu, memory_props, &v, &i)?;
         log::info!("Map 3D (map.glb) initialisée : {} sommets, {} indices.", v.len(), i.len());
 

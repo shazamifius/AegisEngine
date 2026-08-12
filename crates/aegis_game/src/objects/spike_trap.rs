@@ -11,7 +11,7 @@ pub struct SpikeTrapObject {
 
 impl SpikeTrapObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
-        let (v, i) = GlbLoader::load_glb("/home/shaza/Documents/asset/spike_trap.glb")?;
+        let (v, i) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/spike_trap.glb"))?;
         let mesh = GpuMesh::upload(gpu, memory_props, &v, &i)?;
         log::info!("Dalle à Pics 3D (spike_trap.glb) initialisée.");
 

@@ -384,7 +384,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     let screenshot_mode = args.iter().any(|arg| arg == "--screenshot");
-    let screenshot_path = "/home/shaza/.gemini/antigravity/brain/e25d64b0-bc32-41b5-95c2-f822bf7c18e1/party_game_screenshot.png".to_string();
+    // Où atterrit la capture : le dossier courant par défaut, ou l'argument qui suit `--screenshot`.
+    // (Avant : un chemin absolu vers le dossier de travail d'un agent sur UNE machine — la capture
+    // partait donc dans le vide partout ailleurs, sans qu'aucun message ne le dise.)
+    let screenshot_path = args
+        .iter()
+        .position(|a| a == "--screenshot")
+        .and_then(|i| args.get(i + 1))
+        .filter(|a| !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_else(|| "aegis_screenshot.png".to_string());
 
     log::info!("=== Démarrage d'AegisEngine v1.0.0 (Party Platformer Game) ===");
     if screenshot_mode {

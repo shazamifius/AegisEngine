@@ -3,7 +3,7 @@ use crate::grid::{TileGrid, TileType};
 use crate::player::{Player, InputState};
 use crate::traps::TrapManager;
 use crate::mystery_box::MysteryBox;
-use crate::web3_integration::Web3Manager;
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GamePhase {
@@ -121,9 +121,9 @@ impl PartyGame {
         let grid = TileGrid::new(grid_width, grid_height);
         let start_p = grid.start_pos;
 
-        // Chargement des noms Web3 depuis /home/shaza/Documents/projet web 3/players.json
-        let web3_mgr = Web3Manager::new();
-        let web3_players = web3_mgr.load_player_names(1);
+        // Le nom du joueur vient du pseudonyme choisi dans le launcher web3 (`~/.web3/pseudo`).
+        // Un seul joueur pour l'instant : le multijoueur passera par le sidecar (phase 1 du plan).
+        let web3_players = crate::web3_integration::joueurs(1);
 
         let mut players = Vec::new();
         for p in web3_players {
