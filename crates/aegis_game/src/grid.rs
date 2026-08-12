@@ -122,25 +122,89 @@ enum SourceCarte {
     Illisible(std::path::PathBuf),
 }
 
+/// Le chemin `lu` — relatif ou absolu — désigne-t-il un fichier posé directement dans `dossier` ?
+/// `cwd` sert à résoudre les relatifs, et il est PASSÉ en paramètre plutôt que lu ici : c'est ce qui
+/// rend cette règle testable sans toucher au dossier courant du processus.
+///
+/// ⚠ C'est le cas RELATIF qui compte, et c'est lui qui manquait. Le régisseur lance le jeu avec le
+/// répertoire courant déjà placé dans le paquet : le chemin lu est alors le simple
+/// « custom_map.lvl », dont le `parent()` est la chaîne vide et n'égalera jamais un dossier absolu.
+/// Mesuré le 12 août 2026 : la règle ne se déclenchait pas du tout dans le seul cas pour lequel elle
+/// existe, pendant que le journal affichait « carte chargée » avec l'air d'aller très bien.
+fn loge_dans(lu: &std::path::Path, dossier: &std::path::Path, cwd: &std::path::Path) -> bool {
+    let absolu = if lu.is_absolute() { lu.to_path_buf() } else { cwd.join(lu) };
+    absolu.parent() == Some(dossier)
+}
+
+/// Le dossier où vivent les cartes ÉDITÉES par la personne qui joue. Sous l'arborescence `~/.web3`
+/// du projet, pour que tout ce qui appartient à quelqu'un reste au même endroit chez lui.
+fn dossier_joueur() -> Option<std::path::PathBuf> {
+    let base = std::env::var("APPDATA")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    Some(std::path::Path::new(&base).join(".web3").join("aegis"))
+}
+
+/// Le dossier du binaire — celui du PAQUET quand le jeu est installé. ⚠ Il est **remplacé à chaque
+/// mise à jour** : ce qu'on y écrit disparaît sans prévenir. On y LIT, on n'y écrit jamais.
+fn dossier_binaire() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+}
+
 /// Les endroits où une carte peut vivre, dans l'ordre où on les essaie.
 ///
-/// L'ordre compte : le dossier COURANT vient en premier, parce que c'est là que vit la carte de
-/// l'auteur quand il lance par `./run.sh` depuis la racine du projet — la déplacer ou l'ignorer
-/// serait exactement la panne qu'on cherche à empêcher. Vient ensuite le dossier du binaire, qui
-/// est le seul repère stable quand le jeu est LANCÉ PAR QUELQU'UN D'AUTRE (le launcher web3 place
-/// son répertoire courant dans le dossier du paquet ; sur les machines d'une classe, personne
-/// n'aura jamais le bon dossier courant).
+/// ⭐ LA DISTINCTION QUI SUPPRIME LE PROBLÈME (12 août 2026). Il n'existe pas « deux copies de la
+/// carte à synchroniser » — il existe **deux choses différentes** qu'on avait confondues :
+///
+/// - **la carte LIVRÉE avec le jeu** (dossier du binaire, ou dépôt en développement) : un asset,
+///   versionné, identique chez tout le monde, remplacé à chaque mise à jour ;
+/// - **la carte du JOUEUR** (`~/.web3/aegis/`) : son travail à lui, que rien ne doit jamais écraser.
+///
+/// D'où l'ordre de lecture : la sienne d'abord — s'il a édité, c'est ça qu'il veut revoir — puis le
+/// dossier courant (c'est là que vit la carte de l'auteur quand il lance par `./run.sh` depuis la
+/// racine du projet), puis le dossier du binaire (le seul repère stable quand le jeu est lancé PAR
+/// QUELQU'UN D'AUTRE : le launcher place son répertoire courant dans le dossier du paquet, et sur
+/// les machines d'une classe personne n'aura jamais le « bon » dossier courant).
 fn chemins_carte() -> Vec<std::path::PathBuf> {
     let mut candidats = Vec::new();
     // Porte de secours explicite, pour les bancs et les tests : jamais deviner quand on peut dire.
     if let Ok(p) = std::env::var("AEGIS_MAP") {
         candidats.push(std::path::PathBuf::from(p));
     }
+    if let Some(d) = dossier_joueur() {
+        candidats.push(d.join("custom_map.lvl"));
+    }
     candidats.push(std::path::PathBuf::from("custom_map.lvl"));
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
-        candidats.push(dir.join("custom_map.lvl"));
+    if let Some(d) = dossier_binaire() {
+        candidats.push(d.join("custom_map.lvl"));
     }
     candidats
+}
+
+/// Où écrire, sachant d'où l'on a lu. **On réécrit là où on a lu — sauf si c'est le dossier du
+/// binaire**, qu'une mise à jour remplace : l'édition irait alors à la poubelle au prochain
+/// déploiement, silencieusement. Dans ce seul cas, elle bascule vers le dossier du joueur.
+///
+/// Conséquence voulue, et c'est tout l'intérêt : en développement (lancement depuis le dépôt) la
+/// carte de l'auteur reste dans le dépôt, donc **versionnée par git** — le filet qui l'a sauvée le
+/// 12 août. Chez un joueur, l'édition atterrit chez lui et survit aux mises à jour. Personne ne
+/// synchronise rien, parce qu'il n'y a rien à synchroniser.
+///
+/// La comparaison elle-même est isolée dans `loge_dans`, une fonction PURE : elle ne lit ni le
+/// disque ni l'environnement, donc elle se teste exhaustivement sans qu'aucun test n'ait à toucher
+/// à un état global (changer le dossier courant dans un test le rend instable pour tous les autres).
+fn cible_ecriture(lu: &std::path::Path) -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let dans_le_paquet = dossier_binaire()
+        .map(|d| loge_dans(lu, &d, &cwd))
+        .unwrap_or(false);
+    if !dans_le_paquet {
+        return lu.to_path_buf();
+    }
+    match dossier_joueur() {
+        Some(d) => d.join("custom_map.lvl"),
+        None => lu.to_path_buf(), // pas de dossier utilisateur : mieux vaut écrire là que nulle part
+    }
 }
 
 pub struct TileGrid {
@@ -175,8 +239,18 @@ impl TileGrid {
             }
             match grid.load_from_file(chemin) {
                 Ok(()) => {
-                    log::info!("Carte chargée depuis {}", chemin.display());
-                    grid.source = SourceCarte::Fichier(chemin.clone());
+                    let cible = cible_ecriture(chemin);
+                    if cible != *chemin {
+                        log::info!(
+                            "Carte chargée depuis {} (livrée avec le jeu) — tes modifications iront \
+                             dans {}, pour qu'une mise à jour ne les efface pas.",
+                            chemin.display(),
+                            cible.display()
+                        );
+                    } else {
+                        log::info!("Carte chargée depuis {}", chemin.display());
+                    }
+                    grid.source = SourceCarte::Fichier(cible);
                     return grid;
                 }
                 Err(e) => {
@@ -194,7 +268,10 @@ impl TileGrid {
         grid.source = match illisible {
             Some(p) => SourceCarte::Illisible(p),
             None => {
-                let cible = candidats.last().cloned().unwrap_or_else(|| "custom_map.lvl".into());
+                // Aucune carte nulle part : l'éditeur en créera une, et il la créera CHEZ LE JOUEUR
+                // (via `cible_ecriture`), jamais dans le paquet qu'une mise à jour remplacera.
+                let defaut = candidats.last().cloned().unwrap_or_else(|| "custom_map.lvl".into());
+                let cible = cible_ecriture(&defaut);
                 log::info!("Aucune carte trouvée — terrain par défaut. L'éditeur créera {}", cible.display());
                 SourceCarte::Neuve(cible)
             }
@@ -224,6 +301,16 @@ impl TileGrid {
                 return;
             }
         };
+        // Le dossier du joueur peut ne pas exister encore : c'est le cas normal du premier
+        // enregistrement, pas une panne. On le crée, et si on n'y arrive pas on le DIT.
+        if let Some(parent) = cible.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    log::error!("Carte NON enregistrée — dossier {} impossible à créer : {e}", parent.display());
+                    return;
+                }
+            }
+        }
         let temporaire = cible.with_extension("lvl.tmp");
         if let Err(e) = self.save_to_file(&temporaire) {
             log::error!("Carte NON enregistrée ({}) : {e}", temporaire.display());
@@ -409,6 +496,52 @@ mod tests {
         let d = std::env::temp_dir().join(format!("aegis-test-{nom}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&d);
         d
+    }
+
+    /// LA RÈGLE CENTRALE : une carte lue dans le dossier du BINAIRE (donc livrée avec le jeu, et
+    /// remplacée à chaque mise à jour) doit voir ses modifications partir CHEZ LE JOUEUR. Sinon
+    /// l'édition disparaît au prochain déploiement, sans un mot.
+    #[test]
+    fn editer_la_carte_livree_ecrit_chez_le_joueur_pas_dans_le_paquet() {
+        let dans_le_paquet = dossier_binaire().unwrap().join("custom_map.lvl");
+        let cible = cible_ecriture(&dans_le_paquet);
+        assert_ne!(cible, dans_le_paquet, "l'édition serait écrasée par la prochaine mise à jour");
+        assert_eq!(cible, dossier_joueur().unwrap().join("custom_map.lvl"));
+    }
+
+    /// ⚠ LE CAS QUI ÉCHAPPAIT À LA RÈGLE, et c'est le seul qui se produit en vrai : le régisseur
+    /// lance le jeu avec le répertoire courant DÉJÀ dans le paquet, donc le chemin lu est le simple
+    /// relatif « custom_map.lvl ». Table exhaustive, sur une fonction pure — aucun état global
+    /// touché, donc ce test ne peut faire échouer aucun autre.
+    #[test]
+    fn la_regle_reconnait_le_paquet_en_relatif_comme_en_absolu() {
+        let p = std::path::Path::new;
+        let paquet = p("/opt/jeu/Linux");
+        let cas: &[(&str, &str, bool)] = &[
+            // (chemin lu, dossier courant, doit-on considérer qu'il est DANS le paquet ?)
+            ("custom_map.lvl", "/opt/jeu/Linux", true),   // le cas réel du régisseur
+            ("/opt/jeu/Linux/custom_map.lvl", "/", true), // le même, en absolu
+            ("custom_map.lvl", "/home/moi/depot", false), // l'auteur dans son dépôt
+            ("/home/moi/depot/custom_map.lvl", "/", false),
+            ("sous/custom_map.lvl", "/opt/jeu", false),   // un cran plus bas : pas « dans » le paquet
+            ("/opt/jeu/Linux/sous/custom_map.lvl", "/", false),
+        ];
+        for (lu, cwd, attendu) in cas {
+            assert_eq!(
+                loge_dans(p(lu), paquet, p(cwd)),
+                *attendu,
+                "lu={lu} cwd={cwd}"
+            );
+        }
+    }
+
+    /// Le témoin de l'autre côté : partout AILLEURS que dans le paquet, on réécrit là où on a lu.
+    /// C'est ce qui garde la carte de l'auteur dans son dépôt, donc versionnée par git — le filet
+    /// qui l'a sauvée. Sans ce test, la règle ci-dessus pourrait tout rediriger, y compris ça.
+    #[test]
+    fn temoin_ailleurs_on_reecrit_la_ou_on_a_lu() {
+        let dans_le_depot = std::path::PathBuf::from("/un/depot/a/moi/custom_map.lvl");
+        assert_eq!(cible_ecriture(&dans_le_depot), dans_le_depot);
     }
 
     /// ⛔ LE TEST QUI COMPTE : une carte présente mais ILLISIBLE ne doit jamais être écrasée.
