@@ -103,12 +103,54 @@ impl TileType {
     }
 }
 
+/// D'où vient la carte en mémoire — et donc si l'on a le droit de réécrire par-dessus.
+///
+/// Cette distinction n'est pas une subtilité : elle est la seule chose qui sépare « ma carte » de
+/// « un terrain plat qui a pris sa place ». Le 12 août 2026, lancer le jeu depuis un autre dossier
+/// a fait apparaître le terrain par défaut, et l'éditeur aurait enregistré CE terrain sur le premier
+/// bloc posé. La carte a survécu par chance — parce que le dossier de lancement n'était pas celui
+/// de la carte. Ce n'est pas une garantie qu'on peut garder.
+#[derive(Debug, Clone, PartialEq)]
+enum SourceCarte {
+    /// Chargée depuis ce fichier : on y réécrit sans crainte, c'est bien la même carte.
+    Fichier(std::path::PathBuf),
+    /// Aucun fichier de carte nulle part : on joue le terrain par défaut, et l'éditeur a le droit
+    /// de CRÉER le fichier ici (rien à écraser).
+    Neuve(std::path::PathBuf),
+    /// ⛔ Un fichier de carte EXISTE mais n'a pas pu être lu (corrompu, droits, disque). Écrire
+    /// par-dessus détruirait un travail qu'on n'a pas su ouvrir. On refuse, et on le dit fort.
+    Illisible(std::path::PathBuf),
+}
+
+/// Les endroits où une carte peut vivre, dans l'ordre où on les essaie.
+///
+/// L'ordre compte : le dossier COURANT vient en premier, parce que c'est là que vit la carte de
+/// l'auteur quand il lance par `./run.sh` depuis la racine du projet — la déplacer ou l'ignorer
+/// serait exactement la panne qu'on cherche à empêcher. Vient ensuite le dossier du binaire, qui
+/// est le seul repère stable quand le jeu est LANCÉ PAR QUELQU'UN D'AUTRE (le launcher web3 place
+/// son répertoire courant dans le dossier du paquet ; sur les machines d'une classe, personne
+/// n'aura jamais le bon dossier courant).
+fn chemins_carte() -> Vec<std::path::PathBuf> {
+    let mut candidats = Vec::new();
+    // Porte de secours explicite, pour les bancs et les tests : jamais deviner quand on peut dire.
+    if let Ok(p) = std::env::var("AEGIS_MAP") {
+        candidats.push(std::path::PathBuf::from(p));
+    }
+    candidats.push(std::path::PathBuf::from("custom_map.lvl"));
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+        candidats.push(dir.join("custom_map.lvl"));
+    }
+    candidats
+}
+
 pub struct TileGrid {
     pub width: usize,
     pub height: usize,
     pub tiles: Vec<TileType>,
     pub start_pos: Vec2,
     pub finish_pos: Vec2,
+    /// D'où vient cette carte. Détermine où `enregistrer` écrit — et s'il a le droit d'écrire.
+    source: SourceCarte,
 }
 
 impl TileGrid {
@@ -119,11 +161,81 @@ impl TileGrid {
             tiles: vec![TileType::Air; width * height],
             start_pos: Vec2::new(3.5, 1.0),
             finish_pos: Vec2::new((width - 4) as f32 + 0.5, 2.0),
+            source: SourceCarte::Neuve(std::path::PathBuf::from("custom_map.lvl")),
         };
-        if grid.load_from_file("custom_map.lvl").is_err() {
-            grid.load_default_stage();
+
+        let candidats = chemins_carte();
+        // On distingue TROIS issues, et on les journalise : chargée / aucune carte / carte présente
+        // mais illisible. Un `if load().is_err() { defaut() }` les confondait toutes les trois —
+        // et c'est la troisième, la seule dangereuse, qui disparaissait dans le silence.
+        let mut illisible: Option<std::path::PathBuf> = None;
+        for chemin in &candidats {
+            if !chemin.exists() {
+                continue;
+            }
+            match grid.load_from_file(chemin) {
+                Ok(()) => {
+                    log::info!("Carte chargée depuis {}", chemin.display());
+                    grid.source = SourceCarte::Fichier(chemin.clone());
+                    return grid;
+                }
+                Err(e) => {
+                    log::error!(
+                        "Carte PRÉSENTE mais illisible : {} ({e}). L'éditeur refusera d'écrire ici \
+                         pour ne pas la détruire.",
+                        chemin.display()
+                    );
+                    illisible.get_or_insert(chemin.clone());
+                }
+            }
         }
+
+        grid.load_default_stage();
+        grid.source = match illisible {
+            Some(p) => SourceCarte::Illisible(p),
+            None => {
+                let cible = candidats.last().cloned().unwrap_or_else(|| "custom_map.lvl".into());
+                log::info!("Aucune carte trouvée — terrain par défaut. L'éditeur créera {}", cible.display());
+                SourceCarte::Neuve(cible)
+            }
+        };
         grid
+    }
+
+    /// Enregistre la carte LÀ D'OÙ ELLE VIENT, de façon atomique, et dit ce qui s'est passé.
+    ///
+    /// Trois raisons à cette fonction, chacune correspondant à un défaut réel :
+    /// 1. **Le chemin n'est plus deviné** : on réécrit le fichier qu'on a ouvert, jamais un
+    ///    `"custom_map.lvl"` relatif au dossier d'où le jeu a été lancé.
+    /// 2. **On n'écrase jamais une carte qu'on n'a pas su lire** (`Illisible`).
+    /// 3. **L'écriture est atomique** : `File::create` TRONQUE le fichier avant d'écrire, donc une
+    ///    interruption au mauvais moment (disque plein, coupure, crash) laissait une carte à moitié
+    ///    écrite — c'est-à-dire perdue. On écrit à côté, puis on renomme : le renommage sur un même
+    ///    système de fichiers est indivisible, la carte est donc soit l'ancienne, soit la nouvelle.
+    pub fn enregistrer(&self) {
+        let cible = match &self.source {
+            SourceCarte::Fichier(p) | SourceCarte::Neuve(p) => p.clone(),
+            SourceCarte::Illisible(p) => {
+                log::error!(
+                    "ENREGISTREMENT REFUSÉ : {} existe mais n'a pas pu être lu au démarrage. \
+                     Écrire ici remplacerait ta carte par le terrain par défaut.",
+                    p.display()
+                );
+                return;
+            }
+        };
+        let temporaire = cible.with_extension("lvl.tmp");
+        if let Err(e) = self.save_to_file(&temporaire) {
+            log::error!("Carte NON enregistrée ({}) : {e}", temporaire.display());
+            return;
+        }
+        match std::fs::rename(&temporaire, &cible) {
+            Ok(()) => log::info!("Carte enregistrée : {}", cible.display()),
+            Err(e) => {
+                log::error!("Carte NON enregistrée — le renommage a échoué ({}) : {e}", cible.display());
+                let _ = std::fs::remove_file(&temporaire);
+            }
+        }
     }
 
     pub fn save_to_file(&self, path: impl AsRef<std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
@@ -289,6 +401,84 @@ impl TileGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un dossier de travail unique par test : ces tests touchent au DISQUE, et deux d'entre eux
+    /// qui partageraient un fichier échoueraient l'un l'autre au hasard. Un test instable est pire
+    /// qu'un test absent — il fait douter des vrais échecs.
+    fn dossier_temporaire(nom: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("aegis-test-{nom}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
+    /// ⛔ LE TEST QUI COMPTE : une carte présente mais ILLISIBLE ne doit jamais être écrasée.
+    /// C'est le scénario qui aurait coûté la carte de l'auteur — démarrer sur le terrain par défaut
+    /// alors que la vraie carte existe, puis poser un bloc.
+    #[test]
+    fn une_carte_illisible_nest_jamais_ecrasee() {
+        let d = dossier_temporaire("illisible");
+        let carte = d.join("custom_map.lvl");
+        let contenu_precieux = b"CECI EST LA CARTE DE L'AUTEUR, ILLISIBLE MAIS PRECIEUSE";
+        std::fs::write(&carte, contenu_precieux).unwrap();
+
+        let mut grille = TileGrid::new(32, 18);
+        grille.load_default_stage();
+        grille.source = SourceCarte::Illisible(carte.clone());
+        grille.set_tile(5, 5, TileType::GrassBlock); // le geste qui déclenchait l'enregistrement
+        grille.enregistrer();
+
+        assert_eq!(
+            std::fs::read(&carte).unwrap(),
+            contenu_precieux,
+            "le fichier a été écrasé alors qu'il était marqué illisible"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// La preuve que la garde ci-dessus MORD : avec la même grille marquée `Fichier` au lieu
+    /// d'`Illisible`, l'écriture DOIT avoir lieu. Sans ce témoin, le test précédent passerait tout
+    /// aussi bien si `enregistrer` n'écrivait jamais rien.
+    #[test]
+    fn temoin_positif_une_carte_lisible_est_bien_reecrite() {
+        let d = dossier_temporaire("lisible");
+        let carte = d.join("custom_map.lvl");
+        std::fs::write(&carte, b"ancien contenu").unwrap();
+
+        let mut grille = TileGrid::new(32, 18);
+        grille.load_default_stage();
+        grille.source = SourceCarte::Fichier(carte.clone());
+        grille.set_tile(5, 5, TileType::GrassBlock);
+        grille.enregistrer();
+
+        let ecrit = std::fs::read_to_string(&carte).unwrap();
+        assert_ne!(ecrit, "ancien contenu", "la grille aurait dû être réécrite");
+        assert!(ecrit.starts_with("32 18 "), "en-tête de carte attendu, trouvé : {ecrit:.20}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// L'enregistrement passe par un fichier temporaire renommé : après coup, aucun `.tmp` ne doit
+    /// traîner. Un `.lvl.tmp` oublié à côté d'une carte, c'est le prochain qui se demandera lequel
+    /// des deux est le bon.
+    #[test]
+    fn lenregistrement_ne_laisse_aucun_fichier_temporaire() {
+        let d = dossier_temporaire("atomique");
+        let carte = d.join("custom_map.lvl");
+
+        let mut grille = TileGrid::new(32, 18);
+        grille.load_default_stage();
+        grille.source = SourceCarte::Neuve(carte.clone());
+        grille.enregistrer();
+
+        assert!(carte.exists(), "la carte neuve aurait dû être créée");
+        let restes: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("tmp"))
+            .collect();
+        assert!(restes.is_empty(), "fichiers temporaires laissés derrière : {restes:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn test_grid_initialization() {

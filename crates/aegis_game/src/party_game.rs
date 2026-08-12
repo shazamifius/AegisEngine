@@ -194,7 +194,7 @@ impl PartyGame {
         if self.editor.selected_block == EditorBlockType::Start {
             self.players[0].player.position = Vec2::new(cx as f32 + 0.5, cy as f32 + 1.0);
         }
-        let _ = self.grid.save_to_file("custom_map.lvl");
+        self.grid.enregistrer();
         log::info!("Bloc posé à ({}, {}) : {:?} (Sauvegardé)", cx, cy, self.editor.selected_block);
     }
 
@@ -202,7 +202,7 @@ impl PartyGame {
     pub fn delete_selected_block(&mut self) {
         let (cx, cy) = self.editor.cursor;
         self.grid.set_tile(cx as usize, cy as usize, TileType::Air);
-        let _ = self.grid.save_to_file("custom_map.lvl");
+        self.grid.enregistrer();
         log::info!("Bloc supprimé à ({}, {}) (Sauvegardé)", cx, cy);
     }
 
