@@ -218,15 +218,34 @@ pub struct TileGrid {
 }
 
 impl TileGrid {
-    pub fn new(width: usize, height: usize) -> Self {
-        let mut grid = Self {
+    /// Une grille VIDE aux dimensions demandées — aucun disque, aucune carte, rien d'implicite.
+    ///
+    /// Elle est séparée de `new` depuis le 12 août 2026, parce que `new` fait DEUX choses : bâtir
+    /// une grille *et* aller chercher une carte. Tant qu'aucune carte n'existait, la différence ne
+    /// se voyait pas ; le jour où la carte livrée a été embarquée, `new(32, 18)` s'est mis à rendre
+    /// une grille 58×28 — et deux tests l'ont dit tout de suite. Ils avaient raison : un
+    /// constructeur qui ignore ses propres paramètres est un piège. Les tests qui veulent une
+    /// grille nue passent donc par ici.
+    pub fn vide(width: usize, height: usize) -> Self {
+        Self {
             width,
             height,
             tiles: vec![TileType::Air; width * height],
             start_pos: Vec2::new(3.5, 1.0),
-            finish_pos: Vec2::new((width - 4) as f32 + 0.5, 2.0),
+            // `saturating_sub` et pas `-` : sur une grille de moins de 4 colonnes, la soustraction
+            // déborde. En debug elle panique, mais en RELEASE elle repartait par le haut et posait
+            // l'arrivée à des milliards de cases — silencieusement. Trouvé le 12 août 2026 par un
+            // test qui cherchait tout autre chose.
+            finish_pos: Vec2::new(width.saturating_sub(4) as f32 + 0.5, 2.0),
             source: SourceCarte::Neuve(std::path::PathBuf::from("custom_map.lvl")),
-        };
+        }
+    }
+
+    /// La grille DU JEU : une grille vide, puis la meilleure carte disponible — celle du joueur si
+    /// elle existe, sinon celle livrée avec le jeu. Les dimensions passées ne sont donc qu'un
+    /// repli : toute carte chargée impose les siennes.
+    pub fn new(width: usize, height: usize) -> Self {
+        let mut grid = Self::vide(width, height);
 
         let candidats = chemins_carte();
         // On distingue TROIS issues, et on les journalise : chargée / aucune carte / carte présente
@@ -264,7 +283,13 @@ impl TileGrid {
             }
         }
 
-        grid.load_default_stage();
+        // Aucune carte sur le disque → LA CARTE LIVRÉE, embarquée dans le binaire. Le terrain nu ne
+        // reste que le filet du filet : si même la carte embarquée est illisible, le jeu démarre
+        // quand même plutôt que de refuser de se lancer.
+        if grid.load_carte_livree().is_err() {
+            log::error!("La carte livrée (embarquée) est illisible — terrain nu.");
+            grid.load_default_stage();
+        }
         grid.source = match illisible {
             Some(p) => SourceCarte::Illisible(p),
             None => {
@@ -338,9 +363,28 @@ impl TileGrid {
     }
 
     pub fn load_from_file(&mut self, path: impl AsRef<std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
-        use std::io::BufRead;
         let file = std::fs::File::open(path)?;
-        let mut reader = std::io::BufReader::new(file);
+        self.load_from_reader(std::io::BufReader::new(file))
+    }
+
+    /// La carte LIVRÉE avec le jeu, embarquée dans le binaire (3 Ko).
+    ///
+    /// Elle est ici pour la même raison que les modèles 3D : un joueur qui télécharge le jeu doit
+    /// recevoir LE terrain, pas un sol vide. Tant qu'elle vivait en fichier à côté de l'exécutable,
+    /// publier le binaire seul aurait livré un jeu sans sa carte — et personne ne l'aurait vu avant
+    /// que quelqu'un d'autre ne lance le jeu. Le fichier reste dans le dépôt : c'est lui que
+    /// l'éditeur modifie, et c'est lui qui est embarqué à la compilation suivante.
+    const CARTE_LIVREE: &'static [u8] = include_bytes!("../../../custom_map.lvl");
+
+    /// Charge la carte embarquée. Ne touche AUCUN fichier : c'est le dernier recours quand aucune
+    /// carte n'existe sur le disque, avant le terrain nu.
+    pub fn load_carte_livree(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.load_from_reader(std::io::BufReader::new(Self::CARTE_LIVREE))
+    }
+
+    /// Le PARSEUR, séparé de sa source — c'est ce qui permet de lire indifféremment un fichier du
+    /// disque ou les octets embarqués, sans deux copies du format qui divergeraient un jour.
+    fn load_from_reader(&mut self, mut reader: impl std::io::BufRead) -> Result<(), Box<dyn std::error::Error>> {
         let mut line1 = String::new();
         reader.read_line(&mut line1)?;
         let parts: Vec<&str> = line1.split_whitespace().collect();
@@ -554,7 +598,7 @@ mod tests {
         let contenu_precieux = b"CECI EST LA CARTE DE L'AUTEUR, ILLISIBLE MAIS PRECIEUSE";
         std::fs::write(&carte, contenu_precieux).unwrap();
 
-        let mut grille = TileGrid::new(32, 18);
+        let mut grille = TileGrid::vide(32, 18);
         grille.load_default_stage();
         grille.source = SourceCarte::Illisible(carte.clone());
         grille.set_tile(5, 5, TileType::GrassBlock); // le geste qui déclenchait l'enregistrement
@@ -577,7 +621,7 @@ mod tests {
         let carte = d.join("custom_map.lvl");
         std::fs::write(&carte, b"ancien contenu").unwrap();
 
-        let mut grille = TileGrid::new(32, 18);
+        let mut grille = TileGrid::vide(32, 18);
         grille.load_default_stage();
         grille.source = SourceCarte::Fichier(carte.clone());
         grille.set_tile(5, 5, TileType::GrassBlock);
@@ -597,7 +641,7 @@ mod tests {
         let d = dossier_temporaire("atomique");
         let carte = d.join("custom_map.lvl");
 
-        let mut grille = TileGrid::new(32, 18);
+        let mut grille = TileGrid::vide(32, 18);
         grille.load_default_stage();
         grille.source = SourceCarte::Neuve(carte.clone());
         grille.enregistrer();
@@ -613,9 +657,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// ⛔ LA CARTE EST-ELLE VRAIMENT DANS LE BINAIRE ?
+    ///
+    /// Le 12 août 2026, `custom_map.lvl` vivait en fichier À CÔTÉ de l'exécutable. Publier le
+    /// binaire seul aurait donc livré le jeu SANS sa carte — un sol vide — et personne ne l'aurait
+    /// vu avant qu'un camarade ne lance le jeu chez lui. Ce test regarde les octets embarqués :
+    /// il tombe si quelqu'un retire le `include_bytes!`, ou si la carte livrée devient illisible.
+    #[test]
+    fn la_carte_livree_voyage_dans_le_binaire_pas_a_cote() {
+        let mut grille = TileGrid::vide(1, 1);
+        grille.load_carte_livree().expect("la carte livrée doit être lisible");
+
+        assert!(grille.width > 8 && grille.height > 8, "carte livrée trop petite : {}x{}", grille.width, grille.height);
+        // GARDE ANTI-TEST-CREUX : une carte de la bonne taille mais TOUTE VIDE passerait le test
+        // ci-dessus en livrant un terrain nu — exactement le défaut qu'on cherche à empêcher.
+        let posees = grille.tiles.iter().filter(|t| **t != TileType::Air).count();
+        assert!(posees > 20, "la carte livrée ne contient que {posees} tuiles : c'est un terrain vide");
+    }
+
     #[test]
     fn test_grid_initialization() {
-        let grid = TileGrid::new(32, 18);
+        let grid = TileGrid::vide(32, 18);
         assert_eq!(grid.width, 32);
         assert_eq!(grid.height, 18);
     }
