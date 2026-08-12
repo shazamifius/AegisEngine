@@ -9,10 +9,12 @@ mod mystery_box;
 mod party_game;
 mod party_render_pass;
 mod objects;
+mod nav_client;
 mod web3_integration;
 
 use std::sync::Arc;
 use aegis_engine::Engine;
+use nav_client::NavClient;
 use party_game::PartyGame;
 use party_render_pass::PartyRenderPass;
 use player::InputState;
@@ -35,6 +37,8 @@ struct AegisApp {
     screenshot_path: String,
     /// Position de la souris en pixels (pour la sélection d'items par clic)
     mouse_pos: (f32, f32),
+    /// Le pont vers le launcher web3 (régisseur de bascule). Inerte si le jeu est lancé tout seul.
+    nav: NavClient,
 }
 
 impl AegisApp {
@@ -48,6 +52,10 @@ impl AegisApp {
             screenshot_mode,
             screenshot_path,
             mouse_pos: (0.0, 0.0),
+            // On s'annonce AVANT d'ouvrir la fenêtre et d'initialiser Vulkan : le régisseur tient son
+            // rideau baissé tant qu'aucune image n'est prouvée, et il vaut mieux qu'il sache tout de
+            // suite qu'on est en train de démarrer plutôt que de nous croire morts.
+            nav: NavClient::connecter("aegis"),
         }
     }
 
@@ -188,6 +196,13 @@ impl AegisApp {
                     }
                 }
                 engine.frame_count += 1;
+                // LA trame qui compte, et elle est ICI et nulle part ailleurs : `end_frame` a
+                // présenté une image RÉELLE à l'écran. L'envoyer plus tôt (à la création de la
+                // fenêtre, ou après l'init Vulkan) ferait exactement le mensonge que le contrat
+                // interdit — le régisseur tuerait le jeu précédent avant que celui-ci n'affiche
+                // quoi que ce soit, et l'on verrait un écran noir. `pret()` est un one-shot : le
+                // laisser dans la boucle de rendu ne coûte rien après la première image.
+                self.nav.pret();
             }
             Err(_) => {
                 let size = window.inner_size();
@@ -217,9 +232,16 @@ impl ApplicationHandler for AegisApp {
             };
 
             log::info!("Fenêtre créée avec succès. Initialisation du moteur AegisEngine...");
+            // Ces trois jalons ne sont PAS décoratifs : l'initialisation Vulkan et la compilation des
+            // pipelines peuvent durer plusieurs secondes au premier lancement. Sans eux, le régisseur
+            // affiche une barre qui n'avance pas et l'on ne sait pas distinguer « ça charge » de
+            // « c'est planté ».
+            self.nav.progression(20);
             let engine = Engine::new(window.clone()).expect("Échec de l'initialisation du moteur Vulkan 1.4");
+            self.nav.progression(60);
             let memory_props = unsafe { engine.gpu.instance.get_physical_device_memory_properties(engine.gpu.physical_device) };
             let party_render_pass = PartyRenderPass::new(&engine.gpu, &memory_props).expect("Échec de création du RenderPass Party");
+            self.nav.progression(90);
 
             self.window = Some(window);
             self.engine = Some(engine);
@@ -343,7 +365,14 @@ impl ApplicationHandler for AegisApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Le launcher nous demande de partir (il a basculé vers un autre monde et l'autre a prouvé
+        // son image). On sort proprement : le régisseur possède bien un repli dur, mais un jeu qui
+        // quitte de lui-même rend son contexte Vulkan et ne laisse pas de fenêtre fantôme derrière.
+        if self.nav.doit_quitter() {
+            event_loop.exit();
+            return;
+        }
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
