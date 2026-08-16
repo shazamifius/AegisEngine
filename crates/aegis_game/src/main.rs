@@ -10,6 +10,7 @@ mod party_game;
 mod party_render_pass;
 mod objects;
 mod nav_client;
+mod plantage;
 mod web3_integration;
 
 use std::sync::Arc;
@@ -384,7 +385,34 @@ impl ApplicationHandler for AegisApp {
     }
 }
 
+/// ⚠ DEUX FAÇONS DE MOURIR, ET LE HOOK N'EN COUVRE QU'UNE (mesuré le 16 août 2026).
+///
+/// Le hook de panique attrape les `panic!`. Mais ce jeu s'arrête bien plus souvent par une `Err`
+/// remontée jusqu'ici — et une `Err` rendue par `main` **n'est pas une panique** : le processus se
+/// termine proprement, le hook ne voit rien.
+///
+/// Constaté en essayant pour de vrai, pas en le supposant : lancé sans affichage, le jeu rend
+/// `Error: Os(... XNotSupported(XOpenDisplayFailed))` et **aucun témoin n'était déposé**. Or c'est
+/// exactement le cas le plus probable chez quelqu'un d'autre — pas de pilote Vulkan, pas
+/// d'affichage, matériel inconnu. Le mécanisme aurait donc raté précisément ce qu'il devait
+/// attraper, tout en ayant l'air complet.
+///
+/// D'où cet enrobage : `main` ne fait que déléguer, et déposer le témoin si le jeu a refusé de
+/// démarrer. Le message d'erreur d'origine reste affiché, on n'enlève rien.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    plantage::installer();
+    let resultat = executer();
+    if let Err(e) = &resultat {
+        plantage::deposer(&format!("aegis n'a pas pu démarrer — {e}"));
+    }
+    resultat
+}
+
+fn executer() -> Result<(), Box<dyn std::error::Error>> {
+    // LA CAPTURE DES PLANTAGES EN TOUT PREMIER — avant même le journal. Ce jeu parle à Vulkan, donc
+    // à un pilote graphique, donc à du matériel qu'on ne connaît pas : c'est le programme du projet
+    // le plus susceptible de tomber sur la machine de quelqu'un d'autre. Sans trace, une fenêtre qui
+    // se ferme ne laisse RIEN. Elle ne part nulle part : le launcher demandera au démarrage suivant.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args: Vec<String> = std::env::args().collect();
