@@ -220,17 +220,34 @@ impl PartyGame {
         let finished_count = self.players.iter().filter(|p| p.has_finished).count();
         let win_ratio = finished_count as f32 / total_players as f32;
 
-        // 1. Calcul des Points Win ("point win")
-        // "si tu arrive le premier tu gagne 3 point, si tu arrive a la ligne arriver tu gagne 1 point"
-        // "si plus de 50% des joueur on attein la ligne arrive personne gagne de point win"
-        if finished_count > 0 && win_ratio <= 0.50 {
+        // ─── LA MANCHE PAIE-T-ELLE ? Une seule question, posée aux DEUX bornes. ──────────────
+        //
+        // Le jeu punissait déjà le sur-sabotage (personne n'arrive → personne ne marque), mais pas
+        // le cas inverse : au-delà de 50 % d'arrivées, les arrivants perdaient leurs points tandis
+        // que les tueurs gardaient les leurs. Cette asymétrie n'avait pas été décidée — elle venait
+        // de ce qu'on testait `finished_count > 0` au lieu de « la manche a-t-elle payé quelqu'un ».
+        //
+        // Une manche qui ne désigne personne ne paie personne, pièges compris. C'est la règle qui
+        // existait déjà, appliquée à ses deux bouts : une condition remplace les deux, aucune
+        // constante n'est ajoutée.
+        let manche_payante = finished_count > 0 && win_ratio <= 0.50;
+
+        // 1. Points d'arrivée
+        // "si tu es le seul a gagner tu gagne 4 point / si tu es le premier 3 point sinon 1
+        //  si il y a plus de 50% qui on gagner alors 0 point pour personne"
+        if manche_payante {
+            // Être SEUL vaut plus qu'être premier : c'est le maximum du jeu, et il récompense
+            // d'avoir réussi là où le parcours a arrêté tous les autres.
+            let seul_rescape = finished_count == 1;
             for p in &mut self.players {
                 if p.has_finished {
-                    if p.finish_rank == Some(1) {
-                        p.win_points += 3.0; // 1er arrivé -> 3 points
+                    p.win_points += if seul_rescape {
+                        4.0
+                    } else if p.finish_rank == Some(1) {
+                        3.0
                     } else {
-                        p.win_points += 1.0; // Autres arrivés -> 1 point
-                    }
+                        1.0
+                    };
                 }
             }
         }
@@ -248,12 +265,27 @@ impl PartyGame {
             if is_dead {
                 if let Some(killer_id) = killer_opt {
                     if killer_id == victim_id {
-                        // Autokill -> -1 point (toujours appliqué)
+                        // Autokill -> -1 point (toujours appliqué, même dans une manche nulle :
+                        // c'est une punition, pas une récompense).
                         self.players[i].trap_points -= 1.0;
-                    } else if finished_count > 0 {
-                        // Kill sur un adversaire -> +1 point pour le tueur (UNIQUEMENT si au moins 1 personne a fini !)
-                        if let Some(killer_player) = self.players.iter_mut().find(|p| p.id == killer_id) {
-                            killer_player.trap_points += 1.0;
+                    } else if manche_payante {
+                        // Kill sur un adversaire -> +1 au tueur, MAIS seulement s'il a franchi la
+                        // ligne lui-même.
+                        //
+                        // Sans cette condition, camper domine : poser son piège, ne jamais courir et
+                        // tuer quatre personnes rapporte plus qu'arriver premier, pour −0,5 de
+                        // pénalité. Le piège redevient ce qu'il doit être — un multiplicateur de sa
+                        // PROPRE réussite, pas une stratégie qui s'en passe.
+                        let tueur_a_fini = self
+                            .players
+                            .iter()
+                            .any(|p| p.id == killer_id && p.has_finished);
+                        if tueur_a_fini {
+                            if let Some(killer_player) =
+                                self.players.iter_mut().find(|p| p.id == killer_id)
+                            {
+                                killer_player.trap_points += 1.0;
+                            }
                         }
                     }
                 }
@@ -395,11 +427,31 @@ impl PartyGame {
                             log::info!("🏆 {} a franchi la ligne d'arrivée en rang {} !", self.players[i].name, rank);
                         }
 
-                        // Détection de Mort (Vide)
+                        // Détection de Mort — DEUX causes, et il en manquait une.
+                        //
+                        // ⚠ Jusqu'au 17 août 2026, seule la chute dans le vide était lue ici. Les
+                        // pièges tuaient bel et bien (ragdoll à l'écran), mais la manche ne le voyait
+                        // pas : `is_dead` restait faux et `killed_by_owner_id` restait `None`, donc
+                        // `trap_points` valait TOUJOURS 0. Les tests étaient verts parce qu'ils
+                        // écrivaient ces champs à la main.
                         let void_y = self.grid.get_void_kill_y();
                         if player_pos.y < void_y {
                             self.players[i].is_dead = true;
+                            self.players[i].killed_by_owner_id = None; // le vide n'appartient à personne
                             log::info!("💀 {} est tombé dans le vide !", self.players[i].name);
+                        } else if self.players[i].player.state == crate::player::PlayerState::Dead {
+                            self.players[i].is_dead = true;
+                            self.players[i].killed_by_owner_id = self.players[i].player.killed_by;
+                            match self.players[i].killed_by_owner_id {
+                                Some(k) => log::info!(
+                                    "💀 {} est mort du piège de {} !",
+                                    self.players[i].name, k
+                                ),
+                                None => log::info!(
+                                    "💀 {} est mort d'un danger du terrain !",
+                                    self.players[i].name
+                                ),
+                            }
                         }
                     }
                 }
@@ -538,6 +590,190 @@ mod tests {
 
         game_no_win.evaluate_round_scores();
         assert_eq!(game_no_win.players[0].trap_points, 0.0); // 0 point car personne n'a gagné !
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────────────────
+    // Tests ajoutés le 17 août 2026, avec le barème complet.
+    // ──────────────────────────────────────────────────────────────────────────────────────────
+
+    /// ⭐ LE TÉMOIN POSITIF QUI MANQUAIT — et son absence a laissé un tiers du barème mort.
+    ///
+    /// Tous les tests de points de piège écrivaient `is_dead` et `killed_by_owner_id` **à la main**.
+    /// Ils prouvaient donc le calcul, jamais la chaîne : un piège tue-t-il vraiment, et la manche
+    /// s'en aperçoit-elle ? Elle ne s'en apercevait pas — `player.rs` réduisait l'identité du tueur
+    /// à un booléen, et la manche ne regardait que la chute dans le vide. `trap_points` valait 0
+    /// depuis toujours, avec une suite verte.
+    ///
+    /// Ce test ne touche aucun champ de score : il pose un vrai piège, laisse tourner la vraie
+    /// boucle de jeu, et regarde ce que la manche en conclut.
+    #[test]
+    fn un_piege_tue_pour_de_vrai_et_la_manche_le_voit() {
+        let mut game = PartyGame::new(32, 18);
+        game.players = vec![
+            PlayerSession::new(0, "Poseur", Vec2::new(2.0, 5.0), true),
+            PlayerSession::new(1, "Victime", Vec2::new(8.0, 5.0), false),
+        ];
+        game.phase = GamePhase::Running;
+        game.is_play_mode = true;
+
+        // Le piège de P0, posé exactement sur le centre du corps de P1.
+        let centre_victime =
+            game.players[1].player.position + Vec2::new(0.0, game.players[1].player.size.y * 0.5);
+        game.traps
+            .add_trap(centre_victime, crate::traps::TrapKind::SpikeTrap, 0);
+
+        assert!(!game.players[1].is_dead, "la victime doit être vivante avant");
+
+        game.update(1.0 / 60.0, &InputState::default());
+
+        assert!(game.players[1].is_dead, "le piège doit tuer pour de vrai");
+        assert_eq!(
+            game.players[1].killed_by_owner_id,
+            Some(0),
+            "la manche doit savoir QUI a posé le piège — c'est exactement l'information qui était jetée"
+        );
+    }
+
+    /// Le vide n'appartient à personne : mourir en tombant ne doit enrichir aucun joueur.
+    #[test]
+    fn tomber_dans_le_vide_ne_designe_aucun_tueur() {
+        let mut game = PartyGame::new(32, 18);
+        let sous_la_carte = game.grid.get_void_kill_y() - 1.0;
+        game.players = vec![PlayerSession::new(0, "Tombeur", Vec2::new(5.0, sous_la_carte), true)];
+        game.phase = GamePhase::Running;
+        game.is_play_mode = true;
+        game.players[0].player.position = Vec2::new(5.0, sous_la_carte);
+
+        game.update(1.0 / 60.0, &InputState::default());
+
+        assert!(game.players[0].is_dead);
+        assert_eq!(game.players[0].killed_by_owner_id, None);
+    }
+
+    /// Être SEUL à réussir vaut 4 points — plus qu'être premier parmi plusieurs (3).
+    /// C'est le maximum du jeu : le parcours a arrêté tout le monde sauf un.
+    #[test]
+    fn seul_a_reussir_vaut_plus_que_premier_parmi_plusieurs() {
+        let mut game = PartyGame::new(32, 18);
+        game.players = vec![
+            PlayerSession::new(0, "P1", Vec2::ZERO, true),
+            PlayerSession::new(1, "P2", Vec2::ZERO, false),
+            PlayerSession::new(2, "P3", Vec2::ZERO, false),
+            PlayerSession::new(3, "P4", Vec2::ZERO, false),
+        ];
+
+        // Un SEUL arrive (1/4 = 25 %) -> 4 points.
+        game.players[0].has_finished = true;
+        game.players[0].finish_rank = Some(1);
+        game.evaluate_round_scores();
+        assert_eq!(game.players[0].win_points, 4.0, "seul rescapé -> 4");
+
+        // Deux arrivent (2/4 = 50 %) -> le premier retombe à 3, le second a 1.
+        for p in &mut game.players {
+            p.win_points = 0.0;
+        }
+        game.players[1].has_finished = true;
+        game.players[1].finish_rank = Some(2);
+        game.evaluate_round_scores();
+        assert_eq!(game.players[0].win_points, 3.0, "premier parmi plusieurs -> 3");
+        assert_eq!(game.players[1].win_points, 1.0, "autre arrivé -> 1");
+    }
+
+    /// La manche est nulle aux DEUX bornes — et « nulle » vaut aussi pour les pièges.
+    ///
+    /// Avant le 17 août, une manche où plus de 50 % arrivaient annulait les points d'arrivée mais
+    /// **payait quand même les tueurs**. L'asymétrie n'avait pas été décidée : elle venait d'une
+    /// condition qui demandait « quelqu'un est-il arrivé ? » au lieu de « la manche a-t-elle payé ? ».
+    #[test]
+    fn une_manche_trop_facile_ne_paie_personne_pieges_compris() {
+        let mut game = PartyGame::new(32, 18);
+        game.players = vec![
+            PlayerSession::new(0, "Tueur", Vec2::ZERO, true),
+            PlayerSession::new(1, "P2", Vec2::ZERO, false),
+            PlayerSession::new(2, "P3", Vec2::ZERO, false),
+            PlayerSession::new(3, "Mort", Vec2::ZERO, false),
+        ];
+
+        // 3 joueurs sur 4 finissent (75 % > 50 %) : la manche ne désigne personne.
+        for (rang, i) in [(1, 0), (2, 1), (3, 2)] {
+            game.players[i].has_finished = true;
+            game.players[i].finish_rank = Some(rang);
+        }
+        // Et le tueur, qui a fini lui aussi, a tué le quatrième.
+        game.players[3].is_dead = true;
+        game.players[3].killed_by_owner_id = Some(0);
+
+        game.evaluate_round_scores();
+
+        assert_eq!(game.players[0].win_points, 0.0, "aucun point d'arrivée au-delà de 50 %");
+        assert_eq!(
+            game.players[0].trap_points, 0.0,
+            "et aucun point de piège non plus : une manche nulle ne paie personne"
+        );
+    }
+
+    /// Le campeur ne marque plus : on n'encaisse ses kills que si on a franchi la ligne soi-même.
+    ///
+    /// Sans cette règle, poser un piège et attendre rapporte plus qu'arriver premier — quatre kills
+    /// valent 4 points contre 3, pour une pénalité de 0,5. Le piège redevient un multiplicateur de
+    /// sa propre réussite, pas une stratégie qui s'en passe.
+    #[test]
+    fn le_campeur_qui_ne_finit_jamais_ne_touche_pas_ses_kills() {
+        let mut game = PartyGame::new(32, 18);
+        game.players = vec![
+            PlayerSession::new(0, "Campeur", Vec2::ZERO, true),
+            PlayerSession::new(1, "Coureur", Vec2::ZERO, false),
+            PlayerSession::new(2, "Victime", Vec2::ZERO, false),
+            PlayerSession::new(3, "Figurant", Vec2::ZERO, false),
+        ];
+
+        // Le coureur arrive (1/4 = 25 %) : la manche paie.
+        game.players[1].has_finished = true;
+        game.players[1].finish_rank = Some(1);
+        // Le campeur, lui, n'a pas bougé — mais son piège a tué quelqu'un.
+        game.players[2].is_dead = true;
+        game.players[2].killed_by_owner_id = Some(0);
+
+        game.evaluate_round_scores();
+
+        assert_eq!(
+            game.players[0].trap_points, 0.0,
+            "le campeur n'a pas fini : son kill ne lui rapporte rien"
+        );
+        assert_eq!(game.players[1].win_points, 4.0, "le coureur est seul rescapé -> 4");
+
+        // Même manche, mais le tueur a fini : là, le kill paie.
+        let mut game2 = PartyGame::new(32, 18);
+        game2.players = vec![
+            PlayerSession::new(0, "Tueur arrivé", Vec2::ZERO, true),
+            PlayerSession::new(1, "Victime", Vec2::ZERO, false),
+            PlayerSession::new(2, "Figurant", Vec2::ZERO, false),
+            PlayerSession::new(3, "Figurant2", Vec2::ZERO, false),
+        ];
+        game2.players[0].has_finished = true;
+        game2.players[0].finish_rank = Some(1);
+        game2.players[1].is_dead = true;
+        game2.players[1].killed_by_owner_id = Some(0);
+
+        game2.evaluate_round_scores();
+        assert_eq!(game2.players[0].trap_points, 1.0, "le tueur qui a fini encaisse son kill");
+    }
+
+    /// L'autokill reste puni en toute circonstance : c'est une punition, pas une récompense, donc
+    /// elle ne dépend pas de ce que la manche paie.
+    #[test]
+    fn l_autokill_coute_un_point_meme_dans_une_manche_nulle() {
+        let mut game = PartyGame::new(32, 18);
+        game.players = vec![
+            PlayerSession::new(0, "Maladroit", Vec2::ZERO, true),
+            PlayerSession::new(1, "P2", Vec2::ZERO, false),
+        ];
+        // Personne n'arrive : la manche ne paie rien.
+        game.players[0].is_dead = true;
+        game.players[0].killed_by_owner_id = Some(0);
+
+        game.evaluate_round_scores();
+        assert_eq!(game.players[0].trap_points, -1.0);
     }
 
     #[test]

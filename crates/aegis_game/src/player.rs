@@ -110,6 +110,15 @@ pub struct Player {
     pub stored_fall_momentum: f32,
     pub boost_window_timer: f32,
     pub ragdoll: Ragdoll,
+
+    /// Qui a posé le piège qui m'a tué. `None` si je suis mort du terrain (vide, danger de la carte)
+    /// ou si je suis vivant.
+    ///
+    /// ⚠ Ce champ existe parce que l'information était **produite puis jetée**. `check_player_death`
+    /// rendait déjà `Some(owner_id)`, et l'appel d'en face faisait `.is_some()` : le barème perdait
+    /// exactement la donnée dont il avait besoin, et `trap_points` valait 0 depuis toujours. Garder le
+    /// résultat coûte un `Option<u32>` ; le jeter coûtait un tiers du système de score.
+    pub killed_by: Option<u32>,
 }
 
 impl Player {
@@ -149,6 +158,7 @@ impl Player {
             stored_fall_momentum: 0.0,
             boost_window_timer: 0.0,
             ragdoll: Ragdoll::default(),
+            killed_by: None,
         }
     }
 
@@ -161,6 +171,7 @@ impl Player {
         self.wall_cooldown = 0.0;
         self.tilt_angle = 0.0;
         self.ragdoll.active = false;
+        self.killed_by = None;
     }
 
     pub fn update(&mut self, dt: f32, input: &InputState, grid: &TileGrid, traps: &TrapManager) {
@@ -308,9 +319,18 @@ impl Player {
         self.move_and_slide(dt, grid);
 
         // 7. Hazards & Finish Flag (Déclenchement du Ragdoll de mort)
-        if grid.check_hazard_collision(self.position, self.size) || traps.check_player_death(self.position, self.size, grid).is_some() {
+        //
+        // ⚠ On garde le RÉSULTAT de `check_player_death`, on ne le réduit pas à un booléen : il porte
+        // l'identité du poseur du piège, et c'est elle qui paie les points de piège du barème.
+        // Le danger du terrain (vide, pointes de la carte) ne tue au profit de personne → `None`.
+        let tueur = traps.check_player_death(self.position, self.size, grid);
+        let mort_du_terrain = grid.check_hazard_collision(self.position, self.size);
+        if mort_du_terrain || tueur.is_some() {
             if self.state != PlayerState::Dead {
                 self.state = PlayerState::Dead;
+                // Un piège l'emporte sur le terrain : si les deux frappent la même image, quelqu'un a
+                // agi, et c'est ce qui compte pour le barème.
+                self.killed_by = tueur;
                 self.ragdoll.trigger(self.position, self.velocity);
             }
             return;
