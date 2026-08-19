@@ -228,7 +228,10 @@ impl ParticleEffectManager {
             let speed_y = 2.5 + r2 * 6.0;
 
             self.particles.push(Particle {
-                pos: Vec3::new(box_pos.x + (r2 - 0.5) * 0.4, box_pos.y + 0.5, 0.25),
+                // Le `z` etait fige a 0.25 et ignorait celui du carton, qui flotte a douze
+                // unites de la : la gerbe serait sortie tres loin derriere lui. On se sert du
+                // point recu en entier plutot que d'en redevenir la moitie.
+                pos: Vec3::new(box_pos.x + (r2 - 0.5) * 0.4, box_pos.y + 0.5, box_pos.z),
                 vel: Vec3::new(speed_x, speed_y, (r3 - 0.5) * 2.0),
                 size: Vec3::splat(0.08 + r2 * 0.08),
                 color,

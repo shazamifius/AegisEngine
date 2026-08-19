@@ -564,19 +564,23 @@ impl PartyRenderPass {
 
             // ─── Rendu du Carton Mystère 3D (Phase Drafting) ───────────────────────────
             if game.phase == crate::party_game::GamePhase::Drafting {
-                let box_pos = Vec3::new(game.grid.width as f32 / 2.0, game.grid.height as f32 / 2.0, 0.0);
-                self.box_obj.update(0.016);
-                if self.box_obj.is_opened && !self.box_obj.burst_triggered {
-                    self.box_obj.burst_triggered = true;
-                    if let Some(player_mut) = game.players.get(0) {
-                        let mut p_mgr = player_mut.player.particles.clone();
-                        p_mgr.spawn_box_open_burst(box_pos);
-                    }
-                }
-                self.box_obj.draw(&context.device, cmd, self.pipeline_layout, vp, box_pos);
+                // L'avancement de l'animation se LIT sur le minuteur de la phase : il repart donc
+                // de lui-même à chaque manche, et ne dépend plus du nombre d'images par seconde
+                // (il avançait d'un `dt` figé à 16 ms, deux fois trop vite sur un écran 120 Hz).
+                //
+                // La gerbe d'ouverture, elle, n'est plus émise ici : le rendu ne peut pas modifier
+                // le jeu, si bien que l'ancien appel travaillait sur un `clone()` jeté à la ligne
+                // suivante — les particules ne sont jamais arrivées nulle part. Elle est désormais
+                // déclenchée dans `PartyGame::update`, là où l'état est réellement modifiable.
+                let avancement = crate::party_game::DUREE_DRAFT - game.draft_timer;
+                let box_pos = CardboardBoxObject::position(
+                    game.grid.width as f32,
+                    game.grid.height as f32,
+                );
+                self.box_obj.draw(&context.device, cmd, self.pipeline_layout, vp, box_pos, avancement);
 
                 // Objets 3D Disponibles éparpillés DANS l'intérieur du carton ouvert sans piédestaux
-                if self.box_obj.is_opened {
+                if CardboardBoxObject::est_ouvert(avancement) {
                     let items = &game.mystery_box.available_items;
 
                     for (i, item) in items.iter().enumerate() {
@@ -934,98 +938,24 @@ impl PartyRenderPass {
                 }
             }
 
-            // ─── Rendu 3D du Leaderboard & Tableau des Scores en Phase Leaderboard ────────
-            if game.phase == crate::party_game::GamePhase::Leaderboard {
-                let center_x = game.grid.width as f32 / 2.0;
-                let center_y = game.grid.height as f32 / 2.0;
-                let t = game.round_timer;
+            // Le tableau des scores ne se dessine plus ici : il vivait dans le MONDE, posé au
+            // centre de la carte, et la caméra ne s'y rendait jamais — elle reste sur le joueur
+            // qui vient de mourir. Il est passé sur le calque d'écran (`leaderboard_hud`), le
+            // seul endroit d'où une interface est visible sans dépendre d'où l'on est tombé.
 
-                // 1. Panneau Fond Sombre du Leaderboard (Z = 12.0)
-                let panel_m = Mat4::from_translation(Vec3::new(center_x, center_y, 12.0))
-                    * Mat4::from_scale(Vec3::new(8.5, 5.5, 0.1));
-                let push_panel = PartyPushConstants {
-                    mvp_matrix: vp * panel_m,
-                    model_matrix: panel_m,
-                    color_tint: Vec4::new(0.08, 0.10, 0.16, 0.92), // Bleuté Sombre Haute Lisibilité
-                    params: Vec4::new(0.3, 0.0, 0.0, 0.0),
+            // Les particules du JEU (par opposition à celles de chaque joueur, dessinées plus
+            // haut). `PartyGame::particles` était avancé à chaque image depuis toujours et
+            // n'était affiché nulle part : tout ce qu'on y émettait disparaissait en silence.
+            for particule in &game.particles.particles {
+                let m = Mat4::from_translation(particule.pos) * Mat4::from_scale(particule.size);
+                let push = PartyPushConstants {
+                    mvp_matrix: vp * m,
+                    model_matrix: m,
+                    color_tint: particule.color,
+                    params: Vec4::new(0.0, particule.emissive, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_panel));
+                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
                 self.cube_mesh.draw(&context.device, cmd);
-
-                // 2. Bannière de Titre / Gagnant du Match (Or Émissif)
-                let title_text = if let Some(winner_name) = &game.match_winner {
-                    Vec4::new(0.98, 0.85, 0.15, 1.0) // Or Victoire
-                } else {
-                    Vec4::new(0.35, 0.75, 0.98, 1.0) // Bleu Manche
-                };
-
-                let title_m = Mat4::from_translation(Vec3::new(center_x, center_y + 2.2, 12.1))
-                    * Mat4::from_scale(Vec3::new(7.5, 0.55, 0.05));
-                let push_title = PartyPushConstants {
-                    mvp_matrix: vp * title_m,
-                    model_matrix: title_m,
-                    color_tint: title_text,
-                    params: Vec4::new(0.0, 8.0, 0.0, 0.0), // Lueur Émissive
-                };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_title));
-                self.cube_mesh.draw(&context.device, cmd);
-
-                // 3. Affichage des Rangées des Joueurs triés par Score Total
-                let mut sorted_players = game.players.clone();
-                sorted_players.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap_or(std::cmp::Ordering::Equal));
-
-                for (rank_idx, player_session) in sorted_players.iter().take(6).enumerate() {
-                    let row_y = center_y + 1.2 - (rank_idx as f32 * 0.70);
-
-                    // Couleur du Rang (1er = Or, 2ème = Argent, 3ème = Bronze, Autres = Acier)
-                    let rank_color = match rank_idx {
-                        0 => Vec4::new(0.98, 0.85, 0.15, 1.0), // Or
-                        1 => Vec4::new(0.85, 0.88, 0.92, 1.0), // Argent
-                        2 => Vec4::new(0.85, 0.52, 0.25, 1.0), // Bronze
-                        _ => Vec4::new(0.55, 0.60, 0.65, 1.0),
-                    };
-
-                    // Pill / Bar de Rangée Joueur
-                    let row_m = Mat4::from_translation(Vec3::new(center_x, row_y, 12.15))
-                        * Mat4::from_scale(Vec3::new(7.2, 0.48, 0.05));
-                    let push_row = PartyPushConstants {
-                        mvp_matrix: vp * row_m,
-                        model_matrix: row_m,
-                        color_tint: Vec4::new(0.14, 0.16, 0.24, 0.90),
-                        params: Vec4::new(0.2, 0.0, 0.0, 0.0),
-                    };
-                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_row));
-                    self.cube_mesh.draw(&context.device, cmd);
-
-                    // Badge de Médaille / Rang à gauche
-                    let badge_m = Mat4::from_translation(Vec3::new(center_x - 3.1, row_y, 12.2))
-                        * Mat4::from_scale(Vec3::splat(0.35));
-                    let push_badge = PartyPushConstants {
-                        mvp_matrix: vp * badge_m,
-                        model_matrix: badge_m,
-                        color_tint: rank_color,
-                        params: Vec4::new(0.0, 5.0, 0.0, 0.0),
-                    };
-                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_badge));
-                    self.cube_mesh.draw(&context.device, cmd);
-
-                    // Gemmes de Score Total à droite (Nombre de gemmes proportionnel au score)
-                    let score_gems = (player_session.total_score.max(0.0) as usize).min(10);
-                    for g in 0..score_gems {
-                        let gem_x = center_x + 1.2 + (g as f32 * 0.22);
-                        let gem_m = Mat4::from_translation(Vec3::new(gem_x, row_y, 12.2))
-                            * Mat4::from_rotation_z(t * 4.0 + g as f32)
-                            * Mat4::from_scale(Vec3::splat(0.12));
-                        let push_score_gem = PartyPushConstants {
-                            mvp_matrix: vp * gem_m,
-                            model_matrix: gem_m,
-                            color_tint: Vec4::new(0.98, 0.85, 0.15, 1.0), // Gemme d'Or
-                            params: Vec4::new(0.0, 8.0, 0.0, 0.0),
-                        };
-                        context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_score_gem));
-                        self.cube_mesh.draw(&context.device, cmd);
-                    }
-                }
             }
 
             // 3. Pipeline Particules / Transparence : Bloc Preview Wireframe en Mode Éditeur uniquement
@@ -1046,6 +976,25 @@ impl PartyRenderPass {
 
                 context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_preview));
                 self.cube_mesh.draw(&context.device, cmd);
+            }
+
+            // ─── 4. LE HUD : ce qui se dessine sur l'ÉCRAN, et non dans le monde ─────────
+            //
+            // Tout ce qui suit ignore la caméra. C'est le point entier : le tableau des scores
+            // était jusqu'ici posé au centre de la CARTE, pendant que la caméra restait sur le
+            // joueur qui venait de mourir — il ne s'affichait donc pour personne.
+            if game.is_play_mode {
+                context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+                crate::hud::dessiner(
+                    &crate::hud::Pinceau {
+                        device: &context.device,
+                        cmd,
+                        layout: self.pipeline_layout,
+                        cube: &self.cube_mesh,
+                        aspect,
+                    },
+                    game,
+                );
             }
 
             context.device.cmd_end_rendering(cmd);

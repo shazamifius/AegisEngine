@@ -54,8 +54,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = vec3<f32>(1.0, 0.96, 0.88) * NdotL * 0.65;
     let ambient = vec3<f32>(0.35, 0.40, 0.45);
 
-    let final_color = in.color.rgb * (ambient + diffuse);
-    let gamma_corrected = pow(final_color, vec3<f32>(1.0 / 2.2));
+    let eclaire = in.color.rgb * (ambient + diffuse);
+    let gamma_corrected = pow(eclaire, vec3<f32>(1.0 / 2.2));
 
-    return vec4<f32>(gamma_corrected, 1.0);
+    // `params.w` a 1.0 = couleur PLATE : celle qui a ete demandee, sans lampe et sans gamma.
+    // C'est ce qu'exige une interface : un element de HUD ne vit pas dans la scene, il n'a donc
+    // aucune raison de s'assombrir selon l'angle d'une lumiere, ni de changer si on la deplace.
+    //
+    // Ce champ voyageait deja jusqu'ici sans que personne ne le lise : les 42 appels du jeu y
+    // mettent tous 0.0, donc leur rendu ne bouge pas d'un pixel.
+    let plat = clamp(in.params.w, 0.0, 1.0);
+    return vec4<f32>(mix(gamma_corrected, in.color.rgb, plat), 1.0);
 }

@@ -3,6 +3,18 @@ use crate::grid::{TileGrid, TileType};
 use crate::player::{Player, InputState};
 use crate::traps::TrapManager;
 use crate::mystery_box::MysteryBox;
+use crate::objects::cardboard_box::CardboardBoxObject;
+
+/// Les durées de chaque phase, en secondes.
+///
+/// Elles étaient écrites en dur aux **sept** endroits qui arment un minuteur. Les rassembler
+/// n'est pas du rangement : la barre de progression du HUD a besoin de la durée *totale* pour
+/// savoir quelle fraction il reste, et une valeur redevinée là-bas mentirait en silence le jour
+/// où l'une de ces durées change ici.
+pub const DUREE_DRAFT: f32 = 10.0;
+pub const DUREE_PLACEMENT: f32 = 30.0;
+pub const DUREE_COURSE: f32 = 150.0;
+pub const DUREE_LEADERBOARD: f32 = 10.0;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,13 +167,13 @@ impl PartyGame {
             phase: GamePhase::Drafting,
             round_number: 1,
             round_timer: 0.0,
-            draft_timer: 10.0,       // 10s pour choisir son objet
+            draft_timer: DUREE_DRAFT,
             draft_cooldown: 0.0,
-            placement_timer: 30.0,   // 30s max pour poser son objet sur la map
+            placement_timer: DUREE_PLACEMENT,
             placement_place_request: false,
             placement_dir: crate::traps::Direction::Up,
-            running_timer: 150.0,    // 2 minutes 30s de course
-            leaderboard_timer: 10.0, // 10s d'affichage du leaderboard
+            running_timer: DUREE_COURSE,
+            leaderboard_timer: DUREE_LEADERBOARD,
             match_winner: None,
         }
     }
@@ -309,6 +321,40 @@ impl PartyGame {
         }
     }
 
+    /// Le classement, du meilleur au moins bon.
+    ///
+    /// À égalité de points, l'ordre est arrêté par l'identité du joueur. Sans ce départage, deux
+    /// ex æquo peuvent permuter d'une image à l'autre selon l'humeur du tri — et le tableau
+    /// scintille sous les yeux de la classe pendant les dix secondes où tout le monde le lit.
+    pub fn classement(&self) -> Vec<&PlayerSession> {
+        let mut ordre: Vec<&PlayerSession> = self.players.iter().collect();
+        ordre.sort_by(|a, b| {
+            b.total_score
+                .partial_cmp(&a.total_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.id.cmp(&b.id))
+        });
+        ordre
+    }
+
+    /// Le temps restant dans la phase en cours, sa durée totale, et ce qu'on y fait.
+    ///
+    /// Quatre phases, quatre minuteurs distincts (`draft_timer`, `placement_timer`,
+    /// `running_timer`, `leaderboard_timer`) : les exposer un par un obligerait l'affichage à
+    /// refaire ce choix à chaque endroit, et à se tromper le jour où une phase s'ajoute. Une
+    /// seule question suffit.
+    ///
+    /// Ces minuteurs décomptaient déjà correctement — **rien ne les affichait**, donc personne
+    /// dans la partie ne savait combien de temps il lui restait pour choisir ou pour poser.
+    pub fn minuteur_de_phase(&self) -> (f32, f32, &'static str) {
+        match self.phase {
+            GamePhase::Drafting => (self.draft_timer, DUREE_DRAFT, "CHOISIS TON OBJET"),
+            GamePhase::Placement => (self.placement_timer, DUREE_PLACEMENT, "POSE TON OBJET"),
+            GamePhase::Running => (self.running_timer, DUREE_COURSE, "COURS"),
+            GamePhase::Leaderboard => (self.leaderboard_timer, DUREE_LEADERBOARD, "SCORES"),
+        }
+    }
+
     pub fn update(&mut self, dt: f32, input: &InputState) {
         self.round_timer += dt;
 
@@ -317,7 +363,20 @@ impl PartyGame {
 
         // ─── 1. Phase de Draft (10s max) ─────────────────────────────────────────
         if self.phase == GamePhase::Drafting {
+            let avant = self.draft_timer;
             self.draft_timer = (self.draft_timer - dt).max(0.0);
+
+            // Le carton s'ouvre : une gerbe, une seule fois, à l'instant du franchissement.
+            // On compare les deux côtés du seuil plutôt que de retenir un drapeau — un drapeau
+            // demanderait d'être remis à zéro, et c'est exactement l'oubli qui empêchait
+            // l'animation de rejouer aux manches suivantes.
+            let seuil = DUREE_DRAFT - CardboardBoxObject::DUREE_SECOUSSE;
+            if avant > seuil && self.draft_timer <= seuil {
+                self.particles.spawn_box_open_burst(CardboardBoxObject::position(
+                    self.grid.width as f32,
+                    self.grid.height as f32,
+                ));
+            }
             if self.draft_cooldown > 0.0 {
                 self.draft_cooldown -= dt;
             }
@@ -342,7 +401,7 @@ impl PartyGame {
             if self.draft_timer <= 0.0 || (input.jump && self.draft_cooldown <= 0.0) {
                 self.phase = GamePhase::Placement;
                 self.editor.cursor = (self.grid.width as i32 / 2, self.grid.height as i32 / 2);
-                self.placement_timer = 30.0;
+                self.placement_timer = DUREE_PLACEMENT;
                 for p in &mut self.players { p.placement_done = false; }
                 log::info!("📦 Phase de Draft Terminée ! → Phase de Placement (30s max).");
             }
@@ -390,7 +449,7 @@ impl PartyGame {
 
             if self.all_players_placed() || self.placement_timer <= 0.0 {
                 self.phase = GamePhase::Running;
-                self.running_timer = 150.0; // 2 minutes 30 secondes
+                self.running_timer = DUREE_COURSE;
                 self.reset_player_to_spawn();
                 for p in &mut self.players {
                     p.has_finished = false;
@@ -462,7 +521,7 @@ impl PartyGame {
             if all_done || self.running_timer <= 0.0 {
                 self.evaluate_round_scores();
                 self.phase = GamePhase::Leaderboard;
-                self.leaderboard_timer = 10.0;
+                self.leaderboard_timer = DUREE_LEADERBOARD;
                 log::info!("📊 Phase de Jeu Terminée ! Affichage du Leaderboard (10s).");
             }
             return;
@@ -475,7 +534,7 @@ impl PartyGame {
             if self.leaderboard_timer <= 0.0 {
                 self.round_number += 1;
                 self.phase = GamePhase::Drafting;
-                self.draft_timer = 10.0;
+                self.draft_timer = DUREE_DRAFT;
                 self.mystery_box.generate_round_draft(self.players.len());
 
                 for p in &mut self.players {
@@ -798,5 +857,110 @@ mod tests {
         assert_eq!(game.players[1].negative_points, 0.5);
         assert_eq!(game.players[1].total_score, -0.5);
         assert_eq!(game.match_winner, Some("Winner".to_string()));
+    }
+
+    #[test]
+    fn le_classement_va_du_meilleur_au_moins_bon_et_ne_scintille_pas() {
+        let mut game = PartyGame::new(40, 22);
+        game.players.clear();
+        for (id, (nom, score)) in [("A", 3.0), ("B", 9.0), ("C", 3.0), ("D", 12.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut p = PlayerSession::new(id as u32, nom, Vec2::new(0.0, 0.0), id == 0);
+            p.total_score = score;
+            game.players.push(p);
+        }
+
+        let noms: Vec<&str> = game.classement().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(noms, vec!["D", "B", "A", "C"], "du plus grand score au plus petit");
+
+        // Deux ex aequo (A et C, 3 points) doivent garder le MEME ordre a chaque appel : c'est
+        // ce qui empeche le tableau de permuter sous les yeux des joueurs pendant 10 secondes.
+        for _ in 0..20 {
+            let encore: Vec<&str> = game.classement().iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(encore, noms, "le classement doit etre stable d'un appel a l'autre");
+        }
+    }
+
+    /// Fait tourner la phase de choix en entier et rend (nombre d'emissions, position de la
+    /// premiere gerbe vue). On COMPTE les particules reellement presentes plutot que de
+    /// consulter un drapeau : c'est justement un drapeau qui mentait avant.
+    fn joue_la_phase_de_choix(game: &mut PartyGame) -> (usize, Option<aegis_engine::math::Vec3>) {
+        let rien = InputState::default();
+        let dt = 1.0 / 60.0;
+        let mut emissions = 0;
+        let mut precedent = game.particles.particles.len();
+        let mut ou = None;
+
+        for _ in 0..(DUREE_DRAFT / dt) as usize + 5 {
+            if game.phase != GamePhase::Drafting {
+                break;
+            }
+            game.update(dt, &rien);
+            let maintenant = game.particles.particles.len();
+            if maintenant > precedent {
+                emissions += 1;
+                if ou.is_none() {
+                    ou = Some(game.particles.particles[0].pos);
+                }
+            }
+            precedent = maintenant;
+        }
+        (emissions, ou)
+    }
+
+    #[test]
+    fn le_carton_lance_sa_gerbe_a_chaque_manche_et_une_seule_fois() {
+        // Le temoin de la reparation. La gerbe partait dans un `clone()` jete a la ligne
+        // suivante : elle n'arrivait nulle part. Et l'animation ne rejouait jamais, faute d'un
+        // `reset_animation()` que personne n'appelait.
+        let mut game = PartyGame::new(40, 22);
+        assert_eq!(game.phase, GamePhase::Drafting);
+        assert_eq!(game.particles.particles.len(), 0, "rien avant l'ouverture");
+
+        let (emissions, ou) = joue_la_phase_de_choix(&mut game);
+        assert_eq!(emissions, 1, "une gerbe, et une seule, pour la manche 1");
+
+        // Elle doit viser le carton, pas l'origine du monde.
+        let cible = CardboardBoxObject::position(game.grid.width as f32, game.grid.height as f32);
+        let une = ou.expect("aucune particule emise");
+        assert!(
+            (une.x - cible.x).abs() < 3.0 && (une.z - cible.z).abs() < 3.0,
+            "la gerbe part de {une:?} au lieu du carton {cible:?}"
+        );
+
+        // ─── Et surtout : la manche SUIVANTE. C'est tout l'objet du correctif — l'animation
+        // ne se declenchait qu'au lancement du jeu, donc une seule fois de la soiree.
+        game.phase = GamePhase::Leaderboard;
+        game.leaderboard_timer = 0.0;
+        game.update(1.0 / 60.0, &InputState::default());
+        assert_eq!(game.phase, GamePhase::Drafting, "on doit etre reparti pour une manche");
+        assert_eq!(game.round_number, 2);
+
+        let (encore, _) = joue_la_phase_de_choix(&mut game);
+        assert_eq!(encore, 1, "le carton doit REJOUER son ouverture a la manche 2");
+    }
+
+    #[test]
+    fn tous_les_intitules_de_phase_tiennent_sur_l_ecran_le_plus_etroit() {
+        // Le HUD tournera sur 35 ecrans de formats inconnus. Le plus etroit envisageable est le
+        // carre (aspect 1.0) : au-dela, le bandeau sortirait des bords, et personne ne s'en
+        // apercevrait avant la partie.
+        let mut game = PartyGame::new(40, 22);
+        for phase in [
+            GamePhase::Drafting,
+            GamePhase::Placement,
+            GamePhase::Running,
+            GamePhase::Leaderboard,
+        ] {
+            game.phase = phase;
+            let (_, _, intitule) = game.minuteur_de_phase();
+            let largeur = crate::hud::largeur_bandeau_minuteur(intitule);
+            assert!(
+                largeur < 1.0,
+                "{phase:?} : « {intitule} » occupe {largeur:.3} de hauteur d'ecran, il deborderait d'un ecran carre"
+            );
+        }
     }
 }

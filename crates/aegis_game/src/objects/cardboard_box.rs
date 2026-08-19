@@ -12,11 +12,24 @@ pub struct CardboardBoxObject {
     pub offset_open: Vec3,
     pub scale_closed: Vec3,
     pub scale_open: Vec3,
-    pub anim_timer: f32,
-    pub is_opened: bool,
-    pub burst_triggered: bool,
 }
 
+/// Le carton mystère du début de manche.
+///
+/// **Cet objet n'a aucun état.** C'est délibéré, et c'est la réparation d'un vrai défaut : il
+/// retenait auparavant son propre `anim_timer`, un `is_opened` et un `burst_triggered`, qu'une
+/// méthode `reset_animation()` savait remettre à zéro — sauf que **personne ne l'appelait
+/// jamais**. Le carton s'ouvrait donc une fois au lancement de la partie et restait ouvert pour
+/// le reste de la soirée : l'animation ne rejouait à aucune manche suivante.
+///
+/// Rien ne pouvait le signaler : la méthode étant publique, le compilateur n'avait même pas de
+/// « jamais utilisé » à donner.
+///
+/// La correction n'ajoute pas l'appel manquant, elle **supprime ce qu'il fallait remettre à
+/// zéro** : l'avancement de l'animation se lit maintenant sur le minuteur de la phase de choix,
+/// qui repart de lui-même à chaque manche. Un état qui n'existe plus ne peut plus rester en
+/// arrière. En prime, l'animation ne dépend plus du nombre d'images par seconde — elle avançait
+/// d'un `dt` figé à 16 ms, donc deux fois trop vite sur un écran à 120 Hz.
 impl CardboardBoxObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
         let (vc, ic) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/boxfermer.glb"))?;
@@ -60,24 +73,25 @@ impl CardboardBoxObject {
             offset_open,
             scale_closed,
             scale_open,
-            anim_timer: 0.0,
-            is_opened: false,
-            burst_triggered: false,
         })
     }
 
-    pub fn reset_animation(&mut self) {
-        self.anim_timer = 0.0;
-        self.is_opened = false;
-        self.burst_triggered = false;
+    /// Combien de temps le carton se secoue avant de s'ouvrir.
+    pub const DUREE_SECOUSSE: f32 = 2.0;
+
+    /// Où le carton flotte, pour une carte de cette taille : au centre, et douze unités vers la
+    /// caméra pour qu'il remplisse le champ.
+    ///
+    /// Le rendu et la gerbe de particules de l'ouverture doivent viser **le même point** : le
+    /// décalage vivait auparavant à l'intérieur du dessin, donc personne d'autre ne pouvait le
+    /// connaître.
+    pub fn position(largeur_carte: f32, hauteur_carte: f32) -> Vec3 {
+        Vec3::new(largeur_carte * 0.5, hauteur_carte * 0.5 - 0.5, 12.0)
     }
 
-    pub fn update(&mut self, dt: f32) {
-        self.anim_timer += dt;
-        // Animation de secousse pendant 2.0 secondes exactes, puis la boîte s'ouvre !
-        if self.anim_timer >= 2.0 {
-            self.is_opened = true;
-        }
+    /// Le carton est-il ouvert, à cet instant de la phase de choix ?
+    pub fn est_ouvert(avancement: f32) -> bool {
+        avancement >= Self::DUREE_SECOUSSE
     }
 
     pub fn draw(
@@ -87,22 +101,23 @@ impl CardboardBoxObject {
         pipeline_layout: vk::PipelineLayout,
         vp: Mat4,
         pos: Vec3,
+        avancement: f32,
     ) {
-        let (shake_offset_x, shake_offset_y, shake_rot_z) = if !self.is_opened {
-            // Secousse dynamique pendant 2 secondes (Shake phase)
-            let intensity = (2.0 - self.anim_timer).max(0.0) / 2.0;
-            let sx = (self.anim_timer * 42.0).sin() * 0.12 * intensity;
-            let sy = (self.anim_timer * 55.0).cos().abs() * 0.14 * intensity;
-            let rz = (self.anim_timer * 35.0).sin() * 0.16 * intensity;
+        let (shake_offset_x, shake_offset_y, shake_rot_z) = if !Self::est_ouvert(avancement) {
+            // Secousse, d'autant plus forte qu'on est loin de l'ouverture.
+            let intensite = (Self::DUREE_SECOUSSE - avancement).max(0.0) / Self::DUREE_SECOUSSE;
+            let sx = (avancement * 42.0).sin() * 0.12 * intensite;
+            let sy = (avancement * 55.0).cos().abs() * 0.14 * intensite;
+            let rz = (avancement * 35.0).sin() * 0.16 * intensite;
             (sx, sy, rz)
         } else {
             (0.0, 0.0, 0.0)
         };
 
-        // Position du carton au centre parfait du champ de vision (Y offset -0.5, Z +12.0)
-        let box_depth_pos = Vec3::new(pos.x + shake_offset_x, pos.y + shake_offset_y - 0.5, pos.z + 12.0);
+        // `pos` est déjà le point final (voir `position`) : ici on n'ajoute que la secousse.
+        let box_depth_pos = Vec3::new(pos.x + shake_offset_x, pos.y + shake_offset_y, pos.z);
 
-        let (mesh_to_draw, offset, scale) = if !self.is_opened {
+        let (mesh_to_draw, offset, scale) = if !Self::est_ouvert(avancement) {
             (&self.mesh_closed, self.offset_closed, self.scale_closed)
         } else {
             (&self.mesh_open, self.offset_open, self.scale_open)

@@ -8,6 +8,7 @@ mod mls_mpm;
 mod mystery_box;
 mod party_game;
 mod party_render_pass;
+mod hud;
 mod objects;
 mod nav_client;
 mod plantage;
