@@ -455,8 +455,14 @@ impl TileGrid {
         }
 
         // Sol de base propre en bas de la carte (row y=0)
+        //
+        // ⚠ Écrit `[x]` et non `[0 * self.width + x]` : le facteur zéro était là pour rappeler la
+        // ligne visée, mais clippy REFUSE l'expression (`erasing_op`, `deny` par défaut) — et cette
+        // erreur bloquait l'outil ENTIER, masquant 25 autres avertissements derrière elle. La
+        // lisibilité qu'on cherchait est mieux servie par cette phrase que par une multiplication
+        // par zéro.
         for x in 0..self.width {
-            self.tiles[0 * self.width + x] = TileType::GrassBlock;
+            self.tiles[x] = TileType::GrassBlock; // ligne y = 0
         }
 
         self.start_pos = Vec2::new(3.5, 1.0);
