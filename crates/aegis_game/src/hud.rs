@@ -412,8 +412,8 @@ unsafe fn pont(p: &Pinceau, etat: &EtatPont) {
 /// n'a pas trouvé dans son budget, ce qui n'est pas la même chose. Afficher « impossible »
 /// ferait retirer des blocs parfaitement franchissables sur la foi d'une recherche trop courte —
 /// et devant une classe, un mot faux à l'écran ne se rattrape pas.
-unsafe fn verdict_carte(p: &Pinceau, carte: crate::tas::EtatCarte) {
-    use crate::tas::EtatCarte;
+unsafe fn verdict_carte(p: &Pinceau, carte: crate::tas::EtatCarte, bouchon: &crate::tas::Bouchon) {
+    use crate::tas::{Bouchon, EtatCarte};
 
     /// En dessous, le parcours existe mais ne pardonne presque rien : on ne dit pas « OK ».
     /// Une carte franchie une fois sur deux par une machine parfaite est déjà très dure pour
@@ -435,7 +435,21 @@ unsafe fn verdict_carte(p: &Pinceau, carte: crate::tas::EtatCarte) {
             format!("CARTE DURE {}%", (robustesse * 100.0).round() as i32),
             couleurs::OR,
         ),
-        EtatCarte::PasTrouvee => ("PASSAGE DOUTEUX".to_string(), couleurs::URGENCE),
+        // ⚠ QUAND ON SAIT QUOI RETIRER, ON LE DIT. « PASSAGE DOUTEUX » laisse trente-cinq
+        // personnes devant une carte muette, à deviner quel bloc casser sur un niveau qu'elles
+        // viennent de bâtir ensemble. Nommer le bloc transforme le vote en question fermée —
+        // « on retire celui-là ? » — au lieu d'un choix à l'aveugle.
+        //
+        // Le libellé reste au conditionnel : le solveur a établi que ce retrait SUFFIT, pas qu'il
+        // est juste envers celui qui a posé le bloc. Ça, c'est au vote de le dire.
+        EtatCarte::PasTrouvee => match bouchon {
+            Bouchon::Bloc { x, y } => (format!("BOUCHE — RETIRER ({x},{y}) ?"), couleurs::URGENCE),
+            // On distingue « je n'ai pas trouvé de bloc seul » de « je n'ai pas cherché » : le
+            // second se corrige en cherchant, le premier veut dire qu'il faudra en retirer
+            // plusieurs. Les confondre ferait proposer un vote qui ne débloquerait rien.
+            Bouchon::AucunSeul { .. } => ("BOUCHE — PAS D'UN SEUL BLOC".to_string(), couleurs::URGENCE),
+            Bouchon::RienABoucher => ("PASSAGE DOUTEUX".to_string(), couleurs::URGENCE),
+        },
     };
 
     let h = 0.022;
@@ -460,12 +474,13 @@ pub unsafe fn dessiner(
     game: &PartyGame,
     etat_pont: &EtatPont,
     carte: crate::tas::EtatCarte,
+    bouchon: &crate::tas::Bouchon,
     demonstration: bool,
 ) {
     unsafe {
         minuteur(p, game);
         pont(p, etat_pont);
-        verdict_carte(p, carte);
+        verdict_carte(p, carte, bouchon);
         if game.phase == crate::party_game::GamePhase::Leaderboard {
             leaderboard(p, game, demonstration);
             if demonstration {

@@ -139,7 +139,19 @@ pub enum Verdict {
     Franchissable(Solution),
     /// Rien trouvé dans le budget accordé. **Ce n'est pas une preuve d'impossibilité** : voir
     /// la note en tête de module.
-    PasTrouve { explores: usize },
+    PasTrouve {
+        explores: usize,
+        /// Le point le plus proche de l'arrivée que la recherche ait atteint — **là où ça coince**.
+        ///
+        /// Il ne coûte rien : la recherche calcule déjà cette distance pour son heuristique, à
+        /// chaque état. On cessait simplement de la regarder au moment de rendre l'échec.
+        ///
+        /// C'est ce qui permet à [`designer_le_bouchon`] de ne pas tester la carte entière : le
+        /// bloc qui bouche est **au contact de ce point**, pas à l'autre bout du niveau. Un échec
+        /// qui dit seulement « non » oblige à tout re-chercher ; un échec qui dit *où* a déjà fait
+        /// la moitié du travail.
+        plus_loin: Vec2,
+    },
 }
 
 /// L'état du joueur, réduit à ce qui permet de dire « je suis déjà passé par là ».
@@ -354,6 +366,7 @@ pub fn resoudre_regle(
     };
 
     let depart = Player::new(grid.start_pos);
+    let depart_position = depart.position;
     let mut file = BinaryHeap::new();
     file.push(Piste {
         cout: 0,
@@ -366,12 +379,22 @@ pub fn resoudre_regle(
 
     let mut vus: HashMap<Empreinte, u32> = HashMap::new();
     let mut explores = 0usize;
+    // Le plus près de l'arrivée qu'on soit parvenu. Mis à jour à chaque état sorti de la file,
+    // donc sans un seul calcul supplémentaire : la distance sert déjà à l'heuristique.
+    let mut plus_loin = depart_position;
+    let mut meilleure_distance = (depart_position - arrivee).length();
 
     while let Some(piste) = file.pop() {
         if explores >= budget {
             break;
         }
         explores += 1;
+
+        let distance = (piste.joueur.position - arrivee).length();
+        if distance < meilleure_distance {
+            meilleure_distance = distance;
+            plus_loin = piste.joueur.position;
+        }
 
         for commande in Manette::REPERTOIRE {
             let mut joueur = piste.joueur.clone();
@@ -425,7 +448,98 @@ pub fn resoudre_regle(
         }
     }
 
-    Verdict::PasTrouve { explores }
+    Verdict::PasTrouve { explores, plus_loin }
+}
+
+/// Ce que la carte oppose au joueur, quand elle lui résiste.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Bouchon {
+    /// Retirer **ce** bloc rend la carte franchissable. C'est la proposition à soumettre au vote.
+    Bloc { x: usize, y: usize },
+    /// Aucun retrait **unique** ne suffit parmi les candidats éprouvés.
+    ///
+    /// ⚠ Ce n'est pas « il faut en retirer plusieurs » : c'est « je n'ai pas trouvé de bloc seul
+    /// qui débloque, en ayant regardé `testes` candidats ». La nuance est la même qu'entre
+    /// [`Verdict::PasTrouve`] et « impossible », et elle se perd aussi facilement.
+    AucunSeul { testes: usize },
+    /// La carte passe déjà : il n'y a rien à voter.
+    RienABoucher,
+}
+
+/// Combien de blocs candidats on éprouve avant d'abandonner.
+///
+/// Chaque candidat coûte une recherche complète. Douze suffisent parce qu'ils sont **triés par
+/// utilité** (voir plus bas) : si le bouchon n'est pas dans les douze blocs les plus proches du
+/// point de blocage ET les plus avancés vers l'arrivée, c'est que le problème n'est pas un bloc
+/// isolé.
+pub const CANDIDATS_MAX: usize = 12;
+
+/// Rayon de recherche des candidats autour du point de blocage, en tuiles.
+const RAYON_CANDIDATS: i32 = 4;
+
+/// **Désigne le bloc dont le retrait débloque la carte** — la proposition que le vote soumettra.
+///
+/// # Pourquoi ce n'est pas « essayer tous les blocs »
+///
+/// La carte réelle fait 58×28. Les tester un par un coûterait des centaines de recherches, pour
+/// une réponse qu'on veut pendant une manche. Mais **la recherche échouée sait déjà où ça coince**
+/// : [`Verdict::PasTrouve::plus_loin`] donne le point le plus avancé qu'elle ait atteint, et le
+/// bloc qui bouche est nécessairement à son contact — pas à l'autre bout du niveau.
+///
+/// On ne regarde donc qu'un carré de [`RAYON_CANDIDATS`] tuiles autour de ce point, et on trie les
+/// candidats par **distance à l'arrivée croissante** : un mur se perce du côté où l'on veut aller,
+/// pas dans le dos.
+///
+/// # Ce que ça change pour le vote
+///
+/// Sans cela, le vote demanderait aux joueurs de deviner quel bloc casser — trente-cinq personnes
+/// qui cliquent au hasard sur une carte qu'elles viennent de construire ensemble. Ici la question
+/// devient : *« on retire CE bloc-là, d'accord ? »*, avec la garantie mesurée que ce retrait
+/// **suffit** : chaque candidat n'est retenu qu'après une recherche complète qui aboutit.
+///
+/// # ⚠ Ce que ça ne dit pas
+///
+/// Que ce bloc soit le SEUL qui débloque, ni le plus juste à retirer pour celui qui l'a posé. Il
+/// est le premier trouvé dans un ordre choisi, pas un optimum. C'est assumé : le vote tranche
+/// l'équité, le solveur ne tranche que la faisabilité.
+pub fn designer_le_bouchon(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Bouchon {
+    let plus_loin = match resoudre_avec(grid, traps, budget) {
+        Verdict::Franchissable(_) => return Bouchon::RienABoucher,
+        Verdict::PasTrouve { plus_loin, .. } => plus_loin,
+    };
+
+    let arrivee = grid.finish_pos;
+    let (cx, cy) = (plus_loin.x.round() as i32, plus_loin.y.round() as i32);
+
+    // Les blocs solides autour du point de blocage, du plus proche de l'arrivée au plus lointain.
+    let mut candidats: Vec<(usize, usize, f32)> = Vec::new();
+    for dy in -RAYON_CANDIDATS..=RAYON_CANDIDATS {
+        for dx in -RAYON_CANDIDATS..=RAYON_CANDIDATS {
+            let (x, y) = (cx + dx, cy + dy);
+            if x < 0 || y < 0 || !grid.get_tile(x, y).is_solid() {
+                continue;
+            }
+            // ⚠ La ligne y = 0 est le SOL de la carte. La percer ne débloque pas un passage : elle
+            // ouvre un trou par lequel on tombe. Un vote qui proposerait ça serait une farce.
+            if y == 0 {
+                continue;
+            }
+            let d = (Vec2::new(x as f32, y as f32) - arrivee).length();
+            candidats.push((x as usize, y as usize, d));
+        }
+    }
+    candidats.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut testes = 0usize;
+    for (x, y, _) in candidats.into_iter().take(CANDIDATS_MAX) {
+        testes += 1;
+        let mut sans_lui = grid.clone();
+        sans_lui.set_tile(x, y, crate::grid::TileType::Air);
+        if matches!(resoudre_avec(&sans_lui, traps, budget), Verdict::Franchissable(_)) {
+            return Bouchon::Bloc { x, y };
+        }
+    }
+    Bouchon::AucunSeul { testes }
 }
 
 /// Rejoue une séquence d'entrées et dit si elle atteint réellement l'arrivée.
@@ -661,6 +775,11 @@ pub struct Verificateur {
     /// compte autant que le premier. Quand personne n'a réussi une manche, on ne veut pas
     /// seulement savoir que c'était possible — on veut voir comment.
     solution: std::sync::Arc<std::sync::Mutex<Option<Solution>>>,
+    /// Ce que la carte oppose, quand elle résiste — **la proposition que le vote soumettra**.
+    ///
+    /// Calculé dans le même fil, juste après un échec : c'est le seul moment où l'on sait déjà où
+    /// ça coince, et où le coût de douze recherches de plus ne gêne personne.
+    bouchon: std::sync::Arc<std::sync::Mutex<Bouchon>>,
 }
 
 impl Default for Verificateur {
@@ -674,6 +793,7 @@ impl Verificateur {
         Verificateur {
             etat: std::sync::Arc::new(std::sync::Mutex::new(EtatCarte::Inconnue)),
             solution: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            bouchon: std::sync::Arc::new(std::sync::Mutex::new(Bouchon::RienABoucher)),
         }
     }
 
@@ -702,6 +822,7 @@ impl Verificateur {
         let traps = traps.clone();
         let partage = std::sync::Arc::clone(&self.etat);
         let garde_solution = std::sync::Arc::clone(&self.solution);
+        let garde_bouchon = std::sync::Arc::clone(&self.bouchon);
 
         std::thread::spawn(move || {
             // ⚠ UN SEUL MONDE POUR TOUT LE PIPELINE. `resoudre_avec` filtre déjà les pièges
@@ -719,16 +840,31 @@ impl Verificateur {
                     *garde_solution.lock().unwrap() = Some(retenue);
                     EtatCarte::Franchissable { robustesse: note }
                 }
-                Verdict::PasTrouve { .. } => EtatCarte::PasTrouvee,
+                Verdict::PasTrouve { .. } => {
+                    // ⚠ ON NE S'ARRÊTE PAS À « NON ». Un verdict d'échec seul laisse trente-cinq
+                    // joueurs devant une carte muette : ils devraient deviner quel bloc casser,
+                    // sur un niveau qu'ils viennent de construire ensemble. On cherche donc
+                    // lequel, tout de suite — c'est ici, et nulle part ailleurs, qu'on sait déjà
+                    // où ça coince.
+                    *garde_bouchon.lock().unwrap() =
+                        designer_le_bouchon(&grid, &permanents, BUDGET_PARTIE / 4);
+                    EtatCarte::PasTrouvee
+                }
             };
             *partage.lock().unwrap() = verdict;
         });
+    }
+
+    /// Le bloc à soumettre au vote, s'il y en a un.
+    pub fn bouchon(&self) -> Bouchon {
+        self.bouchon.lock().unwrap().clone()
     }
 
     /// Remet à zéro, pour la manche suivante.
     pub fn oublier(&self) {
         *self.etat.lock().unwrap() = EtatCarte::Inconnue;
         *self.solution.lock().unwrap() = None;
+        *self.bouchon.lock().unwrap() = Bouchon::RienABoucher;
     }
 }
 
@@ -886,6 +1022,89 @@ mod tests {
         grid
     }
 
+    /// **Le TAS ne dit plus « non » : il dit QUOI RETIRER.** Et le test le vérifie en le faisant.
+    ///
+    /// L'assertion qui compte n'est pas « un bloc a été nommé » — n'importe quel bug nommerait un
+    /// bloc. C'est : **on retire celui qu'il désigne, et la carte passe.** Le test refait donc
+    /// lui-même le geste que le vote fera.
+    /// Sonde : jusqu'à quelle hauteur de mur le joueur passe-t-il ? Sert à construire le test
+    /// suivant sur une mesure et non sur une supposition.
+    #[test]
+    #[ignore = "sonde de mesure, pas un controle"]
+    fn sonde_hauteur_de_mur_franchissable() {
+        for h in 1..=6 {
+            let mut grid = couloir(24);
+            for y in 1..=h {
+                grid.set_tile(12, y, crate::grid::TileType::SolidBlock);
+            }
+            let r = matches!(resoudre_avec(&grid, &TrapManager::new(), 60_000), Verdict::Franchissable(_));
+            println!("mur de {h} de haut : {}", if r { "FRANCHI" } else { "bloque" });
+        }
+    }
+
+    #[test]
+    fn le_tas_designe_un_bloc_dont_le_retrait_debloque_reellement() {
+        // Un mur de QUATRE, sur mesure : `sonde_hauteur_de_mur_franchissable` établit que le
+        // joueur passe un mur de 3 et bute sur 4. Retirer le bloc du sommet le ramène donc à 3.
+        //
+        // ⚠ La première version de ce test murait un couloir bas sur 2 de haut alors qu'il
+        // n'offrait que 2 de libre : il fallait retirer les DEUX blocs, et le TAS répondait
+        // `AucunSeul`. Il avait raison, le test avait tort. La hauteur vient maintenant d'une
+        // mesure, pas d'une intuition.
+        let mut grid = couloir(24);
+        for y in 1..=4 {
+            grid.set_tile(12, y, crate::grid::TileType::SolidBlock);
+        }
+        let vide = TrapManager::new();
+        assert!(
+            matches!(resoudre_avec(&grid, &vide, 60_000), Verdict::PasTrouve { .. }),
+            "temoin creux : ce mur ne bouche meme pas"
+        );
+
+        match designer_le_bouchon(&grid, &vide, 60_000) {
+            Bouchon::Bloc { x, y } => {
+                let mut sans_lui = grid.clone();
+                sans_lui.set_tile(x, y, crate::grid::TileType::Air);
+                assert!(
+                    matches!(resoudre_avec(&sans_lui, &vide, 60_000), Verdict::Franchissable(_)),
+                    "le bloc designe ({x},{y}) doit REELLEMENT debloquer — sinon on ferait voter \
+                     trente-cinq personnes sur une proposition fausse"
+                );
+                assert_ne!(y, 0, "jamais le sol : le percer ouvre un trou, il ne libere pas un passage");
+            }
+            autre => panic!("un mur d'un seul bloc d'epaisseur a un bouchon designable, recu {autre:?}"),
+        }
+    }
+
+    /// Sur une carte qui passe, il n'y a rien à voter — et le dire est aussi important que
+    /// désigner : un vote proposé sans raison userait le mécanisme.
+    #[test]
+    fn une_carte_franchissable_n_a_rien_a_faire_voter() {
+        assert_eq!(
+            designer_le_bouchon(&couloir(20), &TrapManager::new(), 60_000),
+            Bouchon::RienABoucher
+        );
+    }
+
+    /// **Le témoin d'humilité.** Face à un mur épais, retirer UN bloc ne suffit pas — et le TAS
+    /// doit le dire, au lieu de désigner un innocent.
+    ///
+    /// C'est la même discipline que `PasTrouve` contre « impossible » : `AucunSeul` annonce ce
+    /// qu'on a éprouvé, pas ce qu'on suppose du monde.
+    #[test]
+    fn face_a_un_mur_epais_le_tas_avoue_qu_aucun_bloc_seul_ne_suffit() {
+        let mut grid = couloir_bas(20);
+        for x in 9..12 {
+            for y in 1..3 {
+                grid.set_tile(x, y, crate::grid::TileType::SolidBlock);
+            }
+        }
+        match designer_le_bouchon(&grid, &TrapManager::new(), 60_000) {
+            Bouchon::AucunSeul { testes } => assert!(testes > 0, "il faut avoir ESSAYE pour avouer"),
+            autre => panic!("un mur de 3 d'epaisseur ne se perce pas d'un bloc, recu {autre:?}"),
+        }
+    }
+
     /// **LA PAIRE QUI JUSTIFIE `vue_permanente`.** Même carte, même piège au même endroit :
     /// seul le FILTRE change, et le verdict bascule.
     ///
@@ -918,7 +1137,7 @@ mod tests {
                 rejouer(&grid, &vue_permanente(&flammes), &s.entrees),
                 "la solution doit passer le contrôle DANS LE MÊME MONDE que celui qui l'a produite"
             ),
-            Verdict::PasTrouve { explores } => panic!(
+            Verdict::PasTrouve { explores, .. } => panic!(
                 "un lance-flammes s'ÉTEINT : le joueur peut attendre. ({explores} etats explores)"
             ),
         }
@@ -993,7 +1212,7 @@ mod tests {
                 );
                 assert!(s.duree() > 0.0);
             }
-            Verdict::PasTrouve { explores } => {
+            Verdict::PasTrouve { explores, .. } => {
                 panic!("un couloir plat doit se franchir ({explores} etats explores)")
             }
         }
@@ -1004,7 +1223,7 @@ mod tests {
     fn un_budget_epuise_dit_PAS_TROUVE_et_non_IMPOSSIBLE() {
         let grid = couloir(60);
         match resoudre(&grid, 3) {
-            Verdict::PasTrouve { explores } => assert!(explores <= 3),
+            Verdict::PasTrouve { explores, .. } => assert!(explores <= 3),
             Verdict::Franchissable(_) => {
                 // Acceptable si la carte est triviale, mais pas avec trois etats explores.
                 panic!("trois etats ne peuvent pas suffire a traverser soixante cases")
@@ -1033,7 +1252,7 @@ mod tests {
                     "on ne traverse pas un trou de deux cases sans sauter"
                 );
             }
-            Verdict::PasTrouve { explores } => {
+            Verdict::PasTrouve { explores, .. } => {
                 panic!("un trou de deux cases se saute ({explores} etats explores)")
             }
         }
@@ -1192,7 +1411,7 @@ mod tests {
                 sol.changements(),
                 robustesse(&grid, &traps, &sol.entrees, 40)
             ),
-            Verdict::PasTrouve { explores } => format!("PAS TROUVE ({explores})"),
+            Verdict::PasTrouve { explores, .. } => format!("PAS TROUVE ({explores})"),
         };
 
         println!("carte reelle {}x{} : {} en {:.2} s",

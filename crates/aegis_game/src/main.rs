@@ -267,6 +267,11 @@ impl AegisApp {
 
         let distants = self.sidecar.avatars();
         let (envoyes, recus, avatars) = self.sidecar.compteurs();
+        // ⚠ Lu AVANT la passe de rendu, pas pendant. Prendre ce verrou au milieu de
+        // l'enregistrement des commandes graphiques ferait attendre la boucle d'affichage
+        // derrière le fil du solveur — une saccade visible, pour une information qui ne change
+        // qu'une fois par manche.
+        let bouchon = self.verificateur.bouchon();
         let etat_pont = hud::EtatPont {
             relie: self.sidecar.relie(),
             envoyes,
@@ -285,6 +290,7 @@ impl AegisApp {
                         pont: &etat_pont,
                         distants: &distants,
                         carte: self.verificateur.etat(),
+                        bouchon: &bouchon,
                         demonstration: self.demonstration.as_ref().map(|d| d.position()),
                     },
                 );
