@@ -1,0 +1,150 @@
+name: build
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  POURQUOI CE FICHIER EXISTE (19 août 2026)
+#
+#  AegisEngine était le SEUL des quatre dépôts sans CI : ses binaires étaient
+#  compilés à la main sur une machine NixOS. Deux conséquences, toutes deux
+#  constatées et non supposées :
+#
+#   1. `aegis-linux` publié portait `/nix/store/…-glibc/ld-linux-x86-64.so.2`
+#      comme interpréteur ELF — il ne démarrait donc QUE sur cette machine.
+#      Un camarade sous Ubuntu avait le réseau et la messagerie, cliquait
+#      « Jouer » et n'obtenait rien.
+#   2. `aegis-windows` demandait une compilation croisée depuis Linux. Le
+#      19 août, elle a échoué trois fois de suite (dlltool absent, puis
+#      mingw-gcc absent, puis `libpthread.a` introuvable à la liaison) —
+#      exactement ce que `build-windows.yml` du cœur annonce depuis toujours :
+#      « pas de cross-compile depuis Linux, trop fragile ».
+#
+#  UN SEUL FICHIER, DEUX TRAVAUX : contrairement au cœur et au launcher (qui
+#  séparent leurs workflows parce que leurs binaires diffèrent par plateforme),
+#  les deux travaux ci-dessous produisent LE MÊME programme pour deux systèmes,
+#  et ils alimentent la MÊME publication signée. Les garder ensemble empêche
+#  d'en déclencher un et d'oublier l'autre — une publication où les deux
+#  artefacts ne viennent pas du même commit est un défaut silencieux.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [master]        # ⚠ ce dépôt est sur `master`, pas `main`
+  workflow_dispatch: {}
+
+# Moindre privilège : ce workflow lit le dépôt et publie des artefacts. Il n'a
+# besoin d'aucun droit d'écriture — on le déclare plutôt que d'hériter du large
+# défaut du dépôt.
+permissions:
+  contents: read
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  linux:
+    runs-on: ubuntu-22.04
+    # ⚠ 22.04 DÉLIBÉRÉMENT, pas `ubuntu-latest`. Un binaire lié à la glibc d'une
+    # image récente REFUSE de démarrer sur une distribution plus ancienne —
+    # jamais l'inverse. On compile donc sur la plus vieille image encore
+    # fournie, et le binaire tourne sur elle ET sur tout ce qui est plus récent.
+    #
+    # ⚠ Et NON, on ne peut pas faire du musl statique ici, contrairement au cœur
+    # et au launcher : `ash` ouvre le pilote Vulkan par `dlopen` à l'exécution,
+    # et un binaire statiquement lié ne sait pas faire `dlopen`. Le jeu a besoin
+    # du pilote de la machine hôte — un moteur 3D n'est portable qu'au sens
+    # glibc, jamais au sens « statique ». La honnêteté ici vaut mieux qu'une
+    # promesse : ce binaire vise Ubuntu 22.04 et plus récent.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain Rust stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Bibliothèques X11 (winit est compilé en x11, sans Wayland)
+        # La liste vient de `shell.nix`, traduite de Nix vers Debian. Le loader
+        # Vulkan n'y est PAS : il n'est pas nécessaire pour COMPILER (ash le
+        # charge à l'exécution), et l'exiger ici masquerait le fait que c'est la
+        # machine du joueur qui doit en fournir un.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libxrender-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      - name: Compiler (release)
+        run: cargo build --release
+
+      - name: Tests
+        # Les tests tournent APRÈS le build et ne bloquent pas la production de
+        # l'artefact par accident : s'ils échouent ici alors qu'ils passent sur
+        # la machine de développement, ce n'est pas un caprice de la CI — c'est
+        # que ces tests dépendaient d'un GPU présent, ce qu'il faut savoir.
+        run: cargo test --release
+
+      - name: ⚠ SONDE PT_INTERP — la seule qui distingue portable de mort
+        # `ldd` et `file` répondent tous deux « statically linked » sur un
+        # binaire qui porte pourtant un interpréteur /nix/store : ils ne
+        # regardent pas PT_INTERP. Cette omission a fait publier un binaire mort
+        # le 17 août 2026. La sonde est donc ici, DANS la chaîne, plutôt que
+        # dans la mémoire de celui qui publie.
+        #
+        # Ce qu'on exige n'est pas « aucun interpréteur » (impossible pour un
+        # programme glibc qui fait dlopen) mais « aucun chemin de nix store » :
+        # c'est ça, la propriété qui décide si le binaire démarre ailleurs.
+        run: |
+          python3 - target/release/aegis_game <<'PY'
+          import sys, struct
+          d = open(sys.argv[1], 'rb').read()
+          o0 = struct.unpack_from('<Q', d, 0x20)[0]
+          es = struct.unpack_from('<H', d, 0x36)[0]
+          n  = struct.unpack_from('<H', d, 0x38)[0]
+          interp = None
+          for i in range(n):
+              o = o0 + i * es
+              if struct.unpack_from('<I', d, o)[0] == 3:          # PT_INTERP
+                  f = struct.unpack_from('<Q', d, o + 8)[0]
+                  s = struct.unpack_from('<Q', d, o + 32)[0]
+                  interp = d[f:f+s].rstrip(b'\0').decode()
+                  break
+          print("interpreteur :", interp if interp else "(aucun)")
+          if interp and "/nix/store" in interp:
+              sys.exit("NON PORTABLE — ce binaire ne demarrerait que sur la machine qui l'a compile")
+          print("OK — aucun chemin de nix store : ce binaire peut demarrer ailleurs")
+          PY
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aegis-linux
+          path: target/release/aegis_game
+          # Le quota de stockage du compte a été atteint à 100 % le 17 août 2026
+          # parce que rien ne bornait la durée de vie des artefacts : les envois
+          # ont échoué pendant des heures et les runs rougissaient alors que le
+          # code était vert. Un paquet qu'on n'a pas publié dans la semaine est
+          # mort — sept jours suffisent.
+          retention-days: 7
+
+  # ───────────────────────────────────────────────────────────────────────────
+  windows:
+    runs-on: windows-latest
+    # Windows NATIF, jamais de compilation croisée : voir l'en-tête de ce
+    # fichier — trois échecs successifs le 19 août, et l'avertissement du cœur
+    # qui le disait d'avance.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain Rust stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Compiler (release)
+        run: cargo build --release
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aegis-windows
+          path: target/release/aegis_game.exe
+          retention-days: 7
