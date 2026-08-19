@@ -27,6 +27,32 @@
 //!   [`Verdict::PasTrouve`] et non « impossible » : nommer ce résultat « impossible » ferait
 //!   retirer des blocs parfaitement franchissables sur la foi d'une recherche trop courte.
 //!
+//! # Ce qui a été essayé et n'a RIEN donné (19 août 2026)
+//!
+//! **Chercher plusieurs parcours avec des réglages différents, puis garder le plus tolérant.**
+//! L'idée paraissait évidente : la recherche rend *un* chemin, celui que ses réglages lui font
+//! rencontrer en premier, donc en essayer quatre devrait offrir un meilleur candidat. Mesuré sur
+//! quatre cartes — couloir plat, trou de deux cases, trou de trois, marche haute — plus la carte
+//! réelle du jeu :
+//!
+//! ```text
+//! couloir plat     un réglage 1,00 | quatre réglages 1,00
+//! trou de 2        un réglage 0,68 | quatre réglages 0,68
+//! trou de 3        un réglage 1,00 | quatre réglages 1,00
+//! marche haute     un réglage 1,00 | quatre réglages 1,00
+//! carte réelle     un réglage 0,10 | quatre réglages 0,10   (et 0,11 s → 0,57 s)
+//! ```
+//!
+//! **Strictement aucun gain, pour cinq fois le coût.** Le code a donc été retiré ; seule la
+//! mesure qui le prouve est restée (`mesure_multi_reglages`, à lancer à la main).
+//!
+//! *L'explication tient sans doute à la carte plus qu'au solveur : quand les plateformes sont
+//! là où elles sont, il n'existe qu'une trajectoire, et tous les réglages la retrouvent.* Ce qui
+//! donne au chiffre son vrai sens : **0,10 sur la carte réelle n'est pas un aveu du solveur,
+//! c'est un jugement sur la carte.** Elle est dure — un trou de deux cases obtient 0,68.
+//! Le prochain gain viendra donc d'ailleurs : chercher des chemins ALTERNATIFS (passer plus haut,
+//! plus bas), pas régler différemment la même recherche.
+//!
 //! # Pourquoi HashLife ne se transpose pas ici
 //!
 //! HashLife (Gosper, 1984) mémoïse des macro-cellules d'un automate **discret** : deux régions
@@ -206,6 +232,26 @@ pub const RAYON_ARRIVEE: f32 = 1.2;
 /// franchissables. Trop bas, il retombe sur des séquences hachées que personne ne peut refaire.
 pub const PRIX_DU_CHANGEMENT: u32 = 20;
 
+/// Poids par défaut de l'estimation du chemin restant.
+///
+/// Il pousse la recherche vers l'arrivée plutôt que de ratisser autour du départ.
+///
+/// ⚠ **Sa valeur n'est pas un réglage de confort, elle décide si le solveur aboutit.**
+/// Mesuré sur la carte réelle du jeu (58 × 28) :
+/// ```text
+/// poids  4 → PAS TROUVÉ, 600 000 états, 6,3 s
+/// poids 12 → PAS TROUVÉ, 600 000 états, 6,5 s
+/// poids 30 → FRANCHISSABLE, trouvé en 0,27 s
+/// ```
+/// Le passage n'est pas graduel : c'est « jamais » puis « tout de suite ».
+///
+/// ⚠ Le revers, à connaître : plus le poids est fort, plus la recherche devient gloutonne et
+/// rechigne à s'éloigner de l'arrivée. Une carte qui demanderait de RECULER longuement pour
+/// contourner un obstacle pourrait lui échapper — elle rendrait alors [`Verdict::PasTrouve`],
+/// jamais une fausse solution. C'est le bon sens de l'erreur, mais c'est la limite à surveiller
+/// le jour où une carte tordue passera pour bouchée.
+pub const POIDS: f32 = 30.0;
+
 /// Cherche un parcours de `grid.start_pos` à `grid.finish_pos`.
 ///
 /// `budget` borne le nombre d'états explorés — c'est ce qui garantit que l'appel rend la main,
@@ -216,36 +262,29 @@ pub fn resoudre(grid: &TileGrid, budget: usize) -> Verdict {
 
 /// Le même, en tenant compte des pièges posés par les joueurs.
 pub fn resoudre_avec(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Verdict {
+    resoudre_regle(grid, traps, budget, POIDS, PRIX_DU_CHANGEMENT)
+}
+
+/// La recherche, avec ses deux réglages explicites.
+///
+/// Ils sont exposés parce qu'ils **changent le chemin trouvé**, pas seulement sa vitesse
+/// d'obtention : c'est ce qui permet à [`resoudre_le_plus_imitable`] d'en essayer plusieurs.
+pub fn resoudre_regle(
+    grid: &TileGrid,
+    traps: &TrapManager,
+    budget: usize,
+    poids: f32,
+    prix_du_changement: u32,
+) -> Verdict {
     let arrivee = grid.finish_pos;
 
-    // Estimation du reste : distance à vol d'oiseau, convertie en images à la vitesse de course.
-    //
-    // ⚠ Elle est **pondérée**, et c'est délibéré. Une recherche non pondérée cherche le chemin
-    // le plus COURT et explore donc une nuée d'états équivalents avant d'avancer — sur un simple
-    // couloir plat, soixante mille états n'y suffisaient pas. Or ce solveur ne cherche pas le
-    // parcours le plus rapide : il cherche un parcours **franchissable et imitable**. Rien ne
-    // justifie de payer l'optimalité en temps, et la payer empêchait de trouver quoi que ce soit.
-    //
-    // Le poids pousse la recherche vers l'arrivée plutôt que de ratisser autour du départ.
-    //
-    // ⚠ **Sa valeur n'est pas un réglage de confort, elle décide si le solveur aboutit.**
-    // Mesuré sur la carte réelle du jeu (58 × 28) :
-    //     poids  4 → PAS TROUVÉ, 600 000 états, 6,3 s
-    //     poids 12 → PAS TROUVÉ, 600 000 états, 6,5 s
-    //     poids 30 → FRANCHISSABLE en 370 images, trouvé en **0,27 s**
-    // Le passage n'est pas graduel : c'est « jamais » puis « tout de suite ».
-    //
-    // ⚠ Le revers, à connaître : plus le poids est fort, plus la recherche devient gloutonne et
-    // rechigne à s'éloigner de l'arrivée. Une carte qui demanderait de RECULER longuement pour
-    // contourner un obstacle pourrait lui échapper — elle rendrait alors `PasTrouve`, jamais une
-    // fausse solution. C'est le bon sens de l'erreur, mais c'est la limite à surveiller le jour
-    // où une carte tordue passera pour bouchée.
-    const POIDS: f32 = 30.0;
+    // Estimation du reste : distance à vol d'oiseau, convertie en images à la vitesse de course,
+    // puis pondérée (voir [`POIDS`]).
     /// Vitesse de course réelle du personnage, mesurée : 8,5 unités par seconde.
     const VITESSE: f32 = 8.5;
     let estimer = |p: Vec2| -> u32 {
         let d = (p - arrivee).length();
-        (d / VITESSE / PAS * POIDS).max(0.0) as u32
+        (d / VITESSE / PAS * poids).max(0.0) as u32
     };
 
     let depart = Player::new(grid.start_pos);
@@ -299,7 +338,7 @@ pub fn resoudre_avec(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Ver
             //
             // Le mettre DANS la recherche change ce qu'on cherche, au lieu de réparer ce qu'on
             // a trouvé.
-            let cout = piste.cout + 1 + if commande != piste.derniere { PRIX_DU_CHANGEMENT } else { 0 };
+            let cout = piste.cout + 1 + if commande != piste.derniere { prix_du_changement } else { 0 };
             let empreinte = Empreinte::de(&joueur);
             // On ne reprend un état déjà vu que si on y arrive plus tôt.
             match vus.get(&empreinte) {
@@ -590,9 +629,8 @@ impl Verificateur {
         std::thread::spawn(move || {
             let verdict = match resoudre_avec(&grid, &traps, BUDGET_PARTIE) {
                 Verdict::Franchissable(brute) => {
-                    // On garde la version la PLUS IMITABLE, pas systématiquement la simplifiée :
-                    // sur une carte à sauts, simplifier rend le parcours plus dur (voir
-                    // `la_plus_imitable`). Le chiffre affiché est celui de la version retenue.
+                    // On garde la version la plus imitable des deux (brute ou simplifiée) :
+                    // simplifier aide sur un couloir et NUIT sur une carte à sauts.
                     let retenue = la_plus_imitable(&grid, &traps, &brute);
                     EtatCarte::Franchissable {
                         robustesse: robustesse(&grid, &traps, &retenue.entrees, 40),
@@ -885,26 +923,25 @@ mod tests {
     fn mesure_sur_la_carte_reelle() {
         let grid = TileGrid::new(48, 24);
         let depart = std::time::Instant::now();
-        let verdict = resoudre(&grid, BUDGET_PARTIE);
-        let duree = depart.elapsed();
         let traps = TrapManager::new();
-        let detail = match &verdict {
-            Verdict::Franchissable(brute) => {
-                let simple = simplifier(&grid, &traps, brute);
-                let retenue = la_plus_imitable(&grid, &traps, brute);
-                format!(
-                    "FRANCHISSABLE | brute {} chgts {:.2} | simplifiee {} chgts {:.2} | RETENUE {} chgts {:.2}",
-                    brute.changements(),
-                    robustesse(&grid, &traps, &brute.entrees, 40),
-                    simple.changements(),
-                    robustesse(&grid, &traps, &simple.entrees, 40),
-                    retenue.changements(),
-                    robustesse(&grid, &traps, &retenue.entrees, 40),
-                )
-            }
-            Verdict::PasTrouve { explores } => format!("PAS TROUVE ({explores} etats)"),
+
+        // 1) Un seul reglage : ce que le solveur rendait jusqu'ici.
+        let t0 = std::time::Instant::now();
+        let simple_verdict = resoudre(&grid, BUDGET_PARTIE);
+        let t_simple = t0.elapsed();
+
+
+        let decrire = |v: &Verdict| match v {
+            Verdict::Franchissable(sol) => format!(
+                "{} chgts, robustesse {:.2}",
+                sol.changements(),
+                robustesse(&grid, &traps, &sol.entrees, 40)
+            ),
+            Verdict::PasTrouve { explores } => format!("PAS TROUVE ({explores})"),
         };
-        println!("carte reelle {}x{} — {detail} en {:.2} s", grid.width, grid.height, duree.as_secs_f32());
+
+        println!("carte reelle {}x{} : {} en {:.2} s",
+                 grid.width, grid.height, decrire(&simple_verdict), t_simple.as_secs_f32());
     }
 
     /// Le choix ne doit JAMAIS rendre une version moins imitable que la brute — c'est tout ce
@@ -930,6 +967,51 @@ mod tests {
                 r_retenue >= r_brute,
                 "carte {largeur} : la retenue ({r_retenue:.2}) ne doit jamais etre pire que la brute ({r_brute:.2})"
             );
+        }
+    }
+
+    /// MESURE — la recherche multi-reglages apporte-t-elle quelque chose ? Sur quelles cartes ?
+    #[test]
+    #[ignore]
+    fn mesure_multi_reglages() {
+        let traps = TrapManager::new();
+        let cas: Vec<(&str, TileGrid)> = vec![
+            ("couloir plat", couloir(20)),
+            ("trou de 2", { let mut g = couloir(24);
+                g.set_tile(11, 0, crate::grid::TileType::Air);
+                g.set_tile(12, 0, crate::grid::TileType::Air); g }),
+            ("trou de 3", { let mut g = couloir(28);
+                for x in 12..15 { g.set_tile(x, 0, crate::grid::TileType::Air); } g }),
+            ("marche haute", { let mut g = couloir(28);
+                for y in 1..4 { g.set_tile(14, y, crate::grid::TileType::SolidBlock); } g }),
+        ];
+
+        for (nom, grid) in &cas {
+            let un = match resoudre(grid, 400_000) {
+                Verdict::Franchissable(b) => {
+                    let r = la_plus_imitable(grid, &traps, &b);
+                    format!("{:.2}", robustesse(grid, &traps, &r.entrees, 40))
+                }
+                Verdict::PasTrouve { .. } => "pas trouve".into(),
+            };
+            // Les quatre reglages, montes ici plutot que dans le module : le code qui les
+            // enchainait a ete RETIRE faute d'apporter quoi que ce soit (note en tete de module).
+            // Cette mesure reste, pour qu'on n'ait pas a le reecrire pour re-decouvrir la meme
+            // chose — et pour attraper le jour ou une carte lui donnerait enfin raison.
+            let mut meilleure = 0.0f32;
+            for (poids, prix) in [
+                (POIDS, PRIX_DU_CHANGEMENT),
+                (POIDS, PRIX_DU_CHANGEMENT * 3),
+                (POIDS, PRIX_DU_CHANGEMENT / 4),
+                (POIDS * 1.7, PRIX_DU_CHANGEMENT * 2),
+            ] {
+                if let Verdict::Franchissable(b) = resoudre_regle(grid, &traps, 400_000, poids, prix) {
+                    let r = la_plus_imitable(grid, &traps, &b);
+                    meilleure = meilleure.max(robustesse(grid, &traps, &r.entrees, 40));
+                }
+            }
+            let multi = format!("{meilleure:.2}");
+            println!("{nom:<16} un reglage {un:>10} | quatre reglages {multi:>10}");
         }
     }
 }
