@@ -414,12 +414,25 @@ unsafe fn pont(p: &Pinceau, etat: &EtatPont) {
 unsafe fn verdict_carte(p: &Pinceau, carte: crate::tas::EtatCarte) {
     use crate::tas::EtatCarte;
 
+    /// En dessous, le parcours existe mais ne pardonne presque rien : on ne dit pas « OK ».
+    /// Une carte franchie une fois sur deux par une machine parfaite est déjà très dure pour
+    /// une classe.
+    const SEUIL_IMITABLE: f32 = 0.5;
+
     let (texte, teinte) = match carte {
         EtatCarte::Inconnue => return,
         EtatCarte::EnCours => ("CARTE : VERIFICATION".to_string(), couleurs::TEXTE_FAIBLE),
-        EtatCarte::Franchissable { robustesse } => (
+        // ⚠ « OK » ne se dit que si le parcours est **imitable**. Une carte franchissable dont
+        // la seule solution connue ne pardonne aucune imprécision n'est pas une carte réussie :
+        // annoncer « OK » à trente-cinq personnes qui vont toutes mourir serait un mensonge à
+        // l'écran. Le pourcentage est celui de la robustesse — voir `tas::robustesse`.
+        EtatCarte::Franchissable { robustesse } if robustesse >= SEUIL_IMITABLE => (
             format!("CARTE OK {}%", (robustesse * 100.0).round() as i32),
             couleurs::TEXTE_FAIBLE,
+        ),
+        EtatCarte::Franchissable { robustesse } => (
+            format!("CARTE DURE {}%", (robustesse * 100.0).round() as i32),
+            couleurs::OR,
         ),
         EtatCarte::PasTrouvee => ("PASSAGE DOUTEUX".to_string(), couleurs::URGENCE),
     };
