@@ -164,9 +164,13 @@ impl Empreinte {
 
 /// Un nœud de la file de recherche. Ordonné pour que le plus prometteur sorte en premier.
 struct Piste {
-    cout: u32,     // images déjà dépensées
-    estime: u32,   // cout + distance restante estimée
+    /// Ce que le chemin a coûté jusqu'ici : les images dépensées, **plus** le prix des
+    /// changements de touche (voir `PRIX_DU_CHANGEMENT`).
+    cout: u32,
+    estime: u32,
     joueur: Player,
+    /// La dernière commande donnée, pour savoir si la suivante est un changement.
+    derniere: Manette,
     saut_precedent: bool,
     entrees: Vec<Manette>,
 }
@@ -191,6 +195,16 @@ impl PartialOrd for Piste {
 
 /// À quelle distance de l'arrivée on considère la ligne franchie. Même valeur que le jeu.
 pub const RAYON_ARRIVEE: f32 = 1.2;
+
+/// Ce que coûte un changement de touche, en « images équivalentes ».
+///
+/// C'est le critère « facile pour un humain » **mis dans la recherche** plutôt qu'appliqué
+/// après coup. Une valeur de 20 revient à dire : « mieux vaut un parcours qui dure un tiers de
+/// seconde de plus qu'un parcours qui demande un appui de plus ».
+///
+/// ⚠ Trop haut, le solveur refuserait les sauts nécessaires et déclarerait douteuses des cartes
+/// franchissables. Trop bas, il retombe sur des séquences hachées que personne ne peut refaire.
+pub const PRIX_DU_CHANGEMENT: u32 = 20;
 
 /// Cherche un parcours de `grid.start_pos` à `grid.finish_pos`.
 ///
@@ -240,6 +254,7 @@ pub fn resoudre_avec(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Ver
         cout: 0,
         estime: estimer(depart.position),
         joueur: depart,
+        derniere: Manette::default(),
         saut_precedent: false,
         entrees: Vec::new(),
     });
@@ -273,7 +288,18 @@ pub fn resoudre_avec(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Ver
                 return Verdict::Franchissable(Solution { entrees });
             }
 
-            let cout = piste.cout + 1;
+            // Le coût n'est pas seulement du temps : **changer de touche coûte**. C'est ce qui
+            // fait chercher un parcours qu'un humain peut refaire plutôt que le plus rapide.
+            //
+            // Sans ce prix, le solveur change de commande dès que ça lui fait gagner une image,
+            // et rend une séquence hachée — mesuré : 15 changements pour traverser un couloir
+            // plat, et 10 % de robustesse. On peut simplifier après coup, mais on ne rattrape
+            // alors que ce que la recherche a bien voulu laisser : sur la carte réelle, même
+            // simplifié, le parcours obtenait **0 %**.
+            //
+            // Le mettre DANS la recherche change ce qu'on cherche, au lieu de réparer ce qu'on
+            // a trouvé.
+            let cout = piste.cout + 1 + if commande != piste.derniere { PRIX_DU_CHANGEMENT } else { 0 };
             let empreinte = Empreinte::de(&joueur);
             // On ne reprend un état déjà vu que si on y arrive plus tôt.
             match vus.get(&empreinte) {
@@ -287,6 +313,7 @@ pub fn resoudre_avec(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Ver
                 cout,
                 estime: cout + estimer(joueur.position),
                 joueur,
+                derniere: commande,
                 saut_precedent: commande.saut,
                 entrees,
             });
@@ -381,6 +408,35 @@ pub fn simplifier(grid: &TileGrid, traps: &TrapManager, solution: &Solution) -> 
         }
     }
     Solution { entrees }
+}
+
+/// Rend la version la plus **imitable** d'une solution : la brute, ou la simplifiée.
+///
+/// # ⚠ Simplifier n'est PAS rendre robuste — mesuré, pas supposé
+///
+/// [`simplifier`] retire un changement de touche dès que le parcours **arrive encore**. Mais
+/// « arriver encore » et « arriver avec de la marge » sont deux choses différentes : en
+/// supprimant un appui, on fait souvent passer le personnage au ras de l'obstacle. Mesuré sur la
+/// carte réelle du jeu :
+///
+/// ```text
+/// brute       : 10 changements, robustesse 0,10
+/// simplifiée  :  9 changements, robustesse 0,03   ← moins de touches, mais bien plus dure
+/// ```
+///
+/// Sur un couloir plat, la simplification aide (elle ramène à « maintiens droite »). Sur une
+/// carte à sauts, elle nuit. Il n'y a donc pas de règle : **il faut mesurer les deux et garder
+/// la meilleure**, ce que fait cette fonction. C'est le critère utilisé pour *choisir*, et plus
+/// seulement pour constater.
+pub fn la_plus_imitable(grid: &TileGrid, traps: &TrapManager, brute: &Solution) -> Solution {
+    /// Assez d'essais pour départager deux candidates sans y passer la phase de placement.
+    const ESSAIS: usize = 40;
+
+    let simple = simplifier(grid, traps, brute);
+    let r_simple = robustesse(grid, traps, &simple.entrees, ESSAIS);
+    let r_brute = robustesse(grid, traps, &brute.entrees, ESSAIS);
+
+    if r_simple >= r_brute { simple } else { brute.clone() }
 }
 
 /// Générateur pseudo-aléatoire minuscule, à graine explicite.
@@ -534,11 +590,12 @@ impl Verificateur {
         std::thread::spawn(move || {
             let verdict = match resoudre_avec(&grid, &traps, BUDGET_PARTIE) {
                 Verdict::Franchissable(brute) => {
-                    // On mesure sur la solution SIMPLIFIÉE : c'est celle qu'on montrerait, et
-                    // la brute donne un chiffre qui ne veut rien dire d'un point de vue humain.
-                    let simple = simplifier(&grid, &traps, &brute);
+                    // On garde la version la PLUS IMITABLE, pas systématiquement la simplifiée :
+                    // sur une carte à sauts, simplifier rend le parcours plus dur (voir
+                    // `la_plus_imitable`). Le chiffre affiché est celui de la version retenue.
+                    let retenue = la_plus_imitable(&grid, &traps, &brute);
                     EtatCarte::Franchissable {
-                        robustesse: robustesse(&grid, &traps, &simple.entrees, 40),
+                        robustesse: robustesse(&grid, &traps, &retenue.entrees, 40),
                     }
                 }
                 Verdict::PasTrouve { .. } => EtatCarte::PasTrouvee,
@@ -804,10 +861,16 @@ mod tests {
             "couloir plat — brute : {} changements, robustesse {:.2} | simplifiee : {} changements, robustesse {:.2}",
             brute.changements(), r_brute, simple.changements(), r_simple
         );
+        // ⚠ On n'exige plus que la simplification AMELIORE. Depuis que le prix du changement est
+        // dans la recherche, celle-ci rend deja des parcours propres — sur un couloir plat, un
+        // seul changement et 100 % de robustesse la ou elle en donnait quinze et 10 %. La
+        // simplification devient un filet, pas le remede : ce qu'on lui demande, c'est de ne
+        // jamais DEGRADER ce qui arrive deja bon.
         assert!(
-            r_simple > r_brute,
-            "la solution simplifiee doit mieux pardonner : {r_brute:.2} -> {r_simple:.2}"
+            r_simple >= r_brute,
+            "la simplification ne doit jamais degrader : {r_brute:.2} -> {r_simple:.2}"
         );
+        assert!(r_simple > 0.9, "un couloir plat doit etre presque toujours refaisable");
     }
 
     /// MESURE — ce que coûte le solveur sur la carte RÉELLE du jeu.
@@ -824,10 +887,49 @@ mod tests {
         let depart = std::time::Instant::now();
         let verdict = resoudre(&grid, BUDGET_PARTIE);
         let duree = depart.elapsed();
-        println!("carte reelle {}x{} — {:?} en {:.2} s",
-                 grid.width, grid.height,
-                 match &verdict { Verdict::Franchissable(s) => format!("FRANCHISSABLE en {} images", s.entrees.len()),
-                                  Verdict::PasTrouve { explores } => format!("PAS TROUVE ({explores} etats)") },
-                 duree.as_secs_f32());
+        let traps = TrapManager::new();
+        let detail = match &verdict {
+            Verdict::Franchissable(brute) => {
+                let simple = simplifier(&grid, &traps, brute);
+                let retenue = la_plus_imitable(&grid, &traps, brute);
+                format!(
+                    "FRANCHISSABLE | brute {} chgts {:.2} | simplifiee {} chgts {:.2} | RETENUE {} chgts {:.2}",
+                    brute.changements(),
+                    robustesse(&grid, &traps, &brute.entrees, 40),
+                    simple.changements(),
+                    robustesse(&grid, &traps, &simple.entrees, 40),
+                    retenue.changements(),
+                    robustesse(&grid, &traps, &retenue.entrees, 40),
+                )
+            }
+            Verdict::PasTrouve { explores } => format!("PAS TROUVE ({explores} etats)"),
+        };
+        println!("carte reelle {}x{} — {detail} en {:.2} s", grid.width, grid.height, duree.as_secs_f32());
+    }
+
+    /// Le choix ne doit JAMAIS rendre une version moins imitable que la brute — c'est tout ce
+    /// qu'on lui demande, et c'est exactement ce que la simplification seule ne garantissait pas.
+    #[test]
+    fn on_garde_la_version_la_plus_imitable_des_deux() {
+        let traps = TrapManager::new();
+        for largeur in [20usize, 24] {
+            let mut grid = couloir(largeur);
+            if largeur == 24 {
+                grid.set_tile(11, 0, crate::grid::TileType::Air);
+                grid.set_tile(12, 0, crate::grid::TileType::Air);
+            }
+            let Verdict::Franchissable(brute) = resoudre(&grid, 400_000) else {
+                panic!("carte {largeur} franchissable")
+            };
+            let retenue = la_plus_imitable(&grid, &traps, &brute);
+
+            assert!(rejouer(&grid, &traps, &retenue.entrees), "la retenue doit arriver");
+            let r_brute = robustesse(&grid, &traps, &brute.entrees, 40);
+            let r_retenue = robustesse(&grid, &traps, &retenue.entrees, 40);
+            assert!(
+                r_retenue >= r_brute,
+                "carte {largeur} : la retenue ({r_retenue:.2}) ne doit jamais etre pire que la brute ({r_brute:.2})"
+            );
+        }
     }
 }
