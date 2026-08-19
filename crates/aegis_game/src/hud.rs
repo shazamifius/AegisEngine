@@ -22,6 +22,20 @@
 //! Un repère en fractions de largeur ET de hauteur (le réflexe le plus courant) aurait au
 //! contraire écrasé chaque lettre dès qu'on change de résolution.
 //!
+//! # ⚠ Le sens de l'axe Y — mesuré à l'écran, pas déduit
+//!
+//! Vulkan place l'origine du volume de projection **en haut** et fait descendre `y`. Ce moteur
+//! ne suit pas cette convention, et rien dans son code ne le dit : ses shaders sont écrits en
+//! WGSL et compilés par `naga`, dont les options par défaut portent `ADJUST_COORDINATE_SPACE`.
+//! Le SPIR-V produit **retourne l'axe Y**, si bien que la convention réellement en vigueur est
+//! celle de WGSL — `y` vers le HAUT.
+//!
+//! Cette page a d'abord été écrite dans l'autre sens, et le HUD est sorti à l'envers, en bas de
+//! l'écran. **Les tests unitaires ne pouvaient pas l'attraper** : ils vérifiaient que le calcul
+//! était cohérent avec la convention qu'on lui avait donnée, pas que cette convention était la
+//! bonne. Seule une capture d'écran l'a dit — `aegis_game --screenshot <fichier>.png`, à lancer
+//! depuis le `nix-shell` du dépôt.
+//!
 //! # La profondeur
 //!
 //! Les couches vont de 0 (le fond du HUD) à 9 (le dessus). Toutes se situent entre 0,001 et 0,01
@@ -67,7 +81,9 @@ pub fn matrice_quad(aspect: f32, x: f32, y: f32, largeur: f32, hauteur: f32, cou
     // Le pavé de base est centré sur l'origine et mesure 1 : on vise donc son CENTRE, et une
     // taille de 2,0 couvre l'écran entier (de -1 à +1 en coordonnées de projection).
     let centre_x = ((x + largeur * 0.5) / aspect) * 2.0 - 1.0;
-    let centre_y = (y + hauteur * 0.5) * 2.0 - 1.0;
+    // ⚠ Le `1.0 -` n'est pas décoratif : dans ce moteur, l'axe Y du volume de projection pointe
+    // vers le HAUT, à l'inverse de la convention Vulkan habituelle. Voir la note ci-dessous.
+    let centre_y = 1.0 - (y + hauteur * 0.5) * 2.0;
 
     Mat4::from_translation(Vec3::new(centre_x, centre_y, profondeur(couche)))
         * Mat4::from_scale(Vec3::new(
@@ -505,28 +521,33 @@ mod tests {
         let aspect = 16.0 / 9.0;
         let m = matrice_quad(aspect, 0.0, 0.0, aspect, 1.0, 0);
 
-        let (gauche, haut) = projete(m, -0.5, -0.5);
-        let (droite, bas) = projete(m, 0.5, 0.5);
+        // Le coin local (-0.5, -0.5) du pave tombe en BAS a gauche : `y` monte, dans ce moteur.
+        let (gauche, bas) = projete(m, -0.5, -0.5);
+        let (droite, haut) = projete(m, 0.5, 0.5);
 
         assert!((gauche - -1.0).abs() < 1e-5, "bord gauche: {gauche}");
         assert!((droite - 1.0).abs() < 1e-5, "bord droit: {droite}");
-        assert!((haut - -1.0).abs() < 1e-5, "bord haut: {haut}");
-        assert!((bas - 1.0).abs() < 1e-5, "bord bas: {bas}");
+        assert!((haut - 1.0).abs() < 1e-5, "bord haut: {haut}");
+        assert!((bas - -1.0).abs() < 1e-5, "bord bas: {bas}");
     }
 
     #[test]
     fn l_origine_est_en_haut_a_gauche_et_y_descend() {
-        // Un petit carré posé au coin haut-gauche doit rester dans le quart haut-gauche.
+        // ⚠ Ce test a longtemps affirme l'INVERSE, et il passait : il verifiait que le calcul
+        // etait cohérent avec la convention qu'on lui avait donnée, pas que cette convention
+        // etait celle du moteur. Le HUD sortait a l'envers et aucun test ne bronchait. Les
+        // valeurs ci-dessous viennent d'une capture d'ecran reelle — voir la note en tete de
+        // module sur `ADJUST_COORDINATE_SPACE`.
         let m = matrice_quad(16.0 / 9.0, 0.0, 0.0, 0.05, 0.05, 0);
         let (x, y) = projete(m, 0.0, 0.0);
         assert!(x < -0.9, "devrait coller au bord gauche, vaut {x}");
-        assert!(y < -0.9, "devrait coller au bord HAUT, vaut {y}");
+        assert!(y > 0.9, "devrait coller au bord HAUT (y positif ici), vaut {y}");
 
-        // Et le même carré posé en bas doit partir vers le bas : c'est le sens de `y` qui est
-        // en jeu, et l'inverser est l'erreur la plus facile à commettre ici.
+        // Et le meme carre pose en bas doit partir vers le bas : c'est le sens de `y` qui est en
+        // jeu, et l'inverser est l'erreur la plus facile a commettre ici — elle a ete commise.
         let bas = matrice_quad(16.0 / 9.0, 0.0, 0.95, 0.05, 0.05, 0);
         let (_, y_bas) = projete(bas, 0.0, 0.0);
-        assert!(y_bas > 0.9, "devrait coller au bord BAS, vaut {y_bas}");
+        assert!(y_bas < -0.9, "devrait coller au bord BAS, vaut {y_bas}");
     }
 
     #[test]
