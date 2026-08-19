@@ -9,6 +9,7 @@ mod mystery_box;
 mod party_game;
 mod party_render_pass;
 mod hud;
+mod tas;
 mod objects;
 mod nav_client;
 mod sidecar_client;
