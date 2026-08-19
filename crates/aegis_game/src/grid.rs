@@ -207,6 +207,7 @@ fn cible_ecriture(lu: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+#[derive(Clone)]
 pub struct TileGrid {
     pub width: usize,
     pub height: usize,

@@ -54,6 +54,10 @@ struct AegisApp {
     /// Le pont vers le cœur réseau web3 : on y pousse notre position, on en lit celle des autres.
     /// Inerte si le cœur ne tourne pas — le jeu reste alors exactement le jeu solo.
     sidecar: SidecarClient,
+    /// Le solveur, qui vérifie en tâche de fond que la carte piégée reste franchissable.
+    verificateur: tas::Verificateur,
+    /// La phase du tour précédent, pour ne lancer la vérification qu'aux transitions.
+    phase_precedente: party_game::GamePhase,
 }
 
 impl AegisApp {
@@ -76,6 +80,8 @@ impl AegisApp {
             // continu de son côté, il n'attend rien de nous — mais s'il est là, autant que la
             // première position poussée soit la toute première du jeu.
             sidecar: SidecarClient::connecter(),
+            verificateur: tas::Verificateur::nouveau(),
+            phase_precedente: party_game::GamePhase::Drafting,
         }
     }
 
@@ -221,6 +227,21 @@ impl AegisApp {
             self.sidecar.pousser_ma_pose(moi.x, moi.y, 0.0, 0.0, 0.0);
         }
 
+        // La carte vient d'être piégée : on demande au solveur si elle reste franchissable.
+        // C'est au début de la COURSE qu'on le fait, pour que le verdict soit là si personne
+        // n'arrive — et qu'on sache alors si c'était la carte ou les joueurs.
+        let phase = self.party_game.phase;
+        if phase != self.phase_precedente {
+            match phase {
+                party_game::GamePhase::Running => self
+                    .verificateur
+                    .lancer(&self.party_game.grid, &self.party_game.traps),
+                party_game::GamePhase::Drafting => self.verificateur.oublier(),
+                _ => {}
+            }
+            self.phase_precedente = phase;
+        }
+
         let distants = self.sidecar.avatars();
         let (envoyes, recus, avatars) = self.sidecar.compteurs();
         let etat_pont = hud::EtatPont {
@@ -232,7 +253,17 @@ impl AegisApp {
 
         match engine.gpu.begin_frame(window) {
             Ok((cmd, image_index)) => {
-                party_render_pass.render_party_scene(&engine.gpu, cmd, image_index, &self.party_game, &etat_pont, &distants);
+                party_render_pass.render_party_scene(
+                    &engine.gpu,
+                    cmd,
+                    image_index,
+                    &self.party_game,
+                    &party_render_pass::Exterieur {
+                        pont: &etat_pont,
+                        distants: &distants,
+                        carte: self.verificateur.etat(),
+                    },
+                );
                 if engine.gpu.end_frame(cmd, image_index, window).is_err() {
                     let size = window.inner_size();
                     if size.width > 0 && size.height > 0 {

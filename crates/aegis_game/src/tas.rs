@@ -213,7 +213,20 @@ pub fn resoudre_avec(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Ver
     // justifie de payer l'optimalité en temps, et la payer empêchait de trouver quoi que ce soit.
     //
     // Le poids pousse la recherche vers l'arrivée plutôt que de ratisser autour du départ.
-    const POIDS: f32 = 4.0;
+    //
+    // ⚠ **Sa valeur n'est pas un réglage de confort, elle décide si le solveur aboutit.**
+    // Mesuré sur la carte réelle du jeu (58 × 28) :
+    //     poids  4 → PAS TROUVÉ, 600 000 états, 6,3 s
+    //     poids 12 → PAS TROUVÉ, 600 000 états, 6,5 s
+    //     poids 30 → FRANCHISSABLE en 370 images, trouvé en **0,27 s**
+    // Le passage n'est pas graduel : c'est « jamais » puis « tout de suite ».
+    //
+    // ⚠ Le revers, à connaître : plus le poids est fort, plus la recherche devient gloutonne et
+    // rechigne à s'éloigner de l'arrivée. Une carte qui demanderait de RECULER longuement pour
+    // contourner un obstacle pourrait lui échapper — elle rendrait alors `PasTrouve`, jamais une
+    // fausse solution. C'est le bon sens de l'erreur, mais c'est la limite à surveiller le jour
+    // où une carte tordue passera pour bouchée.
+    const POIDS: f32 = 30.0;
     /// Vitesse de course réelle du personnage, mesurée : 8,5 unités par seconde.
     const VITESSE: f32 = 8.5;
     let estimer = |p: Vec2| -> u32 {
@@ -448,6 +461,96 @@ fn brouiller(entrees: &[Manette], des: &mut Des) -> Vec<Manette> {
         }
     }
     sortie
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//  La vérification de carte, en tâche de fond
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Combien d'états le vérificateur s'autorise sur une carte de partie.
+///
+/// Assez pour franchir un parcours normal avec ses pièges ; assez peu pour rendre un verdict
+/// avant la fin de la phase de placement. Un budget qui déborderait ne rendrait pas un
+/// « impossible » — il rendrait un [`Verdict::PasTrouve`], qu'on n'a pas le droit de confondre.
+pub const BUDGET_PARTIE: usize = 600_000;
+
+/// Ce que le jeu sait de la franchissabilité de sa carte.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum EtatCarte {
+    /// Personne n'a encore posé la question.
+    Inconnue,
+    /// La recherche tourne.
+    EnCours,
+    /// Un parcours existe. `robustesse` dit à quel point il pardonne l'imprécision (0 à 1).
+    Franchissable { robustesse: f32 },
+    /// Rien trouvé dans le budget. ⚠ **Pas la même chose qu'« impossible »** : c'est ce doute
+    /// qui doit déclencher un vote humain, pas un retrait automatique de blocs.
+    PasTrouvee,
+}
+
+/// Vérifie en tâche de fond qu'une carte reste franchissable.
+///
+/// La recherche peut prendre une seconde entière : la lancer dans la boucle de rendu figerait
+/// l'image, et un jeu qui se fige pendant que trente-cinq personnes posent leurs pièges serait
+/// pire que pas de vérification du tout. Elle part donc dans un fil, et l'écran lit le résultat
+/// quand il arrive.
+pub struct Verificateur {
+    etat: std::sync::Arc<std::sync::Mutex<EtatCarte>>,
+}
+
+impl Default for Verificateur {
+    fn default() -> Self {
+        Self::nouveau()
+    }
+}
+
+impl Verificateur {
+    pub fn nouveau() -> Verificateur {
+        Verificateur {
+            etat: std::sync::Arc::new(std::sync::Mutex::new(EtatCarte::Inconnue)),
+        }
+    }
+
+    /// Ce qu'on sait pour l'instant.
+    pub fn etat(&self) -> EtatCarte {
+        *self.etat.lock().unwrap()
+    }
+
+    /// Lance une vérification. Sans effet si une autre est déjà en cours — une carte ne se
+    /// vérifie qu'une fois par manche, et empiler des fils sur chaque bloc posé n'apporterait rien.
+    pub fn lancer(&self, grid: &TileGrid, traps: &TrapManager) {
+        {
+            let mut etat = self.etat.lock().unwrap();
+            if *etat == EtatCarte::EnCours {
+                return;
+            }
+            *etat = EtatCarte::EnCours;
+        }
+
+        let grid = grid.clone();
+        let traps = traps.clone();
+        let partage = std::sync::Arc::clone(&self.etat);
+
+        std::thread::spawn(move || {
+            let verdict = match resoudre_avec(&grid, &traps, BUDGET_PARTIE) {
+                Verdict::Franchissable(brute) => {
+                    // On mesure sur la solution SIMPLIFIÉE : c'est celle qu'on montrerait, et
+                    // la brute donne un chiffre qui ne veut rien dire d'un point de vue humain.
+                    let simple = simplifier(&grid, &traps, &brute);
+                    EtatCarte::Franchissable {
+                        robustesse: robustesse(&grid, &traps, &simple.entrees, 40),
+                    }
+                }
+                Verdict::PasTrouve { .. } => EtatCarte::PasTrouvee,
+            };
+            *partage.lock().unwrap() = verdict;
+        });
+    }
+
+    /// Remet à zéro, pour la manche suivante.
+    pub fn oublier(&self) {
+        *self.etat.lock().unwrap() = EtatCarte::Inconnue;
+    }
 }
 
 #[cfg(test)]
@@ -705,5 +808,26 @@ mod tests {
             r_simple > r_brute,
             "la solution simplifiee doit mieux pardonner : {r_brute:.2} -> {r_simple:.2}"
         );
+    }
+
+    /// MESURE — ce que coûte le solveur sur la carte RÉELLE du jeu.
+    ///
+    /// `#[ignore]` volontairement : `TileGrid::new` charge la carte du joueur si elle existe, donc
+    /// ce test dépend de ce qui est installé sur la machine. En faire une garantie le rendrait
+    /// instable, et un test instable finit par être ignoré pour de mauvaises raisons. Il reste
+    /// là pour être lancé à la main :
+    /// `cargo test --release mesure_sur_la_carte -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn mesure_sur_la_carte_reelle() {
+        let grid = TileGrid::new(48, 24);
+        let depart = std::time::Instant::now();
+        let verdict = resoudre(&grid, BUDGET_PARTIE);
+        let duree = depart.elapsed();
+        println!("carte reelle {}x{} — {:?} en {:.2} s",
+                 grid.width, grid.height,
+                 match &verdict { Verdict::Franchissable(s) => format!("FRANCHISSABLE en {} images", s.entrees.len()),
+                                  Verdict::PasTrouve { explores } => format!("PAS TROUVE ({explores} etats)") },
+                 duree.as_secs_f32());
     }
 }

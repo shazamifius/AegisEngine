@@ -98,6 +98,20 @@ impl GpuMesh {
     }
 }
 
+/// Ce que le monde **extérieur** apporte au rendu, en plus du jeu lui-même.
+///
+/// Les trois voyagent ensemble et grandiront ensemble. Les regrouper n'est pas du rangement :
+/// sans ça, la liste d'arguments de `render_party_scene` s'allonge d'un cran chaque fois que le
+/// jeu apprend quelque chose du dehors — et elle en était déjà à huit.
+pub struct Exterieur<'a> {
+    /// L'état du pont réseau, pour le témoin du HUD.
+    pub pont: &'a crate::hud::EtatPont,
+    /// Les joueurs distants, déjà validés par le cœur.
+    pub distants: &'a [crate::sidecar_client::Avatar],
+    /// Ce que le solveur pense de la franchissabilité de la carte.
+    pub carte: crate::tas::EtatCarte,
+}
+
 pub struct PartyRenderPass {
     bg_pipeline: vk::Pipeline,
     bg_pipeline_layout: vk::PipelineLayout,
@@ -285,7 +299,7 @@ impl PartyRenderPass {
         })
     }
 
-    pub fn render_party_scene(&mut self, context: &GpuContext, cmd: vk::CommandBuffer, image_index: usize, game: &PartyGame, etat_pont: &crate::hud::EtatPont, distants: &[crate::sidecar_client::Avatar]) {
+    pub fn render_party_scene(&mut self, context: &GpuContext, cmd: vk::CommandBuffer, image_index: usize, game: &PartyGame, exterieur: &Exterieur) {
         let view = context.swapchain_image_views[image_index];
         let image = context.swapchain_images[image_index];
 
@@ -952,7 +966,7 @@ impl PartyRenderPass {
             // Volontairement plus sobre que le personnage local (un corps, une tête, pas de
             // bonnet ni de visière) : ce qu'il faut lire d'un adversaire à distance, c'est OÙ il
             // est et QUI il est, pas le détail de sa tenue.
-            for distant in distants {
+            for distant in exterieur.distants {
                 let base = Vec3::new(distant.x, distant.y, 0.0);
                 let teinte = Vec4::new(distant.r, distant.g, distant.b, 1.0);
 
@@ -1038,7 +1052,8 @@ impl PartyRenderPass {
                         aspect,
                     },
                     game,
-                    etat_pont,
+                    exterieur.pont,
+                    exterieur.carte,
                 );
             }
 

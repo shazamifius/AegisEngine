@@ -405,15 +405,52 @@ unsafe fn pont(p: &Pinceau, etat: &EtatPont) {
     }
 }
 
+/// Ce que le solveur pense de la carte, en bas à droite.
+///
+/// Le libellé du doute est délibérément « PASSAGE DOUTEUX » et non « impossible » : le solveur
+/// n'a pas trouvé dans son budget, ce qui n'est pas la même chose. Afficher « impossible »
+/// ferait retirer des blocs parfaitement franchissables sur la foi d'une recherche trop courte —
+/// et devant une classe, un mot faux à l'écran ne se rattrape pas.
+unsafe fn verdict_carte(p: &Pinceau, carte: crate::tas::EtatCarte) {
+    use crate::tas::EtatCarte;
+
+    let (texte, teinte) = match carte {
+        EtatCarte::Inconnue => return,
+        EtatCarte::EnCours => ("CARTE : VERIFICATION".to_string(), couleurs::TEXTE_FAIBLE),
+        EtatCarte::Franchissable { robustesse } => (
+            format!("CARTE OK {}%", (robustesse * 100.0).round() as i32),
+            couleurs::TEXTE_FAIBLE,
+        ),
+        EtatCarte::PasTrouvee => ("PASSAGE DOUTEUX".to_string(), couleurs::URGENCE),
+    };
+
+    let h = 0.022;
+    let marge = 0.014;
+    let largeur = largeur_texte(&texte, h) + marge * 2.0;
+    let y = 1.0 - h - marge * 2.0;
+    let x = p.aspect - largeur - marge;
+
+    unsafe {
+        p.quad(x, y - marge * 0.6, largeur, h + marge * 1.2, couleurs::FOND, 1);
+        p.texte(x + marge, y, h, teinte, 2, &texte);
+    }
+}
+
 /// Tout le HUD, dans l'ordre où il se superpose.
 ///
 /// # Sécurité
 /// Le pinceau doit porter un tampon de commandes en cours d'enregistrement, dans une passe de
 /// rendu où le pipeline principal est lié.
-pub unsafe fn dessiner(p: &Pinceau, game: &PartyGame, etat_pont: &EtatPont) {
+pub unsafe fn dessiner(
+    p: &Pinceau,
+    game: &PartyGame,
+    etat_pont: &EtatPont,
+    carte: crate::tas::EtatCarte,
+) {
     unsafe {
         minuteur(p, game);
         pont(p, etat_pont);
+        verdict_carte(p, carte);
         if game.phase == crate::party_game::GamePhase::Leaderboard {
             leaderboard(p, game);
         }

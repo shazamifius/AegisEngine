@@ -74,6 +74,7 @@ pub struct Projectile {
     pub owner_id: u32,
 }
 
+#[derive(Clone)]
 pub struct TrapManager {
     pub traps: Vec<TrapInstance>,
     pub projectiles: Vec<Projectile>,
