@@ -84,7 +84,13 @@ pub struct Avatar {
 
 /// Ce que le fil lecteur publie et que la boucle de rendu consulte.
 struct Partage {
-    avatars: Mutex<Vec<Avatar>>,
+    /// Les avatars du dernier instantané, **et l'instant où il est arrivé**.
+    ///
+    /// L'horodatage n'est pas un détail : les instantanés arrivent à 20 Hz alors que le jeu
+    /// dessine bien plus souvent. Sans lui, chaque avatar resterait figé puis sauterait d'un
+    /// coup — le contrat est explicite là-dessus, *le ressenti du mouvement se fabrique ici*,
+    /// pas sur le réseau.
+    avatars: Mutex<(Vec<Avatar>, Instant)>,
     /// Notre propre identité, telle que le cœur nous l'annonce au `WELCOME`.
     ///
     /// La couleur de skin arrive dans le même message ; elle n'est pas retenue ici parce que
@@ -122,7 +128,7 @@ impl SidecarClient {
     /// l'un l'autre au hasard, et un test instable est pire qu'un test absent.
     fn connecter_a(adresse: &str) -> Self {
         let partage = Arc::new(Partage {
-            avatars: Mutex::new(Vec::new()),
+            avatars: Mutex::new((Vec::new(), Instant::now())),
             moi: Mutex::new(None),
             envoyes: AtomicU64::new(0),
             recus: AtomicU64::new(0),
@@ -197,9 +203,31 @@ impl SidecarClient {
         }
     }
 
-    /// Les joueurs distants, tels que le cœur les a validés au dernier instantané.
+    /// Les joueurs distants, **avancés jusqu'à maintenant** avec la vitesse que porte chacun.
+    ///
+    /// C'est l'extrapolation que demande le contrat : entre deux instantanés (50 ms), un avatar
+    /// continue sur sa lancée plutôt que d'attendre, immobile, la prochaine nouvelle. On borne
+    /// l'avance : au-delà, un joueur dont on n'a plus de nouvelles partirait tout droit à
+    /// l'infini, ce qui est pire qu'un avatar arrêté.
     pub fn avatars(&self) -> Vec<Avatar> {
-        self.partage.avatars.lock().map(|a| a.clone()).unwrap_or_default()
+        /// Au-delà, on cesse d'inventer : mieux vaut un avatar figé qu'un avatar parti au loin.
+        const AVANCE_MAX: f32 = 0.25;
+
+        let Ok(garde) = self.partage.avatars.lock() else {
+            return Vec::new();
+        };
+        let (liste, recu_a) = &*garde;
+        let dt = recu_a.elapsed().as_secs_f32().min(AVANCE_MAX);
+
+        liste
+            .iter()
+            .map(|a| Avatar {
+                x: a.x + a.vx * dt,
+                y: a.y + a.vy * dt,
+                z: a.z + a.vz * dt,
+                ..*a
+            })
+            .collect()
     }
 
     /// `(poses envoyées, instantanés reçus, avatars au dernier instantané)`.
@@ -211,7 +239,7 @@ impl SidecarClient {
         (
             self.partage.envoyes.load(Ordering::Relaxed),
             self.partage.recus.load(Ordering::Relaxed),
-            self.partage.avatars.lock().map(|a| a.len()).unwrap_or(0),
+            self.partage.avatars.lock().map(|a| a.0.len()).unwrap_or(0),
         )
     }
 
@@ -282,7 +310,7 @@ fn ecouter_le_coeur(mut flux: TcpStream, partage: Arc<Partage>) {
             SNAPSHOT => {
                 let avatars = decoder_snapshot(&corps[1..]);
                 if let Ok(mut a) = partage.avatars.lock() {
-                    *a = avatars;
+                    *a = (avatars, Instant::now());
                 }
                 partage.recus.fetch_add(1, Ordering::Relaxed);
             }

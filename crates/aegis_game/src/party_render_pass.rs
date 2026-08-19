@@ -285,7 +285,7 @@ impl PartyRenderPass {
         })
     }
 
-    pub fn render_party_scene(&mut self, context: &GpuContext, cmd: vk::CommandBuffer, image_index: usize, game: &PartyGame, etat_pont: &crate::hud::EtatPont) {
+    pub fn render_party_scene(&mut self, context: &GpuContext, cmd: vk::CommandBuffer, image_index: usize, game: &PartyGame, etat_pont: &crate::hud::EtatPont, distants: &[crate::sidecar_client::Avatar]) {
         let view = context.swapchain_image_views[image_index];
         let image = context.swapchain_images[image_index];
 
@@ -942,6 +942,50 @@ impl PartyRenderPass {
             // centre de la carte, et la caméra ne s'y rendait jamais — elle reste sur le joueur
             // qui vient de mourir. Il est passé sur le calque d'écran (`leaderboard_hud`), le
             // seul endroit d'où une interface est visible sans dépendre d'où l'on est tombé.
+
+            // ─── LES JOUEURS DISTANTS, tels que le cœur nous les donne ──────────────────
+            //
+            // Ce ne sont pas des joueurs simulés : chaque pose est arrivée par le vrai protocole
+            // P2P, signée et déjà validée par le cœur. Le jeu ne peut pas en inventer un — il ne
+            // fait que dessiner ce qu'on lui remet.
+            //
+            // Volontairement plus sobre que le personnage local (un corps, une tête, pas de
+            // bonnet ni de visière) : ce qu'il faut lire d'un adversaire à distance, c'est OÙ il
+            // est et QUI il est, pas le détail de sa tenue.
+            for distant in distants {
+                let base = Vec3::new(distant.x, distant.y, 0.0);
+                let teinte = Vec4::new(distant.r, distant.g, distant.b, 1.0);
+
+                let corps = Mat4::from_translation(base + Vec3::new(0.0, 0.45, 0.0))
+                    * Mat4::from_rotation_z(distant.yaw)
+                    * Mat4::from_scale(Vec3::new(0.62, 0.90, 0.62));
+                let push_corps = PartyPushConstants {
+                    mvp_matrix: vp * corps,
+                    model_matrix: corps,
+                    color_tint: teinte,
+                    params: Vec4::new(0.2, 0.0, 0.0, 0.0),
+                };
+                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_corps));
+                self.cube_mesh.draw(&context.device, cmd);
+
+                let tete = Mat4::from_translation(base + Vec3::new(0.0, 1.12, 0.0))
+                    * Mat4::from_scale(Vec3::new(0.52, 0.46, 0.52));
+                let push_tete = PartyPushConstants {
+                    mvp_matrix: vp * tete,
+                    model_matrix: tete,
+                    // Un ton plus clair que le corps : la tête se détache sans changer la
+                    // couleur qui identifie le joueur.
+                    color_tint: Vec4::new(
+                        (distant.r + 0.35).min(1.0),
+                        (distant.g + 0.35).min(1.0),
+                        (distant.b + 0.35).min(1.0),
+                        1.0,
+                    ),
+                    params: Vec4::new(0.2, 0.0, 0.0, 0.0),
+                };
+                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_tete));
+                self.cube_mesh.draw(&context.device, cmd);
+            }
 
             // Les particules du JEU (par opposition à celles de chaque joueur, dessinées plus
             // haut). `PartyGame::particles` était avancé à chaque image depuis toujours et

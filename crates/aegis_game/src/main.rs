@@ -208,6 +208,7 @@ impl AegisApp {
         let moi = self.party_game.human_player().position;
         self.sidecar.pousser_ma_pose(moi.x, moi.y, 0.0, 0.0, 0.0);
 
+        let distants = self.sidecar.avatars();
         let (envoyes, recus, avatars) = self.sidecar.compteurs();
         let etat_pont = hud::EtatPont {
             relie: self.sidecar.relie(),
@@ -218,7 +219,7 @@ impl AegisApp {
 
         match engine.gpu.begin_frame(window) {
             Ok((cmd, image_index)) => {
-                party_render_pass.render_party_scene(&engine.gpu, cmd, image_index, &self.party_game, &etat_pont);
+                party_render_pass.render_party_scene(&engine.gpu, cmd, image_index, &self.party_game, &etat_pont, &distants);
                 if engine.gpu.end_frame(cmd, image_index, window).is_err() {
                     let size = window.inner_size();
                     if size.width > 0 && size.height > 0 {
