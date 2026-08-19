@@ -16,6 +16,12 @@ pub const DUREE_PLACEMENT: f32 = 30.0;
 pub const DUREE_COURSE: f32 = 150.0;
 pub const DUREE_LEADERBOARD: f32 = 10.0;
 
+/// Points à atteindre pour remporter le match.
+///
+/// Ce nombre était écrit en dur au milieu du calcul des scores, où personne ne pouvait le
+/// trouver — alors que c'est LE réglage qui décide de la durée d'une partie.
+pub const SEUIL_VICTOIRE: f32 = 30.0;
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GamePhase {
@@ -312,12 +318,43 @@ impl PartyGame {
             }
         }
 
-        // 4. Recalcul des Scores Totaux et vérification de la victoire (30 points)
+        // 4. Recalcul des scores totaux, puis le titre du match.
         for p in &mut self.players {
             p.recalculate_score();
-            if p.total_score >= 30.0 && self.match_winner.is_none() {
-                self.match_winner = Some(p.name.clone());
+        }
+        self.verifier_le_titre();
+    }
+
+    /// Le titre du match revient à qui atteint le seuil — **à condition d'être seul en tête**.
+    ///
+    /// Deux gardes, et chacune répare ou prévient quelque chose de précis :
+    ///
+    /// * **le meilleur, pas le premier de la liste.** Le code posait le titre sur le premier
+    ///   joueur *rencontré* au-dessus du seuil, dans l'ordre du tableau. Deux joueurs franchissant
+    ///   les 30 points la même manche donnaient donc le titre au mieux placé dans un `Vec` — pas
+    ///   à celui qui avait le plus de points. Sur trente-cinq joueurs, ce n'est pas un cas d'école.
+    /// * **seul en tête.** À égalité parfaite au sommet, personne ne gagne et la partie continue.
+    ///   Départager par un numéro interne serait un podium tiré au sort ; et ce jeu récompense
+    ///   précisément le fait d'être *le seul* à réussir — le trancher à pile ou face le
+    ///   contredirait au moment exact où ça compte le plus.
+    fn verifier_le_titre(&mut self) {
+        if self.match_winner.is_some() {
+            return; // un titre décerné ne se reprend pas
+        }
+        let gagnant = {
+            let ordre = self.classement();
+            match ordre.first() {
+                Some(tete) if tete.total_score >= SEUIL_VICTOIRE => {
+                    let ex_aequo = ordre
+                        .get(1)
+                        .is_some_and(|second| second.total_score >= tete.total_score);
+                    if ex_aequo { None } else { Some(tete.name.clone()) }
+                }
+                _ => None,
             }
+        };
+        if gagnant.is_some() {
+            self.match_winner = gagnant;
         }
     }
 
@@ -962,5 +999,119 @@ mod tests {
                 "{phase:?} : « {intitule} » occupe {largeur:.3} de hauteur d'ecran, il deborderait d'un ecran carre"
             );
         }
+    }
+
+    #[test]
+    fn le_vainqueur_du_match_est_CELUI_QUI_A_LE_PLUS_DE_POINTS() {
+        // Deux joueurs franchissent les 30 points la MEME manche. Le titre doit revenir a celui
+        // qui en a le plus — pas a celui qui se trouve en premier dans le tableau.
+        let mut game = PartyGame::new(40, 22);
+        game.players.clear();
+        for (id, nom) in ["PREMIER-DE-LA-LISTE", "MEILLEUR"].into_iter().enumerate() {
+            game.players.push(PlayerSession::new(id as u32, nom, Vec2::ZERO, id == 0));
+        }
+        game.players[0].win_points = 31.0;
+        game.players[1].win_points = 45.0;
+
+        game.evaluate_round_scores();
+
+        assert_eq!(
+            game.match_winner.as_deref(),
+            Some("MEILLEUR"),
+            "le titre doit revenir au plus haut score, pas au premier de la liste"
+        );
+    }
+
+    #[test]
+    fn a_egalite_parfaite_au_sommet_personne_ne_gagne_encore() {
+        // Deux joueurs a 40 points : departager par un numero interne serait un podium tire au
+        // sort. La partie continue, et la manche suivante tranchera.
+        let mut game = PartyGame::new(40, 22);
+        game.players.clear();
+        for (id, nom) in ["A", "B", "C"].into_iter().enumerate() {
+            game.players.push(PlayerSession::new(id as u32, nom, Vec2::ZERO, id == 0));
+        }
+        game.players[0].win_points = 40.0;
+        game.players[1].win_points = 40.0;
+        game.players[2].win_points = 12.0;
+
+        game.evaluate_round_scores();
+        assert_eq!(game.match_winner, None, "ex aequo au sommet : pas de titre");
+
+        // B prend un point d'avance : le titre lui revient.
+        game.players[1].win_points += 1.0;
+        game.evaluate_round_scores();
+        assert_eq!(game.match_winner.as_deref(), Some("B"));
+    }
+
+    /// Prepare une manche : remet les etats a zero, puis fait franchir la ligne aux joueurs
+    /// designes (dans l'ordre donne) et fait mourir tous les autres.
+    fn manche(game: &mut PartyGame, arrivants: &[usize]) {
+        for p in game.players.iter_mut() {
+            p.has_finished = false;
+            p.finish_rank = None;
+            p.is_dead = true; // par defaut on meurt ; les arrivants sont corriges juste apres
+            p.killed_by_owner_id = None;
+        }
+        for (rang, &i) in arrivants.iter().enumerate() {
+            game.players[i].has_finished = true;
+            game.players[i].finish_rank = Some(rang + 1);
+            game.players[i].is_dead = false;
+        }
+        game.evaluate_round_scores();
+    }
+
+    /// **L'emulation d'une partie complete** : le bareme manche apres manche, le cumul, et le
+    /// podium. C'est ce qu'aucun test ne couvrait — ils verifiaient UNE manche isolee, jamais
+    /// l'enchainement, alors que c'est le cumul qui decide de qui gagne devant la classe.
+    #[test]
+    fn une_partie_entiere_va_jusqu_au_podium_et_le_bareme_tient_manche_apres_manche() {
+        let mut game = PartyGame::new(40, 22);
+        game.players.clear();
+        for (id, nom) in ["MOI", "LEO", "MARIE", "PAUL", "ANAIS", "HUGO"].into_iter().enumerate() {
+            game.players.push(PlayerSession::new(id as u32, nom, Vec2::ZERO, id == 0));
+        }
+
+        // Manche 1 — MOI seul a franchir la ligne : +4, et personne d'autre ne marque.
+        manche(&mut game, &[0]);
+        assert_eq!(game.players[0].total_score, 4.0, "seul rescape = 4 points");
+        assert_eq!(game.players[1].total_score, 0.0, "les morts ne marquent pas");
+
+        // Manche 2 — MOI premier, LEO second : +3 et +1 (2 arrivants sur 6 = 33 %, ca paie).
+        manche(&mut game, &[0, 1]);
+        assert_eq!(game.players[0].total_score, 7.0, "4 + 3");
+        assert_eq!(game.players[1].total_score, 1.0);
+
+        // Manche 3 — QUATRE arrivants sur six : plus de 50 %, la manche ne paie PERSONNE.
+        let avant = (game.players[0].total_score, game.players[1].total_score);
+        manche(&mut game, &[0, 1, 2, 3]);
+        assert_eq!(
+            (game.players[0].total_score, game.players[1].total_score),
+            avant,
+            "une manche trop facile ne rapporte rien, meme au premier"
+        );
+
+        // Manche 4 — PERSONNE n'arrive : rien non plus, et c'est l'autre borne du garde-fou.
+        let avant = game.players[0].total_score;
+        manche(&mut game, &[]);
+        assert_eq!(game.players[0].total_score, avant);
+
+        // ... puis on enchaine jusqu'au titre, MOI seul a reussir a chaque fois (+4).
+        let mut manches = 4;
+        while game.match_winner.is_none() {
+            manche(&mut game, &[0]);
+            manches += 1;
+            assert!(manches < 100, "la partie ne se termine jamais : le seuil est-il atteignable ?");
+        }
+
+        assert_eq!(game.match_winner.as_deref(), Some("MOI"));
+        assert!(
+            game.players[0].total_score >= SEUIL_VICTOIRE,
+            "le vainqueur doit avoir franchi le seuil, il a {}",
+            game.players[0].total_score
+        );
+        // 7 points apres deux manches payantes, puis +4 par manche : le titre tombe a 31.
+        assert_eq!(game.players[0].total_score, 31.0);
+        assert_eq!(manches, 10, "dix manches pour aller au bout dans ce scenario");
     }
 }

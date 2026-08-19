@@ -205,8 +205,20 @@ impl AegisApp {
 
         // On pousse NOTRE position au cœur, et rien d'autre : lui seul décide ce que les autres
         // en voient. La cadence est plafonnée dans le client, l'appelant n'a pas à la connaître.
-        let moi = self.party_game.human_player().position;
-        self.sidecar.pousser_ma_pose(moi.x, moi.y, 0.0, 0.0, 0.0);
+        //
+        // ⚠ Mais SEULEMENT pendant la course, et seulement vivant. Entre les manches (choix,
+        // placement, tableau des scores) le personnage n'est nulle part, et un mort non plus.
+        // Se taire n'est pas une économie : c'est ce qui empêche le retour au point de départ de
+        // la manche suivante de ressembler à une téléportation. L'anti-triche du cœur n'accepte
+        // que 2,5 unités entre deux états à 20 Hz — un revenant était puni et son avatar effacé
+        // chez tous les autres (observé en réel le 19 août avec deux jeux côte à côte). Le
+        // silence, lui, élargit la borne d'autant, sans rien affaiblir.
+        let en_course = self.party_game.phase == party_game::GamePhase::Running;
+        let vivant = !self.party_game.players[0].is_dead;
+        if en_course && vivant {
+            let moi = self.party_game.human_player().position;
+            self.sidecar.pousser_ma_pose(moi.x, moi.y, 0.0, 0.0, 0.0);
+        }
 
         let distants = self.sidecar.avatars();
         let (envoyes, recus, avatars) = self.sidecar.compteurs();
