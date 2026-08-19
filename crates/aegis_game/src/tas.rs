@@ -306,6 +306,150 @@ pub fn rejouer(grid: &TileGrid, traps: &TrapManager, entrees: &[Manette]) -> boo
     false
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//  « Facile pour un humain » — et comment on le mesure
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Le critère est retourné par rapport à un TAS classique. Un TAS de vitesse cherche la
+// séquence la plus RAPIDE ; celle-ci est en général la plus exigeante, au point d'être
+// impossible à refaire. Or ce solveur sert à montrer à quelqu'un COMMENT ON FAIT : un parcours
+// que personne ne peut imiter ne montre rien.
+//
+// Ce qu'on cherche est donc le parcours le plus **tolérant** : celui qui arrive encore quand on
+// appuie deux images trop tôt ou trop tard. C'est mesurable, et c'est ce que fait `robustesse`.
+
+/// Rend une solution **imitable**, sans jamais la casser.
+///
+/// # Pourquoi c'est indispensable
+/// La recherche produit un parcours optimisé : elle change de touche dès que ça lui fait gagner
+/// une image, ce qui donne des séquences hachées, impossibles à refaire. Mesuré : la solution
+/// brute d'un simple **couloir plat** ne survivait qu'à **10 %** des essais dès qu'on décalait
+/// les appuis de deux images — alors que courir tout droit est ce qu'un parcours a de plus
+/// facile. Une telle vidéo ne montre rien à personne.
+///
+/// # Comment
+/// On tente de **supprimer** chaque changement de touche, un par un, en prolongeant simplement
+/// la commande précédente — et on ne garde la suppression que si le parcours **arrive encore**.
+/// Chaque étape est donc validée par la vraie physique : cette simplification ne peut pas
+/// produire une solution fausse, seulement une solution plus simple ou pas de changement.
+///
+/// C'est le même esprit que la réduction d'un cas de test : on enlève tant que ça tient.
+pub fn simplifier(grid: &TileGrid, traps: &TrapManager, solution: &Solution) -> Solution {
+    let mut entrees = solution.entrees.clone();
+
+    // Plusieurs passes : supprimer un changement en rend parfois un autre superflu.
+    for _ in 0..4 {
+        let avant = entrees.len();
+        let mut i = 1;
+        let mut retires = 0;
+
+        while i < entrees.len() {
+            if entrees[i] == entrees[i - 1] {
+                i += 1;
+                continue;
+            }
+            // On prolonge la commande précédente jusqu'au prochain changement, et on regarde.
+            let mut essai = entrees.clone();
+            let valeur = essai[i - 1];
+            let mut j = i;
+            while j < essai.len() && essai[j] == entrees[i] {
+                essai[j] = valeur;
+                j += 1;
+            }
+            if rejouer(grid, traps, &essai) {
+                entrees = essai;
+                retires += 1;
+            } else {
+                i = j.max(i + 1);
+            }
+        }
+        if retires == 0 && entrees.len() == avant {
+            break; // plus rien à gagner
+        }
+    }
+    Solution { entrees }
+}
+
+/// Générateur pseudo-aléatoire minuscule, à graine explicite.
+///
+/// Il n'est pas là pour faire du hasard mais pour en faire **toujours le même** : une mesure de
+/// robustesse qui change d'une exécution à l'autre ne se compare à rien.
+struct Des(u64);
+
+impl Des {
+    fn suivant(&mut self) -> u64 {
+        // xorshift64* — quelques instructions, une période largement suffisante ici.
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// Un entier dans `[-amplitude, amplitude]`.
+    fn ecart(&mut self, amplitude: i32) -> i32 {
+        let n = 2 * amplitude + 1;
+        (self.suivant() % n as u64) as i32 - amplitude
+    }
+}
+
+/// De combien d'images un humain se trompe, au plus, sur le moment d'un appui.
+///
+/// Deux images à 60 Hz font 33 ms — l'ordre de grandeur de l'imprécision d'un geste ordinaire,
+/// bien en dessous d'un temps de réaction (~200 ms) mais bien au-dessus du pas de simulation.
+pub const IMPRECISION_HUMAINE: i32 = 2;
+
+/// À quel point ce parcours **pardonne l'imprécision**, entre 0 et 1.
+///
+/// On rejoue la séquence `essais` fois en décalant chaque changement de touche de quelques
+/// images, et on compte la proportion d'essais qui atteignent quand même l'arrivée. Un parcours
+/// qui exige le timing à l'image près tombe vers 0 ; un parcours large reste proche de 1.
+///
+/// C'est **la** mesure de « facile pour un humain » : elle ne demande pas de juger un ressenti,
+/// elle compte des arrivées.
+pub fn robustesse(grid: &TileGrid, traps: &TrapManager, entrees: &[Manette], essais: usize) -> f32 {
+    if entrees.is_empty() || essais == 0 {
+        return 0.0;
+    }
+    let mut des = Des(0x5EED_1234_ABCD_0001);
+    let mut reussites = 0usize;
+
+    for _ in 0..essais {
+        let brouillee = brouiller(entrees, &mut des);
+        if rejouer(grid, traps, &brouillee) {
+            reussites += 1;
+        }
+    }
+    reussites as f32 / essais as f32
+}
+
+/// Décale chaque changement de touche de quelques images, comme le ferait une main humaine.
+///
+/// On ne bruite pas chaque image indépendamment : ce serait du tremblement, pas de
+/// l'imprécision. Ce qu'un humain rate, c'est le **moment** où il appuie ou relâche.
+fn brouiller(entrees: &[Manette], des: &mut Des) -> Vec<Manette> {
+    let mut sortie = entrees.to_vec();
+
+    // Les instants où la commande change : ce sont eux qu'on déplace.
+    let transitions: Vec<usize> = (1..entrees.len())
+        .filter(|&i| entrees[i] != entrees[i - 1])
+        .collect();
+
+    for i in transitions {
+        let decalage = des.ecart(IMPRECISION_HUMAINE);
+        if decalage == 0 {
+            continue;
+        }
+        let nouveau = (i as i32 + decalage).clamp(0, entrees.len() as i32 - 1) as usize;
+        // Étendre ou reculer la commande précédente jusqu'au nouvel instant de bascule.
+        let (debut, fin) = if nouveau < i { (nouveau, i) } else { (i, nouveau) };
+        let valeur = if nouveau < i { entrees[i] } else { entrees[i - 1] };
+        for c in &mut sortie[debut..fin] {
+            *c = valeur;
+        }
+    }
+    sortie
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,5 +608,102 @@ mod tests {
                 panic!("solution rendue sur une carte bouchee (le controle l'a refusee)");
             }
         }
+    }
+
+    /// La mesure doit rendre le MEME chiffre a chaque appel : une robustesse qui bouge d'une
+    /// execution a l'autre ne se compare a rien, et ne peut donc pas servir a choisir.
+    #[test]
+    fn la_mesure_de_robustesse_est_reproductible() {
+        let grid = couloir(20);
+        let traps = TrapManager::new();
+        let Verdict::Franchissable(s) = resoudre(&grid, 60_000) else {
+            panic!("le couloir doit se franchir");
+        };
+        let a = robustesse(&grid, &traps, &s.entrees, 40);
+        let b = robustesse(&grid, &traps, &s.entrees, 40);
+        assert_eq!(a.to_bits(), b.to_bits(), "meme graine, meme mesure");
+    }
+
+    /// **Le sens de la mesure** : un parcours plat pardonne l'imprecision, un parcours qui exige
+    /// un saut au bon moment la pardonne moins. C'est exactement ce que « facile pour un humain »
+    /// veut dire, et c'est ce chiffre qui departagera deux solutions.
+    #[test]
+    fn un_couloir_plat_pardonne_plus_qu_un_saut_a_negocier() {
+        let traps = TrapManager::new();
+
+        let plat = couloir(20);
+        let Verdict::Franchissable(s_plat) = resoudre(&plat, 60_000) else {
+            panic!("couloir plat")
+        };
+
+        let mut troue = couloir(24);
+        troue.set_tile(11, 0, crate::grid::TileType::Air);
+        troue.set_tile(12, 0, crate::grid::TileType::Air);
+        let Verdict::Franchissable(s_troue) = resoudre(&troue, 400_000) else {
+            panic!("trou franchissable")
+        };
+
+        // On mesure sur les solutions SIMPLIFIEES : c'est celles-la qu'on montrerait.
+        let s_plat = simplifier(&plat, &traps, &s_plat);
+        let s_troue = simplifier(&troue, &traps, &s_troue);
+
+        let r_plat = robustesse(&plat, &traps, &s_plat.entrees, 60);
+        let r_troue = robustesse(&troue, &traps, &s_troue.entrees, 60);
+
+        assert!(r_plat >= r_troue,
+            "un couloir plat ({r_plat:.2}) ne peut pas etre plus exigeant qu'un saut ({r_troue:.2})");
+        assert!(r_plat > 0.5, "un couloir plat doit tres largement pardonner, vaut {r_plat:.2}");
+    }
+
+    /// Le brouillage doit deplacer des instants d'appui, pas tout casser : la sequence garde sa
+    /// longueur et reste faite de commandes du repertoire.
+    #[test]
+    fn le_brouillage_deplace_les_appuis_sans_denaturer_la_sequence() {
+        let sequence: Vec<Manette> = (0..120)
+            .map(|i| Manette::REPERTOIRE[(i / 17) % Manette::REPERTOIRE.len()])
+            .collect();
+        let mut des = Des(42);
+        let brouillee = brouiller(&sequence, &mut des);
+
+        assert_eq!(brouillee.len(), sequence.len(), "la duree ne change pas");
+        for c in &brouillee {
+            assert!(Manette::REPERTOIRE.contains(c), "aucune commande inventee");
+        }
+        assert_ne!(brouillee, sequence, "le brouillage doit VRAIMENT changer quelque chose");
+    }
+
+    /// **Le temoin de la simplification** : elle ne casse rien, et elle rend le parcours
+    /// nettement plus imitable. Les deux moities comptent — une simplification qui casserait le
+    /// parcours serait pire qu'aucune.
+    #[test]
+    fn la_simplification_rend_la_solution_nettement_plus_imitable() {
+        let grid = couloir(20);
+        let traps = TrapManager::new();
+        let Verdict::Franchissable(brute) = resoudre(&grid, 60_000) else {
+            panic!("le couloir doit se franchir")
+        };
+        let simple = simplifier(&grid, &traps, &brute);
+
+        assert!(
+            rejouer(&grid, &traps, &simple.entrees),
+            "une simplification qui casse le parcours serait pire qu'aucune"
+        );
+        assert!(
+            simple.changements() <= brute.changements(),
+            "brute {} changements, simplifiee {}",
+            brute.changements(),
+            simple.changements()
+        );
+
+        let r_brute = robustesse(&grid, &traps, &brute.entrees, 60);
+        let r_simple = robustesse(&grid, &traps, &simple.entrees, 60);
+        println!(
+            "couloir plat — brute : {} changements, robustesse {:.2} | simplifiee : {} changements, robustesse {:.2}",
+            brute.changements(), r_brute, simple.changements(), r_simple
+        );
+        assert!(
+            r_simple > r_brute,
+            "la solution simplifiee doit mieux pardonner : {r_brute:.2} -> {r_simple:.2}"
+        );
     }
 }
