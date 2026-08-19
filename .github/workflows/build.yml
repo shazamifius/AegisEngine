@@ -40,6 +40,12 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   linux:
     runs-on: ubuntu-22.04
+    # ⚠ Borne AJOUTÉE le 19 août 2026, premier run : l'installation des bibliothèques a
+    # tourné 14 minutes avant qu'on l'annule à la main. Rien ne bornait la durée d'une
+    # étape — exactement la même famille d'oubli que les artefacts sans `retention-days`,
+    # qui avaient saturé le quota du compte. Un travail qui dépasse ces bornes est bloqué,
+    # pas lent : mieux vaut un échec net en 6 minutes qu'une attente sans fin.
+    timeout-minutes: 30
     # ⚠ 22.04 DÉLIBÉRÉMENT, pas `ubuntu-latest`. Un binaire lié à la glibc d'une
     # image récente REFUSE de démarrer sur une distribution plus ancienne —
     # jamais l'inverse. On compile donc sur la plus vieille image encore
@@ -65,8 +71,13 @@ jobs:
         # Vulkan n'y est PAS : il n'est pas nécessaire pour COMPILER (ash le
         # charge à l'exécution), et l'exiger ici masquerait le fait que c'est la
         # machine du joueur qui doit en fournir un.
+        timeout-minutes: 6
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
+          # `-o Acquire::*` : sans borne explicite, apt réessaie un miroir injoignable
+          # pendant des minutes sans rien dire. Le premier run a bloqué là 14 minutes.
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 update -qq
           sudo apt-get install -y --no-install-recommends \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libxrender-dev libxkbcommon-dev libxkbcommon-x11-dev
@@ -127,6 +138,7 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   windows:
     runs-on: windows-latest
+    timeout-minutes: 30
     # Windows NATIF, jamais de compilation croisée : voir l'en-tête de ce
     # fichier — trois échecs successifs le 19 août, et l'avertissement du cœur
     # qui le disait d'avance.
