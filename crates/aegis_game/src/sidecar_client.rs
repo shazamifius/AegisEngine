@@ -167,9 +167,20 @@ impl SidecarClient {
             dernier_envoi: Instant::now() - Duration::from_secs(1),
         };
 
+        // ⚠ ON N'ANNONCE PAS « relié ». `envoyer` ne prouve que l'ÉCRITURE TCP : elle réussit
+        // même si le cœur rejette la trame et raccroche aussitôt. Le message qui vivait ici
+        // affirmait « relié au cœur web3 » sur cette seule base — il aurait donc dit « relié » à
+        // un joueur qui ne l'était pas, et c'est le genre de message qui fait chercher un défaut
+        // ailleurs pendant des heures.
+        //
+        // La SEULE preuve d'acceptation est le WELCOME que le cœur renvoie ; il est journalisé
+        // par `ecouter_le_coeur`. On dit ce qu'on a FAIT, pas ce qu'on espère.
+        //
+        // (Le 19 août, un jeton de contrôle a été ajouté ici par erreur : le port 47800 — le pont
+        // du jeu — ne l'exige pas. Seul 47810, le canal de contrôle du LAUNCHER, le demande. Les
+        // deux sockets portent des noms proches dans les journaux ; les confondre coûte cher.)
         if client.envoyer(HELLO, &PROTO.to_le_bytes()) {
-            // ISSUE 2 — relié pour de vrai.
-            println!("[sidecar] relié au cœur web3 sur {adresse} — on pousse notre position.");
+            println!("[sidecar] HELLO envoyé à {adresse} — en attente du WELCOME du cœur.");
         }
         client
     }
