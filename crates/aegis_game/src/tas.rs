@@ -261,8 +261,74 @@ pub fn resoudre(grid: &TileGrid, budget: usize) -> Verdict {
 }
 
 /// Le même, en tenant compte des pièges posés par les joueurs.
+/// La carte telle que le TAS doit la voir : **seulement ce qui bloque POUR TOUJOURS**.
+///
+/// # Le principe, en une phrase : le joueur peut attendre
+///
+/// Un lance-flammes ne rend pas un passage impossible — il le rend *temporisé*. Il s'éteint, on
+/// passe. Un bloc, lui, bloque définitivement. Les traiter pareil était le défaut central de ce
+/// solveur, et il se manifestait de la pire façon : **`traps.update()` n'était jamais appelé
+/// pendant la recherche**, donc un lance-flammes allumé à l'instant du lancement restait allumé
+/// *pour l'éternité* dans la simulation. Le TAS déclarait « pas trouvé » sur des cartes qu'il
+/// suffisait de traverser deux secondes plus tard.
+///
+/// Animer les pièges n'aurait pas suffi, et aurait même empiré les choses : l'[`Empreinte`] qui
+/// marque les états déjà visités ne porte pas la phase des timers. La recherche aurait considéré
+/// « déjà vu » un état pourtant différent, et raté des solutions en silence. Il aurait fallu
+/// ajouter cette phase à l'empreinte — multipliant l'espace d'états par la période de chaque piège.
+///
+/// **En sortant le temporaire du problème, le solveur devient plus juste ET moins cher.** C'est
+/// rare, et c'est le signe qu'on avait posé la mauvaise question.
+///
+/// # Ce qui reste, et ce qui part
+///
+/// Le partage ne suit PAS l'intuition « ça bouge donc c'est temporaire » — il suit la condition de
+/// mort, lue dans `check_player_death` :
+///
+/// - **`SpikeTrap` reste** : il tue sans condition.
+/// - **`SawBlade` reste**, et c'est le cas contre-intuitif : *sa rotation est purement visuelle*.
+///   Elle tue dès que la distance est inférieure à son rayon, en permanence. Une scie est un mur
+///   rond, pas un piège à timer.
+/// - **`LaserEmitter` et `Flamethrower` partent** : ils ne tuent que `if *active`.
+/// - **`CannonTurret` part** aussi, avec ses projectiles : elle ne tue pas au contact, ce sont ses
+///   tirs qui frappent — et un tir, ça passe.
+///
+/// # Ce que ce choix rend possible, et c'est le vrai but
+///
+/// Le verdict du TAS devient **exactement la question du vote** : « existe-t-il un chemin en
+/// ignorant tout ce qui est temporaire ? » Si non, l'obstacle est permanent, donc c'est un bloc, et
+/// c'est sur lui qu'on vote. **On ne votera jamais à cause d'un timer**, puisqu'un timer ne bouche
+/// rien. Sans cette séparation, un verdict « impossible » ne disait pas s'il fallait casser un mur
+/// ou simplement patienter.
+///
+/// # ⚠ Ce que ça coûte, dit franchement
+///
+/// Le verdict devient **optimiste sur le temps** : il affirme qu'un chemin existe, pas qu'il est
+/// commode. Une carte franchissable peut demander d'attendre longtemps devant une flamme. C'est
+/// assumé — la difficulté se mesure par la robustesse, pas par le verdict.
+pub fn vue_permanente(traps: &TrapManager) -> TrapManager {
+    let mut vue = TrapManager::new();
+    vue.traps = traps
+        .traps
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.kind,
+                crate::traps::TrapKind::SpikeTrap | crate::traps::TrapKind::SawBlade { .. }
+            )
+        })
+        .cloned()
+        .collect();
+    // Les projectiles ne sont pas recopiés : ils sont l'incarnation même du danger qui passe.
+    vue
+}
+
 pub fn resoudre_avec(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Verdict {
-    resoudre_regle(grid, traps, budget, POIDS, PRIX_DU_CHANGEMENT)
+    // ⚠ La conversion se fait ICI, au point d'entrée, pour que TOUT le pipeline en aval
+    // (`rejouer`, `simplifier`, `robustesse`) travaille dans le MÊME monde. Une solution validée
+    // dans un monde et rejouée dans un autre serait un mensonge — le genre de mensonge que le
+    // rejeu est précisément là pour empêcher.
+    resoudre_regle(grid, &vue_permanente(traps), budget, POIDS, PRIX_DU_CHANGEMENT)
 }
 
 /// La recherche, avec ses deux réglages explicites.
@@ -638,12 +704,18 @@ impl Verificateur {
         let garde_solution = std::sync::Arc::clone(&self.solution);
 
         std::thread::spawn(move || {
+            // ⚠ UN SEUL MONDE POUR TOUT LE PIPELINE. `resoudre_avec` filtre déjà les pièges
+            // temporaires, mais `la_plus_imitable` et `robustesse` reçoivent les traps qu'on leur
+            // passe ICI : leur donner les pièges COMPLETS ferait échouer le rejeu d'une solution
+            // pourtant valide, et la robustesse s'effondrerait sans raison visible. On convertit
+            // donc une fois, et tout le monde travaille dessus.
+            let permanents = vue_permanente(&traps);
             let verdict = match resoudre_avec(&grid, &traps, BUDGET_PARTIE) {
                 Verdict::Franchissable(brute) => {
                     // On garde la version la plus imitable des deux (brute ou simplifiée) :
                     // simplifier aide sur un couloir et NUIT sur une carte à sauts.
-                    let retenue = la_plus_imitable(&grid, &traps, &brute);
-                    let note = robustesse(&grid, &traps, &retenue.entrees, 40);
+                    let retenue = la_plus_imitable(&grid, &permanents, &brute);
+                    let note = robustesse(&grid, &permanents, &retenue.entrees, 40);
                     *garde_solution.lock().unwrap() = Some(retenue);
                     EtatCarte::Franchissable { robustesse: note }
                 }
@@ -791,6 +863,20 @@ mod tests {
         assert!(!rejouer(&grid, &TrapManager::new(), &[]));
     }
 
+    /// Un couloir BAS : sol continu et plafond juste au-dessus de la tête.
+    ///
+    /// Il existe parce qu'un obstacle posé au sol dans un couloir ouvert ne bouche rien — **le
+    /// joueur saute par-dessus**, et c'est très bien ainsi. Pour éprouver ce qui bouche VRAIMENT,
+    /// il faut retirer le ciel. Le jeu en a un, de plafond : celui de béton qu'on voit à l'écran.
+    fn couloir_bas(largeur: usize) -> TileGrid {
+        let mut grid = TileGrid::vide(largeur, 10);
+        for x in 0..largeur {
+            grid.set_tile(x, 0, crate::grid::TileType::SolidBlock);
+            grid.set_tile(x, 3, crate::grid::TileType::SolidBlock);
+        }
+        grid
+    }
+
     /// Construit un couloir plat : un sol continu, rien d'autre.
     fn couloir(largeur: usize) -> TileGrid {
         let mut grid = TileGrid::vide(largeur, 10);
@@ -798,6 +884,96 @@ mod tests {
             grid.set_tile(x, 0, crate::grid::TileType::SolidBlock);
         }
         grid
+    }
+
+    /// **LA PAIRE QUI JUSTIFIE `vue_permanente`.** Même carte, même piège au même endroit :
+    /// seul le FILTRE change, et le verdict bascule.
+    ///
+    /// Sans le filtre, le lance-flammes allumé bouche le couloir *pour toujours* — parce que le
+    /// solveur n'anime pas les pièges : celui qui brûle à l'instant du lancement brûle jusqu'à la
+    /// fin des temps. C'est ce qui rendait le TAS « extrêmement nul » : il déclarait infranchissables
+    /// des cartes qu'il suffisait de traverser deux secondes plus tard.
+    #[test]
+    fn un_lance_flammes_allume_ne_bouche_plus_le_couloir_mais_une_scie_si() {
+        let grid = couloir(20);
+        let milieu = Vec2::new(10.0, 1.0);
+
+        // ── 1. Le lance-flammes ALLUMÉ, vu SANS filtre : il bouche (l'ancien comportement).
+        let mut flammes = TrapManager::new();
+        flammes.add_trap(
+            milieu,
+            crate::traps::TrapKind::Flamethrower {
+                dir: crate::traps::Direction::Up,
+                active: true,
+                timer: 0.0,
+            },
+            0,
+        );
+        let sans_filtre = resoudre_regle(&grid, &flammes, 60_000, POIDS, PRIX_DU_CHANGEMENT);
+
+        // ── 2. LE MÊME piège, vu par `resoudre_avec` (qui filtre) : on passe.
+        let avec_filtre = resoudre_avec(&grid, &flammes, 60_000);
+        match avec_filtre {
+            Verdict::Franchissable(s) => assert!(
+                rejouer(&grid, &vue_permanente(&flammes), &s.entrees),
+                "la solution doit passer le contrôle DANS LE MÊME MONDE que celui qui l'a produite"
+            ),
+            Verdict::PasTrouve { explores } => panic!(
+                "un lance-flammes s'ÉTEINT : le joueur peut attendre. ({explores} etats explores)"
+            ),
+        }
+
+        // Le test ne vaut que si le filtre change VRAIMENT quelque chose. Si le piège ne bouchait
+        // pas non plus sans filtre, on n'aurait rien prouvé — juste écrit deux fois le même cas.
+        assert!(
+            matches!(sans_filtre, Verdict::PasTrouve { .. }),
+            "temoin creux : ce lance-flammes ne bouchait pas meme sans le filtre, le test ne prouve rien"
+        );
+
+        // ── 3. LE TÉMOIN NÉGATIF, sans lequel on aurait seulement appris à tout ignorer.
+        //
+        // Une scie doit continuer de bloquer : sa rotation est purement visuelle, elle tue en
+        // permanence dans son rayon. C'est un mur rond, pas un piège à timer.
+        //
+        // ⚠ Il lui faut un couloir BAS. Posée dans le couloir ouvert du début, la scie ne bouche
+        // rien — le solveur saute simplement par-dessus, et il a raison. La première version de ce
+        // test l'ignorait et échouait donc en accusant le filtre, alors que c'est le SOLVEUR qui
+        // avait raison. Un obstacle ne se juge pas à ce qu'il est, mais à ce qu'il ferme.
+        let bas = couloir_bas(20);
+        let mut scie = TrapManager::new();
+        scie.add_trap(Vec2::new(10.0, 1.0), crate::traps::TrapKind::SawBlade { radius: 0.75, rotation: 0.0 }, 0);
+        assert!(
+            matches!(resoudre_avec(&bas, &scie, 60_000), Verdict::PasTrouve { .. }),
+            "une scie tue SANS CONDITION : le filtre ne doit pas la faire disparaitre"
+        );
+        // Et le couloir bas se franchit quand la scie n'y est pas — sinon on aurait prouvé
+        // seulement que le plafond bloque.
+        assert!(
+            matches!(resoudre_avec(&bas, &TrapManager::new(), 60_000), Verdict::Franchissable(_)),
+            "temoin creux : ce couloir bas est infranchissable MEME SANS scie"
+        );
+    }
+
+    /// Le filtre garde ce qui tue toujours et retire ce qui s'éteint — vérifié sur la liste, pas
+    /// sur l'intuition « ça bouge donc c'est temporaire ».
+    #[test]
+    fn la_vue_permanente_garde_exactement_ce_qui_tue_sans_condition() {
+        use crate::traps::{Direction, TrapKind};
+        let mut tous = TrapManager::new();
+        let p = Vec2::new(1.0, 1.0);
+        tous.add_trap(p, TrapKind::SpikeTrap, 0);
+        tous.add_trap(p, TrapKind::SawBlade { radius: 0.75, rotation: 0.0 }, 0);
+        tous.add_trap(p, TrapKind::Flamethrower { dir: Direction::Up, active: true, timer: 0.0 }, 0);
+        tous.add_trap(p, TrapKind::LaserEmitter { dir: Direction::Up, active: true, timer: 0.0 }, 0);
+        tous.add_trap(p, TrapKind::CannonTurret { dir: Direction::Up, fire_rate: 2.5, timer: 0.0 }, 0);
+
+        let vue = vue_permanente(&tous);
+        assert_eq!(vue.traps.len(), 2, "seuls les pics et la scie tuent sans condition");
+        assert!(vue.traps.iter().all(|t| matches!(
+            t.kind,
+            TrapKind::SpikeTrap | TrapKind::SawBlade { .. }
+        )));
+        assert!(vue.projectiles.is_empty(), "un tir en vol est l'incarnation meme du danger qui passe");
     }
 
     /// **Le témoin du solveur** : il trouve un chemin, ET ce chemin passe le contrôle.
