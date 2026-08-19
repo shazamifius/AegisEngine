@@ -159,6 +159,7 @@ pub fn glyphe(c: char) -> [u8; 7] {
         'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
         'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
 
+        '\'' => [0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000],
         ':' => [0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000],
         '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110],
         ',' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110, 0b01000],
@@ -459,14 +460,35 @@ pub unsafe fn dessiner(
     game: &PartyGame,
     etat_pont: &EtatPont,
     carte: crate::tas::EtatCarte,
+    demonstration: bool,
 ) {
     unsafe {
         minuteur(p, game);
         pont(p, etat_pont);
         verdict_carte(p, carte);
         if game.phase == crate::party_game::GamePhase::Leaderboard {
-            leaderboard(p, game);
+            leaderboard(p, game, demonstration);
+            if demonstration {
+                annonce_demonstration(p);
+            }
         }
+    }
+}
+
+/// Dit pourquoi un personnage traverse la carte tout seul pendant les scores.
+///
+/// Sans cette ligne, la démonstration serait un fantôme inexpliqué au milieu de l'écran. Ce
+/// qu'on montre n'a de valeur que si l'on sait ce qu'on regarde.
+unsafe fn annonce_demonstration(p: &Pinceau) {
+    let h = 0.024;
+    let marge = 0.018;
+    let texte = "PERSONNE N'A REUSSI - VOICI COMMENT";
+    let largeur = largeur_texte(texte, h) + marge * 2.0;
+    let y = 0.76;
+
+    unsafe {
+        p.quad((p.aspect - largeur) * 0.5, y - marge * 0.6, largeur, h + marge * 1.2, couleurs::FOND, 6);
+        p.texte_centre(y, h, couleurs::OR, 7, texte);
     }
 }
 
@@ -517,7 +539,7 @@ unsafe fn minuteur(p: &Pinceau, game: &PartyGame) {
 /// même image.
 ///
 /// Le tri, lui, était juste. Il ne servait simplement à rien.
-unsafe fn leaderboard(p: &Pinceau, game: &PartyGame) {
+unsafe fn leaderboard(p: &Pinceau, game: &PartyGame, laisser_la_place: bool) {
     /// Au-delà, le tableau cesse d'être lisible d'un coup d'œil — et la classe compte jusqu'à
     /// trente-cinq joueurs. Le rang de chacun reste garanti visible : voir plus bas.
     const LIGNES_MAX: usize = 8;
@@ -555,7 +577,10 @@ unsafe fn leaderboard(p: &Pinceau, game: &PartyGame) {
 
     let hauteur = h_titre + marge * 2.4 + lignes.len() as f32 * h_ligne + marge;
     let x0 = (p.aspect - largeur) * 0.5;
-    let y0 = (1.0 - hauteur) * 0.5;
+    // Centré d'ordinaire ; remonté quand une démonstration passe derrière — un tableau posé
+    // pile sur ce qu'on demande aux joueurs de regarder ne vaut pas mieux qu'un tableau invisible.
+    // 0,085 : juste sous le bandeau du minuteur (0,016 + sa hauteur), pas dessus.
+    let y0 = if laisser_la_place { 0.085 } else { (1.0 - hauteur) * 0.5 };
 
     let (titre, teinte_titre) = match &game.match_winner {
         Some(nom) => (format!("{nom} GAGNE"), couleurs::OR),
@@ -693,7 +718,7 @@ mod tests {
     fn les_lettres_tiennent_dans_les_cinq_colonnes() {
         // Un bit au-dela de la 5e colonne deborderait sur le caractere voisin sans que rien ne
         // le signale : on verifie toute la table d'un coup plutot que de relire a l'oeil.
-        for c in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ :.,-+!?/%".chars() {
+        for c in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ :.,-+!?/%'".chars() {
             for (ligne, bits) in glyphe(c).iter().enumerate() {
                 assert!(
                     *bits < (1 << GLYPHE_COLONNES),

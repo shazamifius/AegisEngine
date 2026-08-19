@@ -58,6 +58,8 @@ struct AegisApp {
     verificateur: tas::Verificateur,
     /// La phase du tour précédent, pour ne lancer la vérification qu'aux transitions.
     phase_precedente: party_game::GamePhase,
+    /// La démonstration du parcours, montrée quand personne n'a franchi la ligne.
+    demonstration: Option<tas::Demonstration>,
 }
 
 impl AegisApp {
@@ -82,6 +84,7 @@ impl AegisApp {
             sidecar: SidecarClient::connecter(),
             verificateur: tas::Verificateur::nouveau(),
             phase_precedente: party_game::GamePhase::Drafting,
+            demonstration: None,
         }
     }
 
@@ -236,10 +239,30 @@ impl AegisApp {
                 party_game::GamePhase::Running => self
                     .verificateur
                     .lancer(&self.party_game.grid, &self.party_game.traps),
-                party_game::GamePhase::Drafting => self.verificateur.oublier(),
+                party_game::GamePhase::Drafting => {
+                    self.verificateur.oublier();
+                    self.demonstration = None;
+                }
+                party_game::GamePhase::Leaderboard => {
+                    // Personne n'a franchi la ligne : on montre que c'était possible, et
+                    // comment. C'est le moment exact où la question se pose.
+                    let personne = !self.party_game.players.iter().any(|p| p.has_finished);
+                    let a_montrer = if personne { self.verificateur.solution() } else { None };
+                    if let Some(solution) = a_montrer {
+                        log::info!("🎬 Personne n'a réussi — démonstration du parcours trouvé.");
+                        self.demonstration = Some(tas::Demonstration::nouvelle(
+                            &self.party_game.grid,
+                            solution,
+                        ));
+                    }
+                }
                 _ => {}
             }
             self.phase_precedente = phase;
+        }
+
+        if let Some(demo) = self.demonstration.as_mut() {
+            demo.avancer(dt, &self.party_game.grid, &self.party_game.traps);
         }
 
         let distants = self.sidecar.avatars();
@@ -262,6 +285,7 @@ impl AegisApp {
                         pont: &etat_pont,
                         distants: &distants,
                         carte: self.verificateur.etat(),
+                        demonstration: self.demonstration.as_ref().map(|d| d.position()),
                     },
                 );
                 if engine.gpu.end_frame(cmd, image_index, window).is_err() {

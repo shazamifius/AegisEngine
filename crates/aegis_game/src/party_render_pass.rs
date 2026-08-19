@@ -110,6 +110,8 @@ pub struct Exterieur<'a> {
     pub distants: &'a [crate::sidecar_client::Avatar],
     /// Ce que le solveur pense de la franchissabilité de la carte.
     pub carte: crate::tas::EtatCarte,
+    /// Où en est la démonstration du parcours, quand personne n'a réussi la manche.
+    pub demonstration: Option<Vec2>,
 }
 
 pub struct PartyRenderPass {
@@ -309,6 +311,11 @@ impl PartyRenderPass {
         } else if game.phase == crate::party_game::GamePhase::Placement || !game.is_play_mode {
             let (cx, cy) = game.editor.cursor;
             (cx as f32 + 0.5, cy as f32 + 0.5, 18.0 * self.zoom_level)
+        } else if let Some(fantome) = exterieur.demonstration {
+            // Une démonstration est en cours : c'est ELLE qu'il faut regarder. Laisser la caméra
+            // sur le cadavre du joueur reviendrait à montrer la solution à personne — c'est
+            // exactement l'erreur qui rendait le tableau des scores invisible.
+            (fantome.x, fantome.y + 0.85, 20.0 * self.zoom_level)
         } else {
             let p_pos = game.human_player().position;
             (p_pos.x, p_pos.y + 0.85, 18.0 * self.zoom_level)
@@ -957,6 +964,28 @@ impl PartyRenderPass {
             // qui vient de mourir. Il est passé sur le calque d'écran (`leaderboard_hud`), le
             // seul endroit d'où une interface est visible sans dépendre d'où l'on est tombé.
 
+            // ─── LE FANTÔME du solveur, quand on montre comment franchir la carte ───────
+            if let Some(pos) = exterieur.demonstration {
+                let base = Vec3::new(pos.x, pos.y, 0.0);
+                // Volontairement translucide de ton et sans détail : ce n'est pas un joueur, et
+                // il ne faut pas une seconde le confondre avec quelqu'un de la partie.
+                for (hauteur, taille, teinte) in [
+                    (0.45, Vec3::new(0.62, 0.90, 0.62), Vec4::new(0.55, 0.75, 0.95, 1.0)),
+                    (1.12, Vec3::new(0.52, 0.46, 0.52), Vec4::new(0.80, 0.90, 1.00, 1.0)),
+                ] {
+                    let m = Mat4::from_translation(base + Vec3::new(0.0, hauteur, 0.0))
+                        * Mat4::from_scale(taille);
+                    let push = PartyPushConstants {
+                        mvp_matrix: vp * m,
+                        model_matrix: m,
+                        color_tint: teinte,
+                        params: Vec4::new(0.2, 0.0, 0.0, 0.0),
+                    };
+                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
+                    self.cube_mesh.draw(&context.device, cmd);
+                }
+            }
+
             // ─── LES JOUEURS DISTANTS, tels que le cœur nous les donne ──────────────────
             //
             // Ce ne sont pas des joueurs simulés : chaque pose est arrivée par le vrai protocole
@@ -1054,6 +1083,7 @@ impl PartyRenderPass {
                     game,
                     exterieur.pont,
                     exterieur.carte,
+                    exterieur.demonstration.is_some(),
                 );
             }
 

@@ -591,6 +591,10 @@ pub enum EtatCarte {
 /// quand il arrive.
 pub struct Verificateur {
     etat: std::sync::Arc<std::sync::Mutex<EtatCarte>>,
+    /// Le parcours trouvé, gardé pour être **montré** : c'est le second usage du solveur, et il
+    /// compte autant que le premier. Quand personne n'a réussi une manche, on ne veut pas
+    /// seulement savoir que c'était possible — on veut voir comment.
+    solution: std::sync::Arc<std::sync::Mutex<Option<Solution>>>,
 }
 
 impl Default for Verificateur {
@@ -603,12 +607,18 @@ impl Verificateur {
     pub fn nouveau() -> Verificateur {
         Verificateur {
             etat: std::sync::Arc::new(std::sync::Mutex::new(EtatCarte::Inconnue)),
+            solution: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     /// Ce qu'on sait pour l'instant.
     pub fn etat(&self) -> EtatCarte {
         *self.etat.lock().unwrap()
+    }
+
+    /// Le parcours trouvé, s'il y en a un — celui qu'on montrera.
+    pub fn solution(&self) -> Option<Solution> {
+        self.solution.lock().unwrap().clone()
     }
 
     /// Lance une vérification. Sans effet si une autre est déjà en cours — une carte ne se
@@ -625,6 +635,7 @@ impl Verificateur {
         let grid = grid.clone();
         let traps = traps.clone();
         let partage = std::sync::Arc::clone(&self.etat);
+        let garde_solution = std::sync::Arc::clone(&self.solution);
 
         std::thread::spawn(move || {
             let verdict = match resoudre_avec(&grid, &traps, BUDGET_PARTIE) {
@@ -632,9 +643,9 @@ impl Verificateur {
                     // On garde la version la plus imitable des deux (brute ou simplifiée) :
                     // simplifier aide sur un couloir et NUIT sur une carte à sauts.
                     let retenue = la_plus_imitable(&grid, &traps, &brute);
-                    EtatCarte::Franchissable {
-                        robustesse: robustesse(&grid, &traps, &retenue.entrees, 40),
-                    }
+                    let note = robustesse(&grid, &traps, &retenue.entrees, 40);
+                    *garde_solution.lock().unwrap() = Some(retenue);
+                    EtatCarte::Franchissable { robustesse: note }
                 }
                 Verdict::PasTrouve { .. } => EtatCarte::PasTrouvee,
             };
@@ -645,6 +656,74 @@ impl Verificateur {
     /// Remet à zéro, pour la manche suivante.
     pub fn oublier(&self) {
         *self.etat.lock().unwrap() = EtatCarte::Inconnue;
+        *self.solution.lock().unwrap() = None;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//  Montrer le parcours — le second usage du solveur
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Rejoue un parcours trouvé, pour le **montrer**.
+///
+/// C'est le second usage du TAS, et il compte autant que le premier : quand personne n'a réussi
+/// une manche, savoir que c'était possible ne suffit pas — il faut voir comment.
+///
+/// ⚠ **L'avancement se fait à pas FIXE**, quoi qu'il arrive au nombre d'images par seconde. Le
+/// parcours a été calculé à ce pas-là ; le rejouer au rythme irrégulier de l'affichage donnerait
+/// une autre trajectoire, et le fantôme raterait le saut qu'on est justement en train de montrer.
+/// D'où l'accumulateur : on consomme le temps réel par tranches de `PAS`.
+pub struct Demonstration {
+    fantome: Player,
+    entrees: Vec<Manette>,
+    image: usize,
+    saut_precedent: bool,
+    accumule: f32,
+}
+
+impl Demonstration {
+    pub fn nouvelle(grid: &TileGrid, solution: Solution) -> Demonstration {
+        Demonstration {
+            fantome: Player::new(grid.start_pos),
+            entrees: solution.entrees,
+            image: 0,
+            saut_precedent: false,
+            accumule: 0.0,
+        }
+    }
+
+    /// Fait avancer le fantôme du temps réel écoulé.
+    pub fn avancer(&mut self, dt: f32, grid: &TileGrid, traps: &TrapManager) {
+        // Borne le rattrapage : après une pause (fenêtre déplacée, chargement), on ne veut pas
+        // que le fantôme traverse la carte d'un coup pour « rattraper » le temps perdu.
+        self.accumule = (self.accumule + dt).min(0.25);
+
+        while self.accumule >= PAS && self.image < self.entrees.len() {
+            let commande = self.entrees[self.image];
+            self.fantome
+                .update(PAS, &commande.vers_entrees(self.saut_precedent), grid, traps);
+            self.saut_precedent = commande.saut;
+            self.image += 1;
+            self.accumule -= PAS;
+        }
+    }
+
+    /// Où en est le fantôme.
+    pub fn position(&self) -> Vec2 {
+        self.fantome.position
+    }
+
+    /// Le parcours est-il arrivé au bout ?
+    pub fn terminee(&self) -> bool {
+        self.image >= self.entrees.len()
+    }
+
+    /// La part du parcours déjà jouée, de 0 à 1 — pour une barre de progression.
+    pub fn avancement(&self) -> f32 {
+        if self.entrees.is_empty() {
+            return 1.0;
+        }
+        self.image as f32 / self.entrees.len() as f32
     }
 }
 
@@ -1013,5 +1092,35 @@ mod tests {
             let multi = format!("{meilleure:.2}");
             println!("{nom:<16} un reglage {un:>10} | quatre reglages {multi:>10}");
         }
+    }
+
+    /// Le fantome doit rejouer EXACTEMENT ce que le solveur a calcule : il finit a l'arrivee.
+    #[test]
+    fn le_fantome_rejoue_le_parcours_jusqu_a_l_arrivee() {
+        let grid = couloir(20);
+        let traps = TrapManager::new();
+        let Verdict::Franchissable(sol) = resoudre(&grid, 60_000) else {
+            panic!("couloir franchissable")
+        };
+        let images = sol.entrees.len();
+
+        let mut demo = Demonstration::nouvelle(&grid, sol);
+        assert!(!demo.terminee());
+        assert!(demo.avancement() < 0.01);
+
+        // On avance par tranches irregulieres, comme le ferait un vrai affichage.
+        let mut tours = 0;
+        while !demo.terminee() && tours < images * 4 {
+            demo.avancer(if tours % 3 == 0 { 0.030 } else { 0.011 }, &grid, &traps);
+            tours += 1;
+        }
+
+        assert!(demo.terminee(), "le fantome doit aller au bout de la sequence");
+        assert!(
+            (demo.position() - grid.finish_pos).length() < RAYON_ARRIVEE,
+            "et finir A L'ARRIVEE, pas ailleurs : {:?}",
+            demo.position()
+        );
+        assert!((demo.avancement() - 1.0).abs() < 1e-6);
     }
 }
