@@ -39,29 +39,40 @@ permissions:
 jobs:
   # ───────────────────────────────────────────────────────────────────────────
   linux:
-    runs-on: ubuntu-22.04
-    # ⚠ Borne AJOUTÉE le 19 août 2026, premier run : l'installation des bibliothèques a
-    # tourné 14 minutes avant qu'on l'annule à la main. Rien ne bornait la durée d'une
-    # étape — exactement la même famille d'oubli que les artefacts sans `retention-days`,
-    # qui avaient saturé le quota du compte. Un travail qui dépasse ces bornes est bloqué,
-    # pas lent : mieux vaut un échec net en 6 minutes qu'une attente sans fin.
-    timeout-minutes: 30
-    # ⚠ 22.04 DÉLIBÉRÉMENT, pas `ubuntu-latest`. Un binaire lié à la glibc d'une
-    # image récente REFUSE de démarrer sur une distribution plus ancienne —
-    # jamais l'inverse. On compile donc sur la plus vieille image encore
-    # fournie, et le binaire tourne sur elle ET sur tout ce qui est plus récent.
+    runs-on: ubuntu-latest
+    # ⚠⚠ ON COMPILE DANS UN CONTENEUR, PAS SUR L'IMAGE DU RUNNER (19 août 2026, 2e correctif).
     #
-    # ⚠ Et NON, on ne peut pas faire du musl statique ici, contrairement au cœur
-    # et au launcher : `ash` ouvre le pilote Vulkan par `dlopen` à l'exécution,
-    # et un binaire statiquement lié ne sait pas faire `dlopen`. Le jeu a besoin
-    # du pilote de la machine hôte — un moteur 3D n'est portable qu'au sens
-    # glibc, jamais au sens « statique ». La honnêteté ici vaut mieux qu'une
-    # promesse : ce binaire vise Ubuntu 22.04 et plus récent.
+    # La première version visait `ubuntu-22.04` pour sa vieille glibc. Deux runs de suite,
+    # `apt-get update` y est resté bloqué SANS ÉMETTRE UNE SEULE LIGNE — un verrou dpkg tenu par
+    # les services de démarrage du runner. Le premier run a tourné 14 minutes avant qu'on
+    # l'annule à la main ; le second s'est arrêté net sur la borne de 6 minutes ajoutée entre les
+    # deux — elle a fait exactement son travail, et c'est elle qui a rendu le défaut lisible.
+    #
+    # Le correctif n'est pas de ruser avec le verrou, c'est de ne plus en dépendre. L'image du
+    # conteneur fixe la distribution ET la glibc ; le runner n'est plus qu'un hôte :
+    #   - le binaire ne dépend plus de ce que GitHub met dans ses images ;
+    #   - la MÊME commande tourne à l'identique sur une machine de développement — c'est
+    #     exactement ainsi que l'artefact portable a fini par être produit le 19 août, par un
+    #     `podman run` sur cette même image, après trois échecs de compilation croisée ;
+    #   - bookworm donne **glibc 2.34 au maximum** — mesuré sur le binaire (`objdump -T`), pas
+    #     supposé : Ubuntu 22.04+, Debian 12+, Fedora 35+ le lancent.
+    container: docker.io/library/rust:1-bookworm
+    #
+    # ⚠ Et NON, on ne peut pas faire du musl statique ici, contrairement au cœur et au launcher :
+    # `ash` ouvre le pilote Vulkan par `dlopen` à l'exécution, et un binaire statiquement lié ne
+    # sait pas faire `dlopen`. Le jeu a besoin du pilote de la machine hôte — un moteur 3D n'est
+    # portable qu'au sens glibc, jamais au sens « statique ». L'honnêteté vaut mieux qu'une
+    # promesse.
+    #
+    # Bornes de durée : un travail qui les dépasse est bloqué, pas lent. Même famille d'oubli que
+    # les artefacts sans `retention-days`, qui avaient saturé le quota du compte le 17 août.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Toolchain Rust stable
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      # Pas d'étape « toolchain » ici : Rust vient de l'image du conteneur. Une action qui en
+      # installerait un second ferait compiler par un compilateur différent de celui que l'image
+      # annonce — la famille de pièges que ce projet paie déjà avec `rustup` dans le nix-shell.
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -77,8 +88,10 @@ jobs:
         run: |
           # `-o Acquire::*` : sans borne explicite, apt réessaie un miroir injoignable
           # pendant des minutes sans rien dire. Le premier run a bloqué là 14 minutes.
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 update -qq
-          sudo apt-get install -y --no-install-recommends \
+          # Pas de `sudo` : dans le conteneur on est root. Et surtout, aucun service de
+          # démarrage n'y tient le verrou dpkg — c'est ce verrou qui bloquait sur le runner.
+          apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 update -qq
+          apt-get install -y --no-install-recommends \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libxrender-dev libxkbcommon-dev libxkbcommon-x11-dev
 
