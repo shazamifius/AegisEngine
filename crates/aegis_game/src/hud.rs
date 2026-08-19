@@ -491,10 +491,21 @@ unsafe fn leaderboard(p: &Pinceau, game: &PartyGame) {
                 _ => couleurs::TEXTE_FAIBLE,
             };
 
-            p.texte(x0 + marge * 1.9, y_texte, h_texte, teinte, 5, &format!("{rang}"));
+            // Le rang s'aligne par la DROITE de sa colonne, comme les points : « 1 » et « 11 »
+            // finissent au même endroit, donc le pseudo commence toujours au même x. Aligné à
+            // gauche, un rang à deux chiffres venait coller à la première lettre du pseudo.
+            let colonne_rang = largeur_texte("00", h_texte);
+            let r = format!("{rang}");
+            p.texte(
+                x0 + marge * 1.9 + colonne_rang - largeur_texte(&r, h_texte),
+                y_texte, h_texte, teinte, 5, &r,
+            );
 
             let pseudo: String = joueur.name.chars().take(PSEUDO_MAX).collect();
-            p.texte(x0 + marge * 1.9 + 0.062, y_texte, h_texte, couleurs::TEXTE, 5, &pseudo);
+            p.texte(
+                x0 + marge * 1.9 + colonne_rang + 0.024,
+                y_texte, h_texte, couleurs::TEXTE, 5, &pseudo,
+            );
 
             // Les points s'alignent par la DROITE : deux nombres de largeurs différentes doivent
             // se comparer d'un coup d'œil, ce qu'un alignement à gauche interdit.
