@@ -366,14 +366,54 @@ impl Pinceau<'_> {
     }
 }
 
+/// Ce que le HUD sait du pont vers le cœur réseau.
+///
+/// Un instantané de compteurs, jamais une socket : le rendu n'a aucune raison de connaître le
+/// réseau, et le réseau aucune raison de connaître le rendu.
+#[derive(Clone, Copy, Default)]
+pub struct EtatPont {
+    pub relie: bool,
+    /// Poses que nous avons poussées vers le cœur.
+    pub envoyes: u64,
+    /// Instantanés que le cœur nous a renvoyés.
+    pub recus: u64,
+    /// Joueurs distants au dernier instantané.
+    pub avatars: usize,
+}
+
+/// Le témoin du pont réseau, en bas à gauche.
+///
+/// Il affiche **les deux compteurs séparément**, et c'est tout l'intérêt : un pont où un seul
+/// des deux monte est un pont à moitié mort, et le chiffre désigne aussitôt le sens en panne.
+/// Un total unique, ou une simple pastille « connecté », masqueraient exactement ce cas.
+unsafe fn pont(p: &Pinceau, etat: &EtatPont) {
+    let h = 0.022;
+    let marge = 0.014;
+    let y = 1.0 - h - marge * 2.0;
+
+    let texte = if etat.relie {
+        format!("WEB3 {}/{} {}", etat.envoyes, etat.recus, etat.avatars)
+    } else {
+        "WEB3 SOLO".to_string()
+    };
+    let teinte = if etat.relie { couleurs::TEXTE_FAIBLE } else { couleurs::LIGNE };
+
+    unsafe {
+        let largeur = largeur_texte(&texte, h) + marge * 2.0;
+        p.quad(marge, y - marge * 0.6, largeur, h + marge * 1.2, couleurs::FOND, 1);
+        p.texte(marge * 2.0, y, h, teinte, 2, &texte);
+    }
+}
+
 /// Tout le HUD, dans l'ordre où il se superpose.
 ///
 /// # Sécurité
 /// Le pinceau doit porter un tampon de commandes en cours d'enregistrement, dans une passe de
 /// rendu où le pipeline principal est lié.
-pub unsafe fn dessiner(p: &Pinceau, game: &PartyGame) {
+pub unsafe fn dessiner(p: &Pinceau, game: &PartyGame, etat_pont: &EtatPont) {
     unsafe {
         minuteur(p, game);
+        pont(p, etat_pont);
         if game.phase == crate::party_game::GamePhase::Leaderboard {
             leaderboard(p, game);
         }

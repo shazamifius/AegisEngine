@@ -285,7 +285,7 @@ impl PartyRenderPass {
         })
     }
 
-    pub fn render_party_scene(&mut self, context: &GpuContext, cmd: vk::CommandBuffer, image_index: usize, game: &PartyGame) {
+    pub fn render_party_scene(&mut self, context: &GpuContext, cmd: vk::CommandBuffer, image_index: usize, game: &PartyGame, etat_pont: &crate::hud::EtatPont) {
         let view = context.swapchain_image_views[image_index];
         let image = context.swapchain_images[image_index];
 
@@ -994,6 +994,7 @@ impl PartyRenderPass {
                         aspect,
                     },
                     game,
+                    etat_pont,
                 );
             }
 

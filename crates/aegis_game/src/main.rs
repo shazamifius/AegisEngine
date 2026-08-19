@@ -11,12 +11,14 @@ mod party_render_pass;
 mod hud;
 mod objects;
 mod nav_client;
+mod sidecar_client;
 mod plantage;
 mod web3_integration;
 
 use std::sync::Arc;
 use aegis_engine::Engine;
 use nav_client::NavClient;
+use sidecar_client::SidecarClient;
 use party_game::PartyGame;
 use party_render_pass::PartyRenderPass;
 use player::InputState;
@@ -42,14 +44,19 @@ struct AegisApp {
     input_state: InputState,
     screenshot_mode: bool,
     screenshot_path: String,
+    /// L'image à laquelle la capture est prise (`--frame`).
+    screenshot_frame: u64,
     /// Position de la souris en pixels (pour la sélection d'items par clic)
     mouse_pos: (f32, f32),
     /// Le pont vers le launcher web3 (régisseur de bascule). Inerte si le jeu est lancé tout seul.
     nav: NavClient,
+    /// Le pont vers le cœur réseau web3 : on y pousse notre position, on en lit celle des autres.
+    /// Inerte si le cœur ne tourne pas — le jeu reste alors exactement le jeu solo.
+    sidecar: SidecarClient,
 }
 
 impl AegisApp {
-    fn new(screenshot_mode: bool, screenshot_path: String) -> Self {
+    fn new(screenshot_mode: bool, screenshot_path: String, screenshot_frame: u64) -> Self {
         Self {
             window: None,
             engine: None,
@@ -58,11 +65,16 @@ impl AegisApp {
             input_state: InputState::default(),
             screenshot_mode,
             screenshot_path,
+            screenshot_frame,
             mouse_pos: (0.0, 0.0),
             // On s'annonce AVANT d'ouvrir la fenêtre et d'initialiser Vulkan : le régisseur tient son
             // rideau baissé tant qu'aucune image n'est prouvée, et il vaut mieux qu'il sache tout de
             // suite qu'on est en train de démarrer plutôt que de nous croire morts.
             nav: NavClient::connecter("aegis"),
+            // Comme le régisseur : on se relie AVANT d'ouvrir la fenêtre. Le cœur tourne en
+            // continu de son côté, il n'attend rien de nous — mais s'il est là, autant que la
+            // première position poussée soit la toute première du jeu.
+            sidecar: SidecarClient::connecter(),
         }
     }
 
@@ -191,9 +203,22 @@ impl AegisApp {
         self.party_game.update(dt, &self.input_state);
         self.input_state.jump_pressed_this_frame = false;
 
+        // On pousse NOTRE position au cœur, et rien d'autre : lui seul décide ce que les autres
+        // en voient. La cadence est plafonnée dans le client, l'appelant n'a pas à la connaître.
+        let moi = self.party_game.human_player().position;
+        self.sidecar.pousser_ma_pose(moi.x, moi.y, 0.0, 0.0, 0.0);
+
+        let (envoyes, recus, avatars) = self.sidecar.compteurs();
+        let etat_pont = hud::EtatPont {
+            relie: self.sidecar.relie(),
+            envoyes,
+            recus,
+            avatars,
+        };
+
         match engine.gpu.begin_frame(window) {
             Ok((cmd, image_index)) => {
-                party_render_pass.render_party_scene(&engine.gpu, cmd, image_index, &self.party_game);
+                party_render_pass.render_party_scene(&engine.gpu, cmd, image_index, &self.party_game, &etat_pont);
                 if engine.gpu.end_frame(cmd, image_index, window).is_err() {
                     let size = window.inner_size();
                     if size.width > 0 && size.height > 0 {
@@ -358,7 +383,7 @@ impl ApplicationHandler for AegisApp {
                 self.render_frame();
 
                 if let Some(engine) = self.engine.as_ref() {
-                    if self.screenshot_mode && engine.frame_count >= 5 {
+                    if self.screenshot_mode && engine.frame_count >= self.screenshot_frame {
                         if let Err(e) = engine.capture_screenshot(&self.screenshot_path) {
                             log::error!("Erreur lors de la capture d'écran: {:?}", e);
                         }
@@ -429,6 +454,17 @@ fn executer() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .unwrap_or_else(|| "aegis_screenshot.png".to_string());
 
+    // À quelle image capturer. La cinquième suffit pour juger un décor, mais pas pour voir un
+    // état qui met du temps à s'établir — une animation qui démarre, un compteur réseau qui
+    // monte. Sans ce réglage on ne peut vérifier que le tout début d'une partie, et c'est
+    // précisément ce qui a laissé passer un HUD entièrement à l'envers.
+    let screenshot_frame: u64 = args
+        .iter()
+        .position(|a| a == "--frame")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+
     log::info!("=== Démarrage d'AegisEngine v1.0.0 (Party Platformer Game) ===");
     if screenshot_mode {
         log::info!("Mode Capture d'Écran Autonome Activé : Exportation vers {}", screenshot_path);
@@ -441,7 +477,7 @@ fn executer() -> Result<(), Box<dyn std::error::Error>> {
     builder.with_x11();
     let event_loop = builder.build()?;
 
-    let mut app = AegisApp::new(screenshot_mode, screenshot_path);
+    let mut app = AegisApp::new(screenshot_mode, screenshot_path, screenshot_frame);
     event_loop.run_app(&mut app)?;
 
     Ok(())
