@@ -207,10 +207,33 @@ fn decrire_carte(grid: &TileGrid, traps: &TrapManager) -> String {
 //  L'ANALYSE — rejouer ce que l'humain a fait, dans le simulateur du solveur
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+/// Un saut, tel que le joueur l'a réellement fait : d'où, vers où, et ce qu'il a fallu.
+#[derive(Debug, Clone, Copy)]
+pub struct Saut {
+    pub depuis: (i32, i32),
+    pub vers: (i32, i32),
+    /// Hauteur gagnée au sommet, en tuiles — ce qu'un solveur doit savoir produire.
+    pub montee: f32,
+    /// Distance horizontale franchie.
+    pub portee: f32,
+    pub images: usize,
+}
+
 /// Ce qu'on apprend en rejouant une manche enregistrée.
 #[derive(Debug)]
 pub struct Analyse {
     pub instants: usize,
+    /// Le SQUELETTE du chemin : les tuiles où le joueur a posé les pieds, dans l'ordre.
+    ///
+    /// C'est la vraie structure du parcours. Une manche fait ~2 400 images, mais seulement
+    /// quelques dizaines d'appuis distincts : **le chemin est court, c'est sa description image
+    /// par image qui est longue.** Toute la difficulté du solveur tient dans cet écart.
+    pub appuis: Vec<(i32, i32)>,
+    /// Les sauts, entre deux appuis.
+    pub sauts: Vec<Saut>,
+    /// Le plus haut saut de la manche — la contrainte que le solveur doit pouvoir reproduire.
+    pub montee_max: f32,
+    pub portee_max: f32,
     /// L'humain a-t-il atteint l'arrivée, d'après la trace ?
     pub humain_arrive: bool,
     /// Et en REJOUANT ses entrées dans la physique du TAS ?
@@ -312,8 +335,53 @@ pub fn analyser(chemin: &std::path::Path) -> Result<Analyse, String> {
         }
     }
 
+    // ── LA GÉOMÉTRIE DU CHEMIN HUMAIN ───────────────────────────────────────────────────────
+    //
+    // On ne garde que les CHANGEMENTS de tuile foulée : c'est le squelette du parcours. Une
+    // manche de 2 400 images tient en quelques dizaines d'appuis — et cet écart est exactement le
+    // problème du solveur, qui cherche image par image ce qui se décrit en dizaines d'étapes.
+    let mut appuis: Vec<(i32, i32)> = Vec::new();
+    let mut sauts: Vec<Saut> = Vec::new();
+    let mut dernier_sol: Option<(usize, (i32, i32), f32)> = None;
+    let mut sommet = f32::MIN;
+
+    let mut j = Player::new(grid.start_pos);
+    for (i, (dt, g, d, saut, _, _)) in trace.iter().enumerate() {
+        let entree = InputState {
+            left: *g, right: *d, up: *saut, jump_pressed_this_frame: *saut, ..Default::default()
+        };
+        j.update(*dt, &entree, &grid, &traps);
+        sommet = sommet.max(j.position.y);
+        if j.state == PlayerState::OnGround {
+            let tuile = (j.position.x.round() as i32, j.position.y.round() as i32);
+            if appuis.last() != Some(&tuile) {
+                if let Some((i0, t0, y0)) = dernier_sol {
+                    // Un saut n'est retenu que s'il a quitté le sol : sinon c'est de la marche.
+                    if i - i0 > 3 && sommet > y0 + 0.2 {
+                        sauts.push(Saut {
+                            depuis: t0,
+                            vers: tuile,
+                            montee: sommet - y0,
+                            portee: (tuile.0 - t0.0).abs() as f32,
+                            images: i - i0,
+                        });
+                    }
+                }
+                appuis.push(tuile);
+                dernier_sol = Some((i, tuile, j.position.y));
+                sommet = j.position.y;
+            }
+        }
+    }
+    let montee_max = sauts.iter().map(|s| s.montee).fold(0.0f32, f32::max);
+    let portee_max = sauts.iter().map(|s| s.portee).fold(0.0f32, f32::max);
+
     Ok(Analyse {
         instants: trace.len(),
+        appuis,
+        sauts,
+        montee_max,
+        portee_max,
         humain_arrive,
         rejeu_arrive,
         divergence,

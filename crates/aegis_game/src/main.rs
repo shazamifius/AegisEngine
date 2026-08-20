@@ -744,12 +744,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match boite_noire::analyser(std::path::Path::new(chemin)) {
             Ok(a) => {
                 println!("instants        : {}", a.instants);
+                println!("appuis (tuiles) : {}  <- LE SQUELETTE du chemin", a.appuis.len());
+                println!("sauts           : {}", a.sauts.len());
+                println!("montee max      : {:.2} tuiles", a.montee_max);
+                println!("portee max      : {:.2} tuiles", a.portee_max);
                 println!("humain arrive   : {}", a.humain_arrive);
                 println!("rejeu arrive    : {}", a.rejeu_arrive);
                 println!("ecart max       : {:.3} unites", a.ecart_max);
                 match a.divergence {
                     Some((n, e)) => println!("divergence      : image {n} (ecart {e:.3})"),
                     None => println!("divergence      : aucune au-dela d'une demi-tuile"),
+                }
+                if !a.sauts.is_empty() {
+                    println!("--- les sauts, dans l'ordre :");
+                    for (n, s) in a.sauts.iter().enumerate() {
+                        println!(
+                            "  {n:>2}. ({:>3},{:>3}) -> ({:>3},{:>3})  montee {:.2}  portee {:.0}  {} images",
+                            s.depuis.0, s.depuis.1, s.vers.0, s.vers.1, s.montee, s.portee, s.images
+                        );
+                    }
                 }
                 println!();
                 // Le diagnostic en clair : c'est lui qui dit où creuser.
