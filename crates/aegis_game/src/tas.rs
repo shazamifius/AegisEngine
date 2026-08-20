@@ -308,13 +308,23 @@ pub fn resoudre(grid: &TileGrid, budget: usize) -> Verdict {
 /// Le partage ne suit PAS l'intuition « ça bouge donc c'est temporaire » — il suit la condition de
 /// mort, lue dans `check_player_death` :
 ///
+/// ⚠⚠ **ET LA CONDITION SE LIT DANS `update`, PAS DANS `check_player_death`.** C'est l'erreur que
+/// j'ai commise le 20 août, et c'est lui qui l'a trouvée EN JOUANT : « le TAS oublie complètement
+/// les lasers, tu sais ceux qui ne s'arrêtent jamais, et il passe carrément à travers ».
+///
+/// `check_player_death` teste `if *active` pour le laser — la signature d'un piège cyclique. Mais
+/// `TrapManager::update` contient `*active = true;` avec, écrit noir sur blanc, le commentaire
+/// « Laser continu en jeu ! ». Le champ existe et ne bascule **jamais**. J'avais jugé sur la forme
+/// du contrôle au lieu du comportement, et le solveur traversait des lasers permanents.
+///
 /// - **`SpikeTrap` reste** : il tue sans condition.
-/// - **`SawBlade` reste**, et c'est le cas contre-intuitif : *sa rotation est purement visuelle*.
-///   Elle tue dès que la distance est inférieure à son rayon, en permanence. Une scie est un mur
-///   rond, pas un piège à timer.
-/// - **`LaserEmitter` et `Flamethrower` partent** : ils ne tuent que `if *active`.
-/// - **`CannonTurret` part** aussi, avec ses projectiles : elle ne tue pas au contact, ce sont ses
-///   tirs qui frappent — et un tir, ça passe.
+/// - **`SawBlade` reste**, et c'est le premier cas contre-intuitif : *sa rotation est purement
+///   visuelle*. Elle tue dès que la distance est inférieure à son rayon. Une scie est un mur rond.
+/// - **`LaserEmitter` RESTE** — second cas contre-intuitif, et le plus coûteux : il *paraît*
+///   cyclique et ne l'est pas.
+/// - **`Flamethrower` part** : lui bascule pour de vrai (`timer >= 1.5` → `*active = !*active`).
+/// - **`CannonTurret` part** aussi, avec ses projectiles : elle ne tue pas au contact, elle TIRE
+///   par intervalles — et un tir, ça passe.
 ///
 /// # Ce que ce choix rend possible, et c'est le vrai but
 ///
@@ -337,7 +347,9 @@ pub fn vue_permanente(traps: &TrapManager) -> TrapManager {
         .filter(|t| {
             matches!(
                 t.kind,
-                crate::traps::TrapKind::SpikeTrap | crate::traps::TrapKind::SawBlade { .. }
+                crate::traps::TrapKind::SpikeTrap
+                    | crate::traps::TrapKind::SawBlade { .. }
+                    | crate::traps::TrapKind::LaserEmitter { .. }
             )
         })
         .cloned()
@@ -1566,6 +1578,36 @@ mod tests {
         );
     }
 
+    /// **Le test qui manquait, et qu'il a trouvé en jouant.** Un laser barre un couloir bas : le
+    /// solveur doit buter dessus, pas le traverser.
+    ///
+    /// Il a échoué à sa première écriture, et c'était le but : `vue_permanente` retirait le laser
+    /// parce que `check_player_death` le teste `if *active`. Or `TrapManager::update` force
+    /// `*active = true` à chaque image — « Laser continu en jeu ! », dit le commentaire. La
+    /// condition d'un piège se lit dans sa MISE À JOUR, pas dans la forme de son contrôle de mort.
+    #[test]
+    fn un_laser_barre_le_passage_car_il_ne_s_eteint_jamais() {
+        let bas = couloir_bas(20);
+        assert!(
+            matches!(resoudre_avec(&bas, &TrapManager::new(), 60_000), Verdict::Franchissable(_)),
+            "temoin creux : ce couloir est infranchissable MEME SANS laser"
+        );
+        let mut laser = TrapManager::new();
+        laser.add_trap(
+            Vec2::new(10.0, 1.0),
+            crate::traps::TrapKind::LaserEmitter {
+                dir: crate::traps::Direction::Up,
+                active: true,
+                timer: 0.0,
+            },
+            0,
+        );
+        assert!(
+            matches!(resoudre_avec(&bas, &laser, 60_000), Verdict::PasTrouve { .. }),
+            "un laser ne s'eteint JAMAIS : le solveur ne doit pas passer au travers"
+        );
+    }
+
     /// Le filtre garde ce qui tue toujours et retire ce qui s'éteint — vérifié sur la liste, pas
     /// sur l'intuition « ça bouge donc c'est temporaire ».
     #[test]
@@ -1580,10 +1622,10 @@ mod tests {
         tous.add_trap(p, TrapKind::CannonTurret { dir: Direction::Up, fire_rate: 2.5, timer: 0.0 }, 0);
 
         let vue = vue_permanente(&tous);
-        assert_eq!(vue.traps.len(), 2, "seuls les pics et la scie tuent sans condition");
+        assert_eq!(vue.traps.len(), 3, "les pics, la scie ET LE LASER tuent sans condition");
         assert!(vue.traps.iter().all(|t| matches!(
             t.kind,
-            TrapKind::SpikeTrap | TrapKind::SawBlade { .. }
+            TrapKind::SpikeTrap | TrapKind::SawBlade { .. } | TrapKind::LaserEmitter { .. }
         )));
         assert!(vue.projectiles.is_empty(), "un tir en vol est l'incarnation meme du danger qui passe");
     }
