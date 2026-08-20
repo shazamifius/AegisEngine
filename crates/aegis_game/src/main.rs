@@ -13,6 +13,7 @@ mod tas;
 mod vote;
 mod entraide;
 mod console;
+mod boite_noire;
 mod objects;
 mod nav_client;
 mod sidecar_client;
@@ -63,6 +64,8 @@ struct AegisApp {
     vote: Option<vote::Vote>,
     /// La console de pilotage (inerte sans `AEGIS_CONSOLE`).
     pupitre: std::sync::Arc<console::Pupitre>,
+    /// L'enregistreur de parties (inerte sans `AEGIS_BOITE_NOIRE`).
+    boite: boite_noire::BoiteNoire,
     /// Touches à relâcher à la prochaine image : un `appui` console est un FRONT, pas un maintien.
     a_relacher: Vec<String>,
     /// La phase du tour précédent, pour ne lancer la vérification qu'aux transitions.
@@ -94,6 +97,7 @@ impl AegisApp {
             verificateur: tas::Verificateur::nouveau(),
             vote: None,
             pupitre: console::ouvrir(),
+            boite: boite_noire::BoiteNoire::nouvelle(),
             a_relacher: Vec::new(),
             phase_precedente: party_game::GamePhase::Drafting,
             demonstration: None,
@@ -330,6 +334,9 @@ impl AegisApp {
         let dt = engine.delta_time();
 
         self.party_game.update(dt, &self.input_state);
+        if let Some(moi) = self.party_game.players.iter().find(|p| p.is_human) {
+            self.boite.noter(dt, &self.input_state, &moi.player);
+        }
         self.input_state.jump_pressed_this_frame = false;
         publier_etat_console(
             &self.pupitre,
@@ -363,9 +370,17 @@ impl AegisApp {
         let phase = self.party_game.phase;
         if phase != self.phase_precedente {
             match phase {
-                party_game::GamePhase::Running => self
-                    .verificateur
-                    .lancer(&self.party_game.grid, &self.party_game.traps),
+                party_game::GamePhase::Running => {
+                    self.verificateur
+                        .lancer(&self.party_game.grid, &self.party_game.traps);
+                    // La carte est figée AU COUP D'ENVOI : les pièges bougent ensuite, et une
+                    // carte relevée après coup ne serait plus celle que le joueur a franchie.
+                    self.boite.ouvrir_manche(
+                        self.party_game.round_number,
+                        &self.party_game.grid,
+                        &self.party_game.traps,
+                    );
+                }
                 party_game::GamePhase::Drafting => {
                     self.verificateur.oublier();
                     self.demonstration = None;
@@ -373,6 +388,11 @@ impl AegisApp {
                     self.vote = None;
                 }
                 party_game::GamePhase::Leaderboard => {
+                    // Fin de course : on écrit, avec le couple qui fait tout l'intérêt du fichier
+                    // — l'humain est-il arrivé, et qu'en disait le TAS ?
+                    let arrive = self.party_game.players.iter().any(|p| p.is_human && p.has_finished);
+                    let verdict = format!("{:?}", self.verificateur.etat());
+                    self.boite.fermer_manche(arrive, &verdict);
                     // Personne n'a franchi la ligne : on montre que c'était possible, et
                     // comment. C'est le moment exact où la question se pose.
                     let personne = !self.party_game.players.iter().any(|p| p.has_finished);
@@ -711,6 +731,48 @@ impl ApplicationHandler for AegisApp {
 /// D'où cet enrobage : `main` ne fait que déléguer, et déposer le témoin si le jeu a refusé de
 /// démarrer. Le message d'erreur d'origine reste affiché, on n'enlève rien.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ── MODE ANALYSE : `aegis_game --analyser <fichier>` ─────────────────────────────────────
+    // Aucune fenêtre, aucun Vulkan : il rejoue un enregistrement dans la physique du solveur et
+    // rend son verdict. C'est ce qui permet de l'exécuter par SSH, sur n'importe quelle machine,
+    // et surtout de rejouer dix fois la même partie — ce qu'un écran ne permet jamais.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--analyser") {
+        let Some(chemin) = args.get(i + 1) else {
+            eprintln!("usage : aegis_game --analyser <fichier de boite noire>");
+            std::process::exit(2);
+        };
+        match boite_noire::analyser(std::path::Path::new(chemin)) {
+            Ok(a) => {
+                println!("instants        : {}", a.instants);
+                println!("humain arrive   : {}", a.humain_arrive);
+                println!("rejeu arrive    : {}", a.rejeu_arrive);
+                println!("ecart max       : {:.3} unites", a.ecart_max);
+                match a.divergence {
+                    Some((n, e)) => println!("divergence      : image {n} (ecart {e:.3})"),
+                    None => println!("divergence      : aucune au-dela d'une demi-tuile"),
+                }
+                println!();
+                // Le diagnostic en clair : c'est lui qui dit où creuser.
+                if a.humain_arrive && a.rejeu_arrive {
+                    println!("=> LA PHYSIQUE EST FIDELE. La sequence gagnante existe dans le monde du");
+                    println!("   solveur : s'il a dit « pas trouve », c'est sa RECHERCHE qui echoue");
+                    println!("   (maille, budget, heuristique) — pas sa simulation.");
+                } else if a.humain_arrive && !a.rejeu_arrive {
+                    println!("=> LE SIMULATEUR DU TAS DIVERGE DU JEU. L'humain est arrive, ses entrees");
+                    println!("   rejouees non. Tout ce que le solveur affirme devient suspect, y compris");
+                    println!("   ses succes — c'est le plus grave des deux defauts.");
+                } else {
+                    println!("=> L'humain n'est pas arrive sur cette manche : rien a conclure du rejeu.");
+                }
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("[analyse] {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     plantage::installer();
     let resultat = executer();
     if let Err(e) = &resultat {
