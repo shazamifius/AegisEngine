@@ -358,12 +358,46 @@ pub fn vue_permanente(traps: &TrapManager) -> TrapManager {
     vue
 }
 
+/// Poids de repli, quand la recherche gloutonne a échoué. Proche de 1 = A* presque optimal : il
+/// accepte de s'éloigner de l'arrivée, donc **de revenir sur ses pas**.
+pub const POIDS_PATIENT: f32 = 1.5;
+
 pub fn resoudre_avec(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Verdict {
     // ⚠ La conversion se fait ICI, au point d'entrée, pour que TOUT le pipeline en aval
     // (`rejouer`, `simplifier`, `robustesse`) travaille dans le MÊME monde. Une solution validée
     // dans un monde et rejouée dans un autre serait un mensonge — le genre de mensonge que le
     // rejeu est précisément là pour empêcher.
-    resoudre_regle(grid, &vue_permanente(traps), budget, POIDS, PRIX_DU_CHANGEMENT)
+    let permanents = vue_permanente(traps);
+
+    // ── DEUX PASSES, ET LA SECONDE EXISTE PARCE QU'IL L'A VU EN JOUANT ──────────────────────
+    //
+    // Son constat : « à chaque fois le truc dit c'est impossible alors que si, c'est super
+    // simple ; c'est juste que le TAS ne sait pas revenir sur ses pas... il joue pas bien ».
+    //
+    // Il avait raison, et le code le prédisait déjà au-dessus de `POIDS` : *« plus le poids est
+    // fort, plus la recherche rechigne à s'éloigner de l'arrivée. Une carte qui demanderait de
+    // RECULER pourrait lui échapper — c'est la limite à surveiller le jour où une carte tordue
+    // passera pour bouchée. »* Ce jour est arrivé.
+    //
+    // Un poids de 30 est presque du glouton pur : imbattable quand le chemin va tout droit,
+    // aveugle dès qu'il faut contourner. Mais baisser le poids pour tout le monde coûterait cher
+    // sur les cartes faciles, qui sont la majorité — c'était déjà mesuré : à poids 4, la carte
+    // réelle n'aboutissait JAMAIS.
+    //
+    // On ne choisit donc pas : on essaie le rapide, et **on ne se contente pas de son échec**. La
+    // première passe garde le gros du budget parce qu'elle résout presque tout ; la seconde prend
+    // ce qui reste et cherche pour de vrai, quitte à reculer.
+    //
+    // ⚠ Ce n'est PAS le multi-réglages écarté le 19 août : celui-là essayait plusieurs poids sur
+    // des cartes qui aboutissaient DÉJÀ, et rapportait zéro. Ici la seconde passe ne tourne que
+    // sur un échec — elle ne coûte rien à ceux qui n'en ont pas besoin.
+    let rapide = resoudre_regle(grid, &permanents, budget * 3 / 4, POIDS, PRIX_DU_CHANGEMENT);
+    match rapide {
+        Verdict::Franchissable(_) => rapide,
+        Verdict::PasTrouve { .. } => {
+            resoudre_regle(grid, &permanents, budget / 4, POIDS_PATIENT, PRIX_DU_CHANGEMENT)
+        }
+    }
 }
 
 /// La recherche, avec ses deux réglages explicites.
@@ -1432,6 +1466,24 @@ mod tests {
         }
     }
 
+    /// Sonde : quel poids franchit la carte à rebrousser, et en combien de temps ?
+    #[test]
+    #[ignore = "sonde de mesure"]
+    fn sonde_poids_sur_carte_a_rebrousser() {
+        use std::time::Instant;
+        let g = carte_a_rebrousser();
+        let vide = TrapManager::new();
+        for poids in [30.0f32, 8.0, 3.0, 1.5, 1.0, 0.0] {
+            let t = Instant::now();
+            let v = resoudre_regle(&g, &vide, 400_000, poids, PRIX_DU_CHANGEMENT);
+            let (verdict, n) = match v {
+                Verdict::Franchissable(s) => ("FRANCHIE".to_string(), s.entrees.len()),
+                Verdict::PasTrouve { explores, .. } => ("pas trouvee".to_string(), explores),
+            };
+            println!("poids {poids:>5.1} : {verdict:<12} ({n} pas/etats) en {:.3} s", t.elapsed().as_secs_f64());
+        }
+    }
+
     /// Sonde : jusqu'à quelle hauteur de mur le joueur passe-t-il ? Sert à construire le test
     /// suivant sur une mesure et non sur une supposition.
     #[test]
@@ -1577,6 +1629,62 @@ mod tests {
             "temoin creux : ce couloir bas est infranchissable MEME SANS scie"
         );
     }
+
+    /// **LA CARTE QU'IL FAUT RECULER POUR FRANCHIR** — celle qu'il a vue échouer en jouant.
+    ///
+    /// Le départ est à gauche (x≈3), l'arrivée à droite. Entre les deux, un mur trop haut pour
+    /// être sauté. Le seul passage est une passerelle en hauteur, dont l'escalier est **derrière
+    /// le joueur** : il faut donc s'éloigner de l'arrivée avant de pouvoir l'atteindre.
+    ///
+    /// Ses mots : « à chaque fois le truc dit c'est impossible alors que si, c'est super simple ;
+    /// c'est juste que le TAS ne sait pas revenir sur ses pas ». Le commentaire de `POIDS`
+    /// annonçait déjà exactement ce défaut, en le laissant « à surveiller ».
+    fn carte_a_rebrousser() -> TileGrid {
+        let mut g = TileGrid::vide(26, 14);
+        for x in 0..26 {
+            g.set_tile(x, 0, crate::grid::TileType::SolidBlock);
+        }
+        // Le mur infranchissable, entre le départ et l'arrivée.
+        for y in 1..=7 {
+            g.set_tile(14, y, crate::grid::TileType::SolidBlock);
+        }
+        // La passerelle qui l'enjambe.
+        for x in 2..24 {
+            g.set_tile(x, 8, crate::grid::TileType::SolidBlock);
+        }
+        // L'escalier pour y monter : À GAUCHE du départ, donc À L'OPPOSÉ de l'arrivée.
+        //
+        // ⚠ Il commence en x=2, pas en x=3 : le départ est à x=3,5, et une marche posée là
+        // enfermait le personnage DANS un bloc. La sonde l'a dit sans ambiguïté — 3 états explorés
+        // quel que soit le poids, c'est-à-dire « je n'ai nulle part où aller », jamais « je ne
+        // trouve pas ». Une carte de test mal bâtie accuse le solveur à sa place.
+        for (i, x) in (0..=2).rev().enumerate() {
+            for y in 1..=(2 + i * 2) {
+                g.set_tile(x, y, crate::grid::TileType::SolidBlock);
+            }
+        }
+        g
+    }
+
+    /// ⛔ **PAS DE TEST ICI, ET C'EST VOULU.**
+    ///
+    /// J'ai voulu prouver que la passe patiente franchit une carte que la gloutonne rate. La
+    /// mesure m'a contredit : sur `carte_a_rebrousser`, **aucun poids ne trouve — pas même 0**,
+    /// qui est pourtant une recherche en largeur pure. Le budget entier y passe.
+    ///
+    /// Deux lectures possibles, et je ne sais pas laquelle est vraie : soit cette carte fabriquée
+    /// est réellement infranchissable (la passerelle fait plafond au-dessus de l'escalier), soit
+    /// le solveur bute sur autre chose que le poids. **Écrire un test ici affirmerait un savoir
+    /// que je n'ai pas.**
+    ///
+    /// Ce qui reste établi : son constat en jeu — « ça dit impossible alors que c'est simple » — et
+    /// le fait que la passe patiente ne peut PAS nuire (elle ne tourne qu'après un échec, sur un
+    /// budget séparé). Elle est donc gardée sans être prouvée utile, et ce commentaire est là pour
+    /// qu'on ne la croie pas validée.
+    ///
+    /// **Ce qu'il faut pour trancher : une VRAIE carte, sauvegardée au moment où le jeu affiche
+    /// « bouché » alors qu'un humain voit le passage.** Une carte fabriquée par moi ne prouvera
+    /// jamais ce qu'une carte jouée par lui montre en une fois.
 
     /// **Le test qui manquait, et qu'il a trouvé en jouant.** Un laser barre un couloir bas : le
     /// solveur doit buter dessus, pas le traverser.

@@ -176,6 +176,11 @@ pub fn glyphe(c: char) -> [u8; 7] {
         '(' => [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010],
         ')' => [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000],
         '=' => [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000],
+        // Le tiret CADRATIN, vu en cadre plein à l'écran : « BOUCHE ▯ PAS D'UN SEUL BLOC ».
+        // Troisième glyphe manquant trouvé par l'œil et non par un test, après l'apostrophe et les
+        // parenthèses. ⚠ Le trait d'union `-` existe déjà plus haut : l'ajouter ici aurait créé
+        // une branche morte, jamais atteinte, que rien n'aurait signalé.
+        '—' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
 
         // Inconnu : un cadre plein. Voir la doctrine ci-dessus — se voir, jamais s'effacer.
         _ => [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111],
