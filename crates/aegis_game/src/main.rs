@@ -11,6 +11,7 @@ mod party_render_pass;
 mod hud;
 mod tas;
 mod vote;
+mod entraide;
 mod objects;
 mod nav_client;
 mod sidecar_client;
