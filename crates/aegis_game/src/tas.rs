@@ -141,16 +141,27 @@ pub enum Verdict {
     /// la note en tête de module.
     PasTrouve {
         explores: usize,
-        /// Le point le plus proche de l'arrivée que la recherche ait atteint — **là où ça coince**.
+        /// Le point le plus avancé où le joueur a posé les pieds. Utile à l'affichage et au
+        /// diagnostic.
         ///
-        /// Il ne coûte rien : la recherche calcule déjà cette distance pour son heuristique, à
-        /// chaque état. On cessait simplement de la regarder au moment de rendre l'échec.
-        ///
-        /// C'est ce qui permet à [`designer_le_bouchon`] de ne pas tester la carte entière : le
-        /// bloc qui bouche est **au contact de ce point**, pas à l'autre bout du niveau. Un échec
-        /// qui dit seulement « non » oblige à tout re-chercher ; un échec qui dit *où* a déjà fait
-        /// la moitié du travail.
+        /// ⚠ Seuls les états **au sol** comptent : un joueur en chute libre n'est bloqué par
+        /// rien, il tombe. Sans cette condition, ce champ rendait un point sous le niveau du sol
+        /// — à vol d'oiseau, un joueur qui plonge en ayant bien avancé est « plus près » de
+        /// l'arrivée qu'un joueur arrêté net contre un mur.
         plus_loin: Vec2,
+        /// **Toute la zone que le joueur a pu fouler**, en tuiles.
+        ///
+        /// C'est ce qui permet à [`designer_le_bouchon`] de ne pas éprouver les 1 600 tuiles de la
+        /// carte : le bloc qui bouche est **au contact de cette frontière**. Un échec qui dit
+        /// seulement « non » oblige à tout re-chercher ; un échec qui dit *jusqu'où on est allé* a
+        /// déjà fait la moitié du travail.
+        ///
+        /// ⚠ La première version ne gardait que le point le plus avancé et cherchait dans un
+        /// rayon autour. Sur la vraie carte, le joueur s'arrête **dix tuiles avant** le mur —
+        /// bloqué par le relief bien avant lui. Le rayon ne l'atteignait jamais, et le TAS rendait
+        /// « aucun candidat » sur une carte murée d'un seul trait. Le blocage n'est pas au contact
+        /// du point le plus avancé : il est au bord de tout ce qu'on a atteint.
+        atteint: Vec<(i32, i32)>,
     },
 }
 
@@ -383,6 +394,9 @@ pub fn resoudre_regle(
     // donc sans un seul calcul supplémentaire : la distance sert déjà à l'heuristique.
     let mut plus_loin = depart_position;
     let mut meilleure_distance = (depart_position - arrivee).length();
+    // Les tuiles foulées. En tuiles et non en positions fines : c'est la granularité de ce qu'on
+    // cherchera ensuite (des blocs), et elle borne la mémoire à la taille de la carte.
+    let mut atteint: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
 
     while let Some(piste) = file.pop() {
         if explores >= budget {
@@ -390,10 +404,24 @@ pub fn resoudre_regle(
         }
         explores += 1;
 
-        let distance = (piste.joueur.position - arrivee).length();
-        if distance < meilleure_distance {
-            meilleure_distance = distance;
-            plus_loin = piste.joueur.position;
+        // ⚠ SEULEMENT LES ÉTATS AU SOL. Un joueur en chute libre n'est bloqué par rien — il
+        // tombe. Sans cette condition, `plus_loin` retenait un point de CHUTE : sur la vraie
+        // carte murée, il rendait `y = -4,9`, sous le niveau du sol, parce qu'à vol d'oiseau un
+        // joueur qui plonge en ayant bien avancé est « plus près » de l'arrivée qu'un joueur
+        // arrêté net contre le mur. On cherchait alors des blocs à percer dans le vide, et
+        // `designer_le_bouchon` rendait `AucunSeul { testes: 0 }` — zéro candidat, sur une carte
+        // pourtant murée d'un seul trait.
+        //
+        // « Là où ça coince » n'est pas « le plus près de l'arrivée » : c'est **le point le plus
+        // avancé où le joueur a posé les pieds**.
+        if piste.joueur.state == PlayerState::OnGround {
+            let p = piste.joueur.position;
+            atteint.insert((p.x.round() as i32, p.y.round() as i32));
+            let distance = (p - arrivee).length();
+            if distance < meilleure_distance {
+                meilleure_distance = distance;
+                plus_loin = p;
+            }
         }
 
         for commande in Manette::REPERTOIRE {
@@ -448,7 +476,7 @@ pub fn resoudre_regle(
         }
     }
 
-    Verdict::PasTrouve { explores, plus_loin }
+    Verdict::PasTrouve { explores, plus_loin, atteint: atteint.into_iter().collect() }
 }
 
 /// Ce que la carte oppose au joueur, quand elle lui résiste.
@@ -466,6 +494,9 @@ pub enum Bouchon {
     RienABoucher,
 }
 
+/// Rayon fouillé autour du point le plus avancé, en tuiles — voir `designer_le_bouchon`.
+const RAYON_CANDIDATS: i32 = 4;
+
 /// Combien de blocs candidats on éprouve avant d'abandonner.
 ///
 /// Chaque candidat coûte une recherche complète. Douze suffisent parce qu'ils sont **triés par
@@ -473,9 +504,6 @@ pub enum Bouchon {
 /// point de blocage ET les plus avancés vers l'arrivée, c'est que le problème n'est pas un bloc
 /// isolé.
 pub const CANDIDATS_MAX: usize = 12;
-
-/// Rayon de recherche des candidats autour du point de blocage, en tuiles.
-const RAYON_CANDIDATS: i32 = 4;
 
 /// **Désigne le bloc dont le retrait débloque la carte** — la proposition que le vote soumettra.
 ///
@@ -502,44 +530,155 @@ const RAYON_CANDIDATS: i32 = 4;
 /// Que ce bloc soit le SEUL qui débloque, ni le plus juste à retirer pour celui qui l'a posé. Il
 /// est le premier trouvé dans un ordre choisi, pas un optimum. C'est assumé : le vote tranche
 /// l'équité, le solveur ne tranche que la faisabilité.
+///
+/// # ⛔ LIMITE CONNUE, NON RÉSOLUE (20 août 2026) — à lire avant de s'y fier
+///
+/// **Sur la carte réelle murée d'un trait, cette fonction rend `AucunSeul`, pas le mur.** Mesuré :
+/// 2,9 s, quatre candidats éprouvés, et le bloc évident jamais proposé.
+///
+/// La cause n'est pas dans cette fonction mais dans celle qui l'alimente : la recherche est un A*
+/// **fortement orienté** (`POIDS = 30`) qui fonce vers l'arrivée. Sur la carte réelle, elle épuise
+/// 150 000 états en ne foulant que **cinq tuiles distinctes** — elle ne cartographie donc rien.
+/// Les candidats manquent parce que la frontière est presque vide, pas parce qu'on les filtre mal.
+///
+/// Le remède n'est pas d'élargir encore le rayon (on éprouverait la carte entière, et le coût
+/// exploserait) : c'est de séparer les deux questions. *Trouver un chemin* veut une recherche
+/// gloutonne ; *savoir ce qui est atteignable* veut une propagation en largeur, sans heuristique.
+/// Ce sont deux algorithmes, pas deux réglages du même.
+///
+/// **En attendant, le vote ne doit pas être branché sur cette fonction pour de vrai** : elle
+/// répondrait « pas d'un seul bloc » sur des cartes qu'un seul bloc débloque.
 pub fn designer_le_bouchon(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Bouchon {
-    let plus_loin = match resoudre_avec(grid, traps, budget) {
+    let (atteint, plus_loin) = match resoudre_avec(grid, traps, budget) {
         Verdict::Franchissable(_) => return Bouchon::RienABoucher,
-        Verdict::PasTrouve { plus_loin, .. } => plus_loin,
+        Verdict::PasTrouve { atteint, plus_loin, .. } => (atteint, plus_loin),
     };
 
     let arrivee = grid.finish_pos;
-    let (cx, cy) = (plus_loin.x.round() as i32, plus_loin.y.round() as i32);
 
-    // Les blocs solides autour du point de blocage, du plus proche de l'arrivée au plus lointain.
+    // ── D'OÙ VIENNENT LES CANDIDATS : DEUX SOURCES, ET IL EN FAUT DEUX ───────────────────────
+    //
+    // 1. Les blocs qui **bordent la zone foulée**. C'est la source de principe : un mur qui ferme
+    //    un espace le touche forcément.
+    //
+    // 2. Les blocs **autour du point le plus avancé**, dans un petit rayon.
+    //
+    // La seconde a l'air redondante. Elle ne l'est pas, et c'est mesuré : la recherche est un A*
+    // FORTEMENT ORIENTÉ (`POIDS`), qui fonce vers l'arrivée au lieu d'explorer en largeur. Sur la
+    // carte réelle elle épuise 150 000 états en ne foulant que **cinq tuiles distinctes** — la
+    // « zone atteinte » décrit ce que la recherche a visité, pas ce qui est atteignable. S'en
+    // remettre à elle seule faisait perdre le mur d'un cas qui marchait auparavant.
+    //
+    // Garder les deux coûte quelques candidats de plus et rattrape les deux angles morts : la
+    // frontière voit large quand la recherche a exploré, le rayon voit près quand elle a foncé.
+    let mut vus: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     let mut candidats: Vec<(usize, usize, f32)> = Vec::new();
-    for dy in -RAYON_CANDIDATS..=RAYON_CANDIDATS {
-        for dx in -RAYON_CANDIDATS..=RAYON_CANDIDATS {
-            let (x, y) = (cx + dx, cy + dy);
-            if x < 0 || y < 0 || !grid.get_tile(x, y).is_solid() {
-                continue;
+    let (px, py) = (plus_loin.x.round() as i32, plus_loin.y.round() as i32);
+    let voisinage: Vec<(i32, i32)> = atteint
+        .iter()
+        .copied()
+        .chain((-RAYON_CANDIDATS..=RAYON_CANDIDATS).flat_map(|dy| {
+            (-RAYON_CANDIDATS..=RAYON_CANDIDATS).map(move |dx| (px + dx, py + dy))
+        }))
+        .collect();
+    for (tx, ty) in voisinage {
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                let (x, y) = (tx + dx, ty + dy);
+                if x < 0 || y < 0 || !grid.get_tile(x, y).is_solid() {
+                    continue;
+                }
+                // ⚠ La ligne y = 0 est le SOL de la carte. La percer ne débloque pas un passage :
+                // elle ouvre un trou par lequel on tombe. Un vote qui proposerait ça serait une
+                // farce.
+                if y == 0 {
+                    continue;
+                }
+                let (ux, uy) = (x as usize, y as usize);
+                if vus.insert((ux, uy)) {
+                    candidats.push((ux, uy, (Vec2::new(x as f32, y as f32) - arrivee).length()));
+                }
             }
-            // ⚠ La ligne y = 0 est le SOL de la carte. La percer ne débloque pas un passage : elle
-            // ouvre un trou par lequel on tombe. Un vote qui proposerait ça serait une farce.
-            if y == 0 {
-                continue;
-            }
-            let d = (Vec2::new(x as f32, y as f32) - arrivee).length();
-            candidats.push((x as usize, y as usize, d));
         }
     }
-    candidats.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    // Triés par distance à l'arrivée CROISSANTE : un mur se perce du côté où l'on veut aller.
+    candidats.sort_by(|a, b| {
+        a.2.partial_cmp(&b.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            // Départage STABLE : deux blocs à distance égale doivent être ordonnés pareil sur
+            // toutes les machines, sinon elles ne proposeraient pas le même bloc au vote.
+            .then(a.0.cmp(&b.0))
+            .then(a.1.cmp(&b.1))
+    });
 
-    let mut testes = 0usize;
-    for (x, y, _) in candidats.into_iter().take(CANDIDATS_MAX) {
-        testes += 1;
-        let mut sans_lui = grid.clone();
-        sans_lui.set_tile(x, y, crate::grid::TileType::Air);
-        if matches!(resoudre_avec(&sans_lui, traps, budget), Verdict::Franchissable(_)) {
-            return Bouchon::Bloc { x, y };
-        }
+    let candidats: Vec<(usize, usize)> =
+        candidats.into_iter().take(CANDIDATS_MAX).map(|(x, y, _)| (x, y)).collect();
+    if candidats.is_empty() {
+        return Bouchon::AucunSeul { testes: 0 };
     }
-    Bouchon::AucunSeul { testes }
+
+    // ── Les candidats sont ÉPROUVÉS EN PARALLÈLE, mais le résultat reste DÉTERMINISTE ─────────
+    //
+    // Chaque candidat est une recherche complète et indépendante : douze d'entre elles sur un
+    // seul cœur pendant que onze dorment, c'est le vrai coût de cette fonction (3,8 s mesurées,
+    // contre 3 ms pour une carte qui passe).
+    //
+    // ⚠ MAIS ON NE PREND PAS « LE PREMIER QUI RÉPOND ». Plusieurs blocs peuvent débloquer, et
+    // l'ordre d'arrivée des fils dépend de l'humeur de l'ordonnanceur. Deux machines
+    // désigneraient alors des blocs DIFFÉRENTS pour la même carte — et le vote qui suit porterait
+    // sur deux propositions distinctes selon l'écran qu'on regarde. On teste donc tout le monde,
+    // puis on retient le premier dans l'ORDRE DE TRI, celui qui est le même partout.
+    //
+    // C'est ce qui rend cette fonction distribuable plus tard : un résultat qui dépend de la
+    // vitesse des machines n'est pas partageable, un résultat trié l'est.
+    let fils = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1).max(1)) // ⚠ un cœur laissé au jeu : il ne doit JAMAIS ramer
+        .unwrap_or(1)
+        .min(candidats.len());
+
+    let verdicts: Vec<bool> = {
+        let paquets: Vec<Vec<(usize, (usize, usize))>> = (0..fils)
+            .map(|f| {
+                candidats
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .skip(f)
+                    .step_by(fils) // entrelacé : les candidats coûteux se répartissent d'eux-mêmes
+                    .collect()
+            })
+            .collect();
+
+        let mut resultats: Vec<(usize, bool)> = std::thread::scope(|portee| {
+            let mains: Vec<_> = paquets
+                .into_iter()
+                .map(|paquet| {
+                    portee.spawn(move || {
+                        paquet
+                            .into_iter()
+                            .map(|(i, (x, y))| {
+                                let mut sans_lui = grid.clone();
+                                sans_lui.set_tile(x, y, crate::grid::TileType::Air);
+                                let ok = matches!(
+                                    resoudre_avec(&sans_lui, traps, budget),
+                                    Verdict::Franchissable(_)
+                                );
+                                (i, ok)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            mains.into_iter().flat_map(|m| m.join().unwrap_or_default()).collect()
+        });
+        resultats.sort_by_key(|(i, _)| *i);
+        resultats.into_iter().map(|(_, ok)| ok).collect()
+    };
+
+    match verdicts.iter().position(|ok| *ok) {
+        Some(i) => Bouchon::Bloc { x: candidats[i].0, y: candidats[i].1 },
+        None => Bouchon::AucunSeul { testes: candidats.len() },
+    }
 }
 
 /// Rejoue une séquence d'entrées et dit si elle atteint réellement l'arrivée.
@@ -1027,6 +1166,57 @@ mod tests {
     /// L'assertion qui compte n'est pas « un bloc a été nommé » — n'importe quel bug nommerait un
     /// bloc. C'est : **on retire celui qu'il désigne, et la carte passe.** Le test refait donc
     /// lui-même le geste que le vote fera.
+    /// **Où passe le temps ?** Avant de distribuer quoi que ce soit, mesurer.
+    #[test]
+    #[ignore = "banc de mesure"]
+    fn banc_ou_passe_le_temps_du_tas() {
+        use std::time::Instant;
+        let vide = TrapManager::new();
+
+        // 1. Une carte qui PASSE : la recherche s'arrête dès qu'elle touche l'arrivée.
+        let ok = couloir(24);
+        let t = Instant::now();
+        let _ = resoudre_avec(&ok, &vide, BUDGET_PARTIE);
+        println!("carte franchissable        : {:>8.3} s", t.elapsed().as_secs_f64());
+
+        // 2. Une carte BOUCHÉE : la recherche ne s'arrête qu'en épuisant le budget.
+        // ⚠ Couloir À PLAFOND : dans un couloir ouvert, un mur se contourne par le haut et la
+        // carte n'est pas bouchée du tout — la première version de ce banc mesurait donc une
+        // carte franchissable en croyant chronométrer un échec.
+        let mut mur = couloir_bas(24);
+        for y in 1..3 {
+            mur.set_tile(12, y, crate::grid::TileType::SolidBlock);
+        }
+        let t = Instant::now();
+        let v = resoudre_avec(&mur, &vide, BUDGET_PARTIE);
+        let explores = match v { Verdict::PasTrouve { explores, .. } => explores, _ => 0 };
+        println!("carte BOUCHEE ({explores} etats) : {:>8.3} s", t.elapsed().as_secs_f64());
+
+        // 3. Désigner le bouchon : 1 + jusqu'à 12 recherches, chacune sur une carte bouchée.
+        let t = Instant::now();
+        let b = designer_le_bouchon(&mur, &vide, BUDGET_PARTIE / 4);
+        println!("designer_le_bouchon        : {:>8.3} s  -> {b:?}", t.elapsed().as_secs_f64());
+
+        println!("coeurs disponibles : {}", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+
+        // 4. LA VRAIE CARTE, murée comme elle le serait par les joueurs : c'est le seul chiffre
+        //    qui décrit ce que trente-cinq personnes attendront devant leur écran.
+        let mut reelle = TileGrid::new(48, 24);
+        let (mx, mh) = (reelle.width / 2, reelle.height);
+        for y in 0..mh {
+            reelle.set_tile(mx, y, crate::grid::TileType::SolidBlock);
+        }
+        let t = Instant::now();
+        let b = designer_le_bouchon(&reelle, &vide, BUDGET_PARTIE / 4);
+        println!("VRAIE CARTE muree          : {:>8.3} s  -> {b:?}", t.elapsed().as_secs_f64());
+        // diagnostic : ou la recherche s'arrete-t-elle, et qu'y a-t-il autour ?
+        if let Verdict::PasTrouve { plus_loin, explores, atteint } = resoudre_avec(&reelle, &vide, BUDGET_PARTIE / 4) {
+            println!("   depart={:?} arrivee={:?} ; mur en x={mx}", reelle.start_pos, reelle.finish_pos);
+            println!("   plus_loin={plus_loin:?} apres {explores} etats");
+            println!("   tuiles foulees : {}", atteint.len());
+        }
+    }
+
     /// Sonde : jusqu'à quelle hauteur de mur le joueur passe-t-il ? Sert à construire le test
     /// suivant sur une mesure et non sur une supposition.
     #[test]
