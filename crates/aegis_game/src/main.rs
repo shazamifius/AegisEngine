@@ -12,6 +12,7 @@ mod hud;
 mod tas;
 mod vote;
 mod entraide;
+mod console;
 mod objects;
 mod nav_client;
 mod sidecar_client;
@@ -60,6 +61,10 @@ struct AegisApp {
     verificateur: tas::Verificateur,
     /// Le vote en cours sur le retrait d'un bloc qui bouche — `None` la plupart du temps.
     vote: Option<vote::Vote>,
+    /// La console de pilotage (inerte sans `AEGIS_CONSOLE`).
+    pupitre: std::sync::Arc<console::Pupitre>,
+    /// Touches à relâcher à la prochaine image : un `appui` console est un FRONT, pas un maintien.
+    a_relacher: Vec<String>,
     /// La phase du tour précédent, pour ne lancer la vérification qu'aux transitions.
     phase_precedente: party_game::GamePhase,
     /// La démonstration du parcours, montrée quand personne n'a franchi la ligne.
@@ -88,6 +93,8 @@ impl AegisApp {
             sidecar: SidecarClient::connecter(),
             verificateur: tas::Verificateur::nouveau(),
             vote: None,
+            pupitre: console::ouvrir(),
+            a_relacher: Vec::new(),
             phase_precedente: party_game::GamePhase::Drafting,
             demonstration: None,
         }
@@ -208,15 +215,130 @@ impl AegisApp {
         }
     }
 
+    /// Traduit une touche nommée par la console en entrée de jeu.
+    ///
+    /// Les noms sont ceux qu'on tape dans un terminal, pas ceux du clavier : `gauche` plutôt que
+    /// `KeyQ`. Une console de test qui exigerait des noms de touches physiques serait inutilisable
+    /// sur un clavier différent — et le projet vise déjà AZERTY, QWERTY et les flèches.
+    fn touche_console(&mut self, nom: &str, enfoncee: bool) {
+        match nom {
+            "gauche" => self.input_state.left = enfoncee,
+            "droite" => self.input_state.right = enfoncee,
+            "bas" => {
+                self.input_state.down = enfoncee;
+                self.input_state.crouch = enfoncee;
+            }
+            "saut" | "haut" => {
+                self.input_state.up = enfoncee;
+                // Le front montant, exactement comme au clavier : `jump_pressed_this_frame` est
+                // remis à faux par la boucle après chaque image.
+                if enfoncee {
+                    self.input_state.jump_pressed_this_frame = true;
+                }
+            }
+            _ => log::warn!("[console] touche inconnue : {nom}"),
+        }
+    }
+
+}
+
+/// L'instantané que la console lit. Construit une fois par image, jamais à la demande : une
+/// lecture qui traverserait le jeu pendant qu'il travaille prendrait des verrous au mauvais moment.
+///
+/// Fonction LIBRE et non méthode : Rust autorise les emprunts de champs disjoints d'une struct,
+/// mais pas à travers un `&self` quand un autre champ est déjà emprunté en `&mut` (le moteur de
+/// rendu, ici). Passer les morceaux explicitement dit d'ailleurs mieux ce dont l'état dépend.
+#[allow(clippy::too_many_arguments)]
+fn publier_etat_console(
+    pupitre: &console::Pupitre,
+    g: &party_game::PartyGame,
+    sidecar: &SidecarClient,
+    verificateur: &tas::Verificateur,
+    vote: Option<&vote::Vote>,
+    demonstration: bool,
+) {
+    {
+        let moi = g.players.iter().find(|p| p.is_human);
+        pupitre.publier(console::Etat {
+            phase: format!("{:?}", g.phase),
+            manche: g.round_number,
+            minuteur: g.minuteur_de_phase().0,
+            joueurs: g
+                .players
+                .iter()
+                .map(|p| (p.name.clone(), p.total_score, p.has_finished))
+                .collect(),
+            avatars_distants: sidecar.avatars().len(),
+            envoyes: sidecar.compteurs().0,
+            recus: sidecar.compteurs().1,
+            carte: format!("{:?}", verificateur.etat()),
+            bouchon: format!("{:?}", verificateur.bouchon()),
+            vote: vote.map(|v| (v.bloc.0, v.bloc.1, v.pour(), v.seuil(), v.reste)),
+            position: moi.map(|p| (p.player.position.x, p.player.position.y)).unwrap_or((0.0, 0.0)),
+            demonstration,
+        });
+    }
+}
+
+impl AegisApp {
+
     fn render_frame(&mut self) {
+        // ── LA CONSOLE PARLE ICI, ET NULLE PART AILLEURS ────────────────────────────────────
+        // Un seul point d'entrée, juste avant la mise à jour : ses ordres suivent exactement le
+        // même chemin qu'un appui clavier. Sans quoi on testerait un jeu qui n'est pas celui
+        // qu'on joue.
+        //
+        // Les touches d'un `appui` sont relâchées ICI, une image après avoir été enfoncées : le
+        // saut ne se déclenche qu'au FRONT montant, et une touche laissée enfoncée par la console
+        // ne sauterait qu'une fois puis resterait morte.
+        for nom in std::mem::take(&mut self.a_relacher) {
+            self.touche_console(&nom, false);
+        }
+        for ordre in self.pupitre.prendre_les_ordres() {
+            match ordre {
+                console::Ordre::Touche { nom, enfoncee } => self.touche_console(&nom, enfoncee),
+                console::Ordre::Appui { nom } => {
+                    self.touche_console(&nom, true);
+                    self.a_relacher.push(nom);
+                }
+                console::Ordre::Voter { pour } => {
+                    if let (Some(v), Some(moi)) = (
+                        self.vote.as_mut(),
+                        self.party_game.players.iter().find(|p| p.is_human),
+                    ) {
+                        let b = if pour { vote::Bulletin::Pour } else { vote::Bulletin::Contre };
+                        v.voter(moi.id, b);
+                    }
+                }
+                console::Ordre::Capture { chemin } => {
+                    self.screenshot_mode = true;
+                    self.screenshot_path = chemin;
+                    self.screenshot_frame = 0;
+                }
+                console::Ordre::Quitter => {
+                    log::info!("[console] arrêt demandé.");
+                    std::process::exit(0);
+                }
+            }
+        }
+
         let (window, engine, party_render_pass) = match (self.window.as_ref(), self.engine.as_mut(), self.party_render_pass.as_mut()) {
             (Some(w), Some(e), Some(r)) => (w, e, r),
             _ => return,
         };
 
         let dt = engine.delta_time();
+
         self.party_game.update(dt, &self.input_state);
         self.input_state.jump_pressed_this_frame = false;
+        publier_etat_console(
+            &self.pupitre,
+            &self.party_game,
+            &self.sidecar,
+            &self.verificateur,
+            self.vote.as_ref(),
+            self.demonstration.is_some(),
+        );
 
         // On pousse NOTRE position au cœur, et rien d'autre : lui seul décide ce que les autres
         // en voient. La cadence est plafonnée dans le client, l'appelant n'a pas à la connaître.
