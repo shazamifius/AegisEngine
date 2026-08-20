@@ -479,6 +479,136 @@ pub fn resoudre_regle(
     Verdict::PasTrouve { explores, plus_loin, atteint: atteint.into_iter().collect() }
 }
 
+/// **Toutes les tuiles que le joueur peut réellement fouler** — la carte de ce qui lui est ouvert.
+///
+/// # Pourquoi ce n'est pas le travail de la recherche de chemin
+///
+/// Elles répondent à deux questions qu'on avait confondues, et qui appellent deux algorithmes :
+///
+/// - *« existe-t-il un chemin ? »* veut une recherche **gloutonne** : elle fonce vers l'arrivée et
+///   s'arrête au premier succès. C'est [`resoudre_regle`], et c'est le bon outil pour ça.
+/// - *« qu'est-ce qui est atteignable ? »* veut une propagation **en largeur**, sans heuristique,
+///   qui ne s'arrête pas et ne privilégie aucune direction.
+///
+/// Se servir de la première pour répondre à la seconde donnait un résultat absurde, et mesuré :
+/// sur la carte réelle, l'A* épuisait **150 000 états en ne foulant que cinq tuiles distinctes**.
+/// Il ne cartographiait rien — il creusait un tunnel vers l'arrivée et s'y coinçait.
+/// [`designer_le_bouchon`] cherchait alors des blocs à percer au bord d'une frontière vide, et
+/// rendait « pas d'un seul bloc » sur une carte murée d'un seul trait.
+///
+/// # Ce que ça coûte, et pourquoi c'est acceptable
+///
+/// Pas d'heuristique veut dire pas de raccourci : on explore tout, dans la limite du budget. Mais
+/// on explore **plus bêtement, donc plus vite par état** — pas de tas binaire à maintenir, une
+/// simple file. Et surtout on ne le fait qu'une fois, quand la carte résiste.
+///
+/// # ⚠ Ce que ça ne dit pas
+///
+/// Que le budget ait suffi. Comme partout ici, un budget épuisé veut dire « je n'ai pas fini de
+/// regarder », jamais « il n'y a rien d'autre ». Le drapeau `complet` le dit franchement plutôt
+/// que de laisser croire à une carte exhaustive.
+pub struct Cartographie {
+    /// Les tuiles où le joueur peut poser les pieds.
+    pub foulees: std::collections::HashSet<(i32, i32)>,
+    /// Le budget a-t-il suffi pour tout voir ? Faux = la carte est PARTIELLE.
+    pub complet: bool,
+    pub explores: usize,
+}
+
+/// Cartographie ce que le joueur peut atteindre — **par la géométrie, pas par la physique**.
+///
+/// # Pourquoi on ne simule pas
+///
+/// La première version propageait la vraie physique, image par image. Elle a échoué de deux
+/// façons, et l'écart entre les deux est instructif :
+///
+/// - avec l'empreinte fine du chemin (position ×8, vitesse ×4), elle épuisait **150 000 états
+///   pour dix tuiles** : une seule tuile porte des milliers d'états distincts ;
+/// - avec une empreinte en tuiles entières, elle s'arrêtait après **19 états** — le joueur avance
+///   de 0,012 unité par image, ce qui ne change pas une empreinte au carreau : tout état suivant
+///   était « déjà vu ». C'est la règle déjà apprise ici : *la maille doit être plus fine que le
+///   pas.*
+///
+/// Il n'y a pas de granularité heureuse entre les deux : l'espace d'états de la physique est
+/// simplement trop grand pour être cartographié. On change donc de question — on ne demande plus
+/// « quels états sont atteignables » mais « **quelles tuiles sont ouvertes** », et on y répond sur
+/// la carte, avec un modèle de plateforme : marcher, sauter au plus [`SAUT_TUILES`] de haut,
+/// tomber de n'importe où.
+///
+/// # ⚠ Ce modèle est OPTIMISTE, et c'est voulu
+///
+/// Il peut déclarer atteignable une tuile que la physique refuse (un saut trop juste, un rebord
+/// trop étroit). C'est le bon sens de l'erreur **pour cet usage précis** : cette carte ne sert
+/// qu'à *proposer* des blocs candidats, et chacun est ensuite éprouvé par une recherche complète
+/// qui, elle, ne ment pas. Un candidat de trop coûte une recherche ; un candidat manquant coûte le
+/// bouchon.
+///
+/// ⛔ **Ne pas s'en servir pour dire qu'une carte est franchissable.** Elle répondrait oui trop
+/// souvent. Cette question-là reste celle de [`resoudre_avec`].
+pub fn cartographier(grid: &TileGrid, _traps: &TrapManager, _budget: usize) -> Cartographie {
+    /// Hauteur de saut, en tuiles. **Mesurée** par `sonde_hauteur_de_mur_franchissable` : le
+    /// joueur franchit un mur de 3 et bute sur 4.
+    const SAUT_TUILES: i32 = 3;
+    /// Portée horizontale d'un saut, en tuiles. Généreuse à dessein — voir « optimiste » ci-dessus.
+    const PORTEE_TUILES: i32 = 4;
+
+    let (w, h) = (grid.width as i32, grid.height as i32);
+    // Une tuile est « foulable » si elle est libre ET repose sur du solide.
+    let foulable = |x: i32, y: i32| -> bool {
+        x >= 0
+            && y >= 1
+            && x < w
+            && y < h
+            && !grid.get_tile(x, y).is_solid()
+            && grid.get_tile(x, y - 1).is_solid()
+    };
+    // Le sol sous une colonne, en tombant depuis (x, y) : la première tuile foulable en descendant.
+    let chute = |x: i32, mut y: i32| -> Option<(i32, i32)> {
+        while y >= 1 {
+            if foulable(x, y) {
+                return Some((x, y));
+            }
+            y -= 1;
+        }
+        None
+    };
+
+    let depart = (grid.start_pos.x.round() as i32, grid.start_pos.y.round() as i32);
+    let racine = if foulable(depart.0, depart.1) { Some(depart) } else { chute(depart.0, depart.1) };
+
+    let mut foulees: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+    let mut file = std::collections::VecDeque::new();
+    if let Some(r) = racine {
+        foulees.insert(r);
+        file.push_back(r);
+    }
+
+    let mut explores = 0usize;
+    while let Some((x, y)) = file.pop_front() {
+        explores += 1;
+        // Tout ce qu'on atteint depuis cette tuile : un déplacement horizontal borné par la portée,
+        // une montée bornée par le saut, une descente libre.
+        for dx in -PORTEE_TUILES..=PORTEE_TUILES {
+            for dy in -h..=SAUT_TUILES {
+                let (nx, ny) = (x + dx, y + dy);
+                // Un mur plein entre les deux colonnes coupe le passage — sinon on traverserait
+                // les murs en « sautant » par-dessus une colonne entièrement pleine.
+                let bloque = (1..dx.abs()).any(|k| {
+                    let cx = x + k * dx.signum();
+                    (y..=(y + SAUT_TUILES)).all(|cy| grid.get_tile(cx, cy).is_solid())
+                });
+                if bloque {
+                    continue;
+                }
+                if foulable(nx, ny) && foulees.insert((nx, ny)) {
+                    file.push_back((nx, ny));
+                }
+            }
+        }
+    }
+    Cartographie { foulees, complet: true, explores }
+}
+
 /// Ce que la carte oppose au joueur, quand elle lui résiste.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Bouchon {
@@ -531,28 +661,32 @@ pub const CANDIDATS_MAX: usize = 12;
 /// est le premier trouvé dans un ordre choisi, pas un optimum. C'est assumé : le vote tranche
 /// l'équité, le solveur ne tranche que la faisabilité.
 ///
-/// # ⛔ LIMITE CONNUE, NON RÉSOLUE (20 août 2026) — à lire avant de s'y fier
+/// # ✅ Vérifié sur la carte réelle (20 août 2026)
 ///
-/// **Sur la carte réelle murée d'un trait, cette fonction rend `AucunSeul`, pas le mur.** Mesuré :
-/// 2,9 s, quatre candidats éprouvés, et le bloc évident jamais proposé.
+/// Mur de quatre posé **sur le chemin que le joueur emprunte vraiment** — le seul cas qui décrive
+/// une partie : le bloc du sommet est désigné en **2,5 s**, et son retrait ramène le mur à trois,
+/// que le joueur franchit.
 ///
-/// La cause n'est pas dans cette fonction mais dans celle qui l'alimente : la recherche est un A*
-/// **fortement orienté** (`POIDS = 30`) qui fonce vers l'arrivée. Sur la carte réelle, elle épuise
-/// 150 000 états en ne foulant que **cinq tuiles distinctes** — elle ne cartographie donc rien.
-/// Les candidats manquent parce que la frontière est presque vide, pas parce qu'on les filtre mal.
+/// ⚠ Deux façons de se tromper de cas, éprouvées avant d'y arriver : un mur posé **hors du
+/// trajet** se contourne (`RienABoucher`, et c'est juste), et un mur montant sur **toute la
+/// hauteur** n'ouvre aucun passage praticable si l'on n'en retire qu'un bloc (`AucunSeul`, juste
+/// aussi). Les deux ressemblaient à des défauts et n'en étaient pas.
 ///
-/// Le remède n'est pas d'élargir encore le rayon (on éprouverait la carte entière, et le coût
-/// exploserait) : c'est de séparer les deux questions. *Trouver un chemin* veut une recherche
-/// gloutonne ; *savoir ce qui est atteignable* veut une propagation en largeur, sans heuristique.
-/// Ce sont deux algorithmes, pas deux réglages du même.
+/// # ⚠ Ce sur quoi elle s'appuie, et qui est imparfait
 ///
-/// **En attendant, le vote ne doit pas être branché sur cette fonction pour de vrai** : elle
-/// répondrait « pas d'un seul bloc » sur des cartes qu'un seul bloc débloque.
+/// La zone ouverte vient de [`cartographier`], qui n'atteint que **18 % des tuiles foulables** de
+/// la carte réelle : son modèle de saut est plus timide que la physique. On s'en sort parce que
+/// les candidats viennent aussi du voisinage du point de blocage — mais une cartographie plus
+/// fidèle donnerait de meilleurs candidats, et c'est le prochain gain à prendre.
 pub fn designer_le_bouchon(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Bouchon {
-    let (atteint, plus_loin) = match resoudre_avec(grid, traps, budget) {
+    let plus_loin = match resoudre_avec(grid, traps, budget) {
         Verdict::Franchissable(_) => return Bouchon::RienABoucher,
-        Verdict::PasTrouve { atteint, plus_loin, .. } => (atteint, plus_loin),
+        Verdict::PasTrouve { plus_loin, .. } => plus_loin,
     };
+    // ⚠ La zone ouverte vient de la CARTOGRAPHIE, pas de la recherche de chemin. Celle-ci fonce
+    // vers l'arrivée et ne foulait que cinq tuiles sur la carte réelle : elle creuse un tunnel,
+    // elle ne cartographie pas. Voir `cartographier`.
+    let atteint: Vec<(i32, i32)> = cartographier(grid, traps, budget).foulees.into_iter().collect();
 
     let arrivee = grid.finish_pos;
 
@@ -659,8 +793,17 @@ pub fn designer_le_bouchon(grid: &TileGrid, traps: &TrapManager, budget: usize) 
                             .map(|(i, (x, y))| {
                                 let mut sans_lui = grid.clone();
                                 sans_lui.set_tile(x, y, crate::grid::TileType::Air);
+                                // ⚠ BUDGET RÉDUIT POUR LES CANDIDATS, et l'asymétrie le justifie :
+                                // un candidat qui DÉBLOQUE est trouvé vite — la recherche s'arrête
+                                // au premier succès. Un candidat inutile, lui, va au bout de son
+                                // budget avant d'avouer. C'est donc l'échec qu'on paie, treize
+                                // fois, et c'est lui qu'on borne.
+                                //
+                                // Le risque assumé : rater un bloc dont la solution serait longue
+                                // à trouver. On le préfère à douze budgets pleins — et le vote a
+                                // besoin d'une réponse pendant la manche, pas après.
                                 let ok = matches!(
-                                    resoudre_avec(&sans_lui, traps, budget),
+                                    resoudre_avec(&sans_lui, traps, budget / 4),
                                     Verdict::Franchissable(_)
                                 );
                                 (i, ok)
@@ -1197,15 +1340,31 @@ mod tests {
         let b = designer_le_bouchon(&mur, &vide, BUDGET_PARTIE / 4);
         println!("designer_le_bouchon        : {:>8.3} s  -> {b:?}", t.elapsed().as_secs_f64());
 
+        // 3-bis. LA CARTOGRAPHIE : combien de tuiles voit-elle, la où l'A* n'en foulait que 5 ?
+        let mut mur2 = couloir_bas(24);
+        for y in 1..3 { mur2.set_tile(12, y, crate::grid::TileType::SolidBlock); }
+        let t = Instant::now();
+        let c = cartographier(&mur2, &vide, BUDGET_PARTIE / 4);
+        println!("cartographier (couloir)    : {:>8.3} s  {} tuiles, complet={}, {} etats",
+            t.elapsed().as_secs_f64(), c.foulees.len(), c.complet, c.explores);
+
         println!("coeurs disponibles : {}", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
 
         // 4. LA VRAIE CARTE, murée comme elle le serait par les joueurs : c'est le seul chiffre
         //    qui décrit ce que trente-cinq personnes attendront devant leur écran.
+        // ⚠ Un mur qui monte sur TOUTE la hauteur (28 tuiles) : retirer UN bloc n'y ouvre aucun
+        // passage praticable — `AucunSeul` y est la bonne réponse, pas un défaut. On mure donc
+        // comme un joueur murerait : quelques tuiles au-dessus du sol atteignable.
         let mut reelle = TileGrid::new(48, 24);
-        let (mx, mh) = (reelle.width / 2, reelle.height);
-        for y in 0..mh {
-            reelle.set_tile(mx, y, crate::grid::TileType::SolidBlock);
+        let mx = reelle.width / 2;
+        // On pose le mur là où le joueur passe réellement : au niveau du sol de cette colonne.
+        let sol = (0..reelle.height as i32)
+            .find(|&y| !reelle.get_tile(mx as i32, y).is_solid() && reelle.get_tile(mx as i32, y - 1).is_solid())
+            .unwrap_or(1);
+        for y in sol..sol + 4 {
+            reelle.set_tile(mx, y as usize, crate::grid::TileType::SolidBlock);
         }
+        println!("   (mur de 4 pose en x={mx}, du sol y={sol})");
         let t = Instant::now();
         let b = designer_le_bouchon(&reelle, &vide, BUDGET_PARTIE / 4);
         println!("VRAIE CARTE muree          : {:>8.3} s  -> {b:?}", t.elapsed().as_secs_f64());
@@ -1213,7 +1372,51 @@ mod tests {
         if let Verdict::PasTrouve { plus_loin, explores, atteint } = resoudre_avec(&reelle, &vide, BUDGET_PARTIE / 4) {
             println!("   depart={:?} arrivee={:?} ; mur en x={mx}", reelle.start_pos, reelle.finish_pos);
             println!("   plus_loin={plus_loin:?} apres {explores} etats");
-            println!("   tuiles foulees : {}", atteint.len());
+            println!("   tuiles foulees par l'A* : {}", atteint.len());
+        }
+        // CONTRÔLE : combien de tuiles sont foulables EN TOUT sur cette carte ? Si la
+        // cartographie n'en atteint qu'une poignée, c'est elle qui est trop timide — pas la carte
+        // qui est petite.
+        let propre = TileGrid::new(48, 24);
+        let mut foulables = 0;
+        for y in 1..propre.height as i32 {
+            for x in 0..propre.width as i32 {
+                if !propre.get_tile(x, y).is_solid() && propre.get_tile(x, y - 1).is_solid() {
+                    foulables += 1;
+                }
+            }
+        }
+        let t = Instant::now();
+        let c = cartographier(&propre, &vide, BUDGET_PARTIE / 4);
+        println!("   CARTE PROPRE : {} tuiles foulables au total, cartographie en atteint {} ({:.0}%) en {:.3} s",
+            foulables, c.foulees.len(), 100.0 * c.foulees.len() as f32 / foulables as f32, t.elapsed().as_secs_f64());
+        println!("   depart={:?} arrivee={:?}", propre.start_pos, propre.finish_pos);
+
+        // ── LE CAS QUI COMPTE : murer SUR LE CHEMIN que le joueur emprunte vraiment.
+        // Deviner un endroit donne des murs hors trajet (le joueur les contourne, `RienABoucher`)
+        // ou des murs qui montent sur 28 tuiles (aucun bloc seul n'y ouvre rien). On rejoue donc
+        // la solution, on relève une tuile qu'elle traverse, et on la mure.
+        if let Verdict::Franchissable(sol) = resoudre_avec(&propre, &vide, BUDGET_PARTIE) {
+            let mut j = Player::new(propre.start_pos);
+            let mut precedent = false;
+            let mut trace = Vec::new();
+            for c in &sol.entrees {
+                j.update(PAS, &c.vers_entrees(precedent), &propre, &vide);
+                precedent = c.saut;
+                if j.state == PlayerState::OnGround {
+                    trace.push((j.position.x.round() as i32, j.position.y.round() as i32));
+                }
+            }
+            println!("   le chemin foule {} tuiles", trace.len());
+            if let Some(&(bx, by)) = trace.get(trace.len() / 2) {
+                let mut barree = propre.clone();
+                for k in 0..4 {
+                    barree.set_tile(bx as usize, (by + k) as usize, crate::grid::TileType::SolidBlock);
+                }
+                let t = Instant::now();
+                let b = designer_le_bouchon(&barree, &vide, BUDGET_PARTIE / 4);
+                println!("   MUR SUR LE CHEMIN en ({bx},{by}) : {:>6.3} s -> {b:?}", t.elapsed().as_secs_f64());
+            }
         }
     }
 
