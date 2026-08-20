@@ -169,6 +169,13 @@ pub fn glyphe(c: char) -> [u8; 7] {
         '?' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100],
         '/' => [0b00001, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b10000],
         '%' => [0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011],
+        // Ajoutés le 20 août 2026 après une CAPTURE D'ÉCRAN du bandeau de vote : ils s'y
+        // affichaient en cadres pleins — « RETIRER LE BLOC ▯12,4▯ ? » et « O ▯ OUI ». Le glyphe
+        // inconnu a fait exactement son travail, pour la deuxième fois après l'apostrophe : il
+        // rend un défaut VISIBLE plutôt que du vide, qu'on ne remarque pas.
+        '(' => [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010],
+        ')' => [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000],
+        '=' => [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000],
 
         // Inconnu : un cadre plein. Voir la doctrine ci-dessus — se voir, jamais s'effacer.
         _ => [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111],
@@ -406,6 +413,52 @@ unsafe fn pont(p: &Pinceau, etat: &EtatPont) {
     }
 }
 
+/// **Le vote, au centre de l'écran.** Il interrompt tout le reste, et c'est voulu.
+///
+/// Le verdict du solveur vit discrètement en bas à droite : c'est une information. Un vote est une
+/// *question posée à la personne*, avec un chronomètre — s'il partageait ce coin, on le manquerait
+/// exactement comme le tableau des scores a été manqué pendant des semaines, parce qu'il
+/// s'affichait là où personne ne regardait.
+unsafe fn bandeau_de_vote(p: &Pinceau, v: &crate::vote::Vote) {
+    // ⚠ QUATRE LIGNES COURTES, PAS TROIS DONT UNE LONGUE. La première version mettait les
+    // touches, le décompte et le chronomètre sur une seule ligne : la CAPTURE a montré qu'elle
+    // débordait des DEUX côtés de l'écran — « O = » perdu à gauche, le chronomètre à droite.
+    // Chaque ligne étant centrée séparément, rien ne le signalait dans le code.
+    let lignes = [
+        ("CARTE BOUCHEE".to_string(), couleurs::URGENCE),
+        (format!("RETIRER LE BLOC ({},{}) ?", v.bloc.0, v.bloc.1), couleurs::TEXTE),
+        ("O = OUI      N = NON".to_string(), couleurs::OR),
+        // Le seuil est affiché EN CLAIR. Sans lui, « 12 pour » ne veut rien dire : le joueur ne
+        // sait pas s'il manque une voix ou douze — et il a besoin de le savoir pour décider si son
+        // bulletin compte encore.
+        (
+            format!("{} / {} REQUIS   {:.0}S", v.pour(), v.seuil(), v.reste),
+            couleurs::TEXTE_FAIBLE,
+        ),
+    ];
+
+    let h = 0.030;
+    let marge = 0.018;
+    let interligne = h * 1.6;
+    let largeur = lignes
+        .iter()
+        .map(|(t, _)| largeur_texte(t, h))
+        .fold(0.0f32, f32::max)
+        + marge * 2.0;
+    let hauteur = interligne * lignes.len() as f32 + marge;
+    let x = (p.aspect - largeur) * 0.5;
+    let y = 0.22;
+
+    unsafe {
+        // Couche haute : ce panneau passe DEVANT tout, y compris le tableau des scores.
+        p.quad(x, y - marge, largeur, hauteur, couleurs::FOND, 1);
+        for (i, (texte, teinte)) in lignes.iter().enumerate() {
+            let lx = x + (largeur - largeur_texte(texte, h)) * 0.5; // centré ligne à ligne
+            p.texte(lx, y + interligne * i as f32, h, *teinte, 2, texte);
+        }
+    }
+}
+
 /// Ce que le solveur pense de la carte, en bas à droite.
 ///
 /// Le libellé du doute est délibérément « PASSAGE DOUTEUX » et non « impossible » : le solveur
@@ -475,12 +528,18 @@ pub unsafe fn dessiner(
     etat_pont: &EtatPont,
     carte: crate::tas::EtatCarte,
     bouchon: &crate::tas::Bouchon,
+    vote: Option<&crate::vote::Vote>,
     demonstration: bool,
 ) {
     unsafe {
         minuteur(p, game);
         pont(p, etat_pont);
         verdict_carte(p, carte, bouchon);
+        // En dernier : le vote se dessine PAR-DESSUS le reste. Une question qu'on doit trancher
+        // en quinze secondes ne se laisse pas recouvrir par un tableau de scores.
+        if let Some(v) = vote {
+            bandeau_de_vote(p, v);
+        }
         if game.phase == crate::party_game::GamePhase::Leaderboard {
             leaderboard(p, game, demonstration);
             if demonstration {

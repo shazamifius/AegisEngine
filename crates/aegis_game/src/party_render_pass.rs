@@ -112,6 +112,8 @@ pub struct Exterieur<'a> {
     pub carte: crate::tas::EtatCarte,
     /// Le bloc à soumettre au vote quand la carte est bouchée — vide sinon.
     pub bouchon: &'a crate::tas::Bouchon,
+    /// Le vote en cours, s'il y en a un.
+    pub vote: Option<&'a crate::vote::Vote>,
     /// Où en est la démonstration du parcours, quand personne n'a réussi la manche.
     pub demonstration: Option<Vec2>,
 }
@@ -1086,6 +1088,7 @@ impl PartyRenderPass {
                     exterieur.pont,
                     exterieur.carte,
                     exterieur.bouchon,
+                    exterieur.vote,
                     exterieur.demonstration.is_some(),
                 );
             }

@@ -10,6 +10,7 @@ mod party_game;
 mod party_render_pass;
 mod hud;
 mod tas;
+mod vote;
 mod objects;
 mod nav_client;
 mod sidecar_client;
@@ -56,6 +57,8 @@ struct AegisApp {
     sidecar: SidecarClient,
     /// Le solveur, qui vérifie en tâche de fond que la carte piégée reste franchissable.
     verificateur: tas::Verificateur,
+    /// Le vote en cours sur le retrait d'un bloc qui bouche — `None` la plupart du temps.
+    vote: Option<vote::Vote>,
     /// La phase du tour précédent, pour ne lancer la vérification qu'aux transitions.
     phase_precedente: party_game::GamePhase,
     /// La démonstration du parcours, montrée quand personne n'a franchi la ligne.
@@ -83,6 +86,7 @@ impl AegisApp {
             // première position poussée soit la toute première du jeu.
             sidecar: SidecarClient::connecter(),
             verificateur: tas::Verificateur::nouveau(),
+            vote: None,
             phase_precedente: party_game::GamePhase::Drafting,
             demonstration: None,
         }
@@ -242,6 +246,8 @@ impl AegisApp {
                 party_game::GamePhase::Drafting => {
                     self.verificateur.oublier();
                     self.demonstration = None;
+                    // Une manche neuve : le vote de la précédente n'a plus d'objet.
+                    self.vote = None;
                 }
                 party_game::GamePhase::Leaderboard => {
                     // Personne n'a franchi la ligne : on montre que c'était possible, et
@@ -272,6 +278,59 @@ impl AegisApp {
         // derrière le fil du solveur — une saccade visible, pour une information qui ne change
         // qu'une fois par manche.
         let bouchon = self.verificateur.bouchon();
+
+        // ⚠ VÉRIFICATION VISUELLE. Un vote ne s'ouvre que sur une carte bouchée, ce qui est
+        // difficile à provoquer pour regarder le bandeau. Cette variable en ouvre un factice.
+        //
+        // Elle existe parce que, sur ce projet, **la capture d'écran est la seule sonde qui
+        // tranche pour du HUD** : les onze tests du tableau des scores étaient verts pendant qu'il
+        // s'affichait à l'envers. Un test prouve la cohérence avec la convention qu'on lui donne,
+        // jamais que cette convention est celle du moteur.
+        //     AEGIS_DEMO_VOTE=1 aegis_game --screenshot vote.png
+        if self.vote.is_none() && std::env::var("AEGIS_DEMO_VOTE").is_ok() {
+            self.vote = Some(vote::Vote::ouvrir((12, 4), 35));
+        }
+
+        // ── LE VOTE S'OUVRE DÈS QUE LE TAS DIT « BOUCHÉ » ────────────────────────────────────
+        //
+        // Sa règle : « dès que le TAS dit bouché, pour ne pas perdre de temps ». On n'attend donc
+        // pas la fin de la manche — la carte est déjà infranchissable, et chaque seconde passée
+        // dessus est prise à une manche que personne ne peut gagner.
+        //
+        // ⚠ On n'ouvre QUE sur un `Bloc` désigné. Sur `AucunSeul`, il n'y a rien à proposer :
+        // ouvrir un vote sans proposition demanderait aux joueurs de deviner, et un vote qu'on ne
+        // sait pas formuler use le mécanisme pour les fois où il compte.
+        if self.vote.is_none()
+            && self.party_game.phase == party_game::GamePhase::Running
+            && matches!(self.verificateur.etat(), tas::EtatCarte::PasTrouvee)
+        {
+            if let tas::Bouchon::Bloc { x, y } = bouchon {
+                // Tout le monde vote — y compris qui a fini, et y compris qui a posé le bloc.
+                let inscrits = self.party_game.players.len();
+                log::info!("🗳 Carte bouchée : vote sur le retrait du bloc ({x},{y}) — {inscrits} inscrits.");
+                self.vote = Some(vote::Vote::ouvrir((x, y), inscrits));
+            }
+        }
+
+        if let Some(v) = self.vote.as_mut() {
+            match v.update(dt) {
+                vote::Issue::EnCours => {}
+                vote::Issue::Adopte => {
+                    let (x, y) = v.bloc;
+                    log::info!("🗳 Adopté ({}/{}) — le bloc ({x},{y}) est retiré.", v.pour(), v.inscrits());
+                    self.party_game.grid.set_tile(x, y, grid::TileType::Air);
+                    // La carte a changé : le verdict précédent ne vaut plus rien. On redemande,
+                    // plutôt que de laisser à l'écran un « bouché » que le vote vient de démentir.
+                    self.verificateur.oublier();
+                    self.verificateur.lancer(&self.party_game.grid, &self.party_game.traps);
+                    self.vote = None;
+                }
+                vote::Issue::Rejete => {
+                    log::info!("🗳 Rejeté ({}/{} requis) — le bloc reste.", v.pour(), v.seuil());
+                    self.vote = None;
+                }
+            }
+        }
         let etat_pont = hud::EtatPont {
             relie: self.sidecar.relie(),
             envoyes,
@@ -291,6 +350,7 @@ impl AegisApp {
                         distants: &distants,
                         carte: self.verificateur.etat(),
                         bouchon: &bouchon,
+                        vote: self.vote.as_ref(),
                         demonstration: self.demonstration.as_ref().map(|d| d.position()),
                     },
                 );
@@ -425,6 +485,33 @@ impl ApplicationHandler for AegisApp {
                         }
                     }
                     KeyCode::Enter => {}
+
+                    // ── VOTER : O pour retirer le bloc, N pour le garder ──────────────────
+                    //
+                    // ⚠ Deux touches DÉDIÉES, et pas Entrée/Échap ni une réutilisation d'une
+                    // touche de jeu : le vote s'ouvre PENDANT la course, doigts sur les
+                    // déplacements. Une touche partagée ferait voter par accident quelqu'un qui
+                    // essayait de sauter — et un bulletin ne se reprend pas.
+                    //
+                    // O et N parce que le jeu parle français. Le joueur local est le premier
+                    // humain de la table ; sur le réseau, chacun émettra le sien.
+                    KeyCode::KeyO | KeyCode::KeyN if is_pressed => {
+                        if let Some(v) = self.vote.as_mut() {
+                            let bulletin = if key_code == KeyCode::KeyO {
+                                vote::Bulletin::Pour
+                            } else {
+                                vote::Bulletin::Contre
+                            };
+                            if let Some(moi) = self.party_game.players.iter().find(|p| p.is_human) {
+                                if v.voter(moi.id, bulletin) {
+                                    log::info!(
+                                        "🗳 Bulletin enregistré : {bulletin:?} — {}/{} pour, seuil {}",
+                                        v.pour(), v.inscrits(), v.seuil()
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     // Sélection directe d'un item du carton par touche 1-0 en phase Draft
                     KeyCode::Digit1 => if is_pressed && self.party_game.phase == crate::party_game::GamePhase::Drafting { self.party_game.mystery_box.select_item(0); log::info!("Item 1 sélectionné"); },
