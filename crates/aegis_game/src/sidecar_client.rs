@@ -98,6 +98,9 @@ struct Partage {
     /// champ gardé « pour plus tard » est un champ mort, et ce dépôt en a trouvé trois le même
     /// jour. Elle est journalisée à la réception : observable, sans être stockée.
     moi: Mutex<Option<[u8; 32]>>,
+    /// Notre pseudonyme, tel que le cœur le diffuse sur le réseau. Vide tant que le WELCOME
+    /// n'est pas arrivé, ou si le cœur est plus ancien que ce pont.
+    mon_nom: Mutex<String>,
     /// Combien de poses **nous** avons poussées, et combien d'instantanés **nous** avons reçus.
     ///
     /// Ces deux compteurs ne sont pas de la décoration : ils sont la seule façon de distinguer
@@ -130,6 +133,7 @@ impl SidecarClient {
         let partage = Arc::new(Partage {
             avatars: Mutex::new((Vec::new(), Instant::now())),
             moi: Mutex::new(None),
+            mon_nom: Mutex::new(String::new()),
             envoyes: AtomicU64::new(0),
             recus: AtomicU64::new(0),
         });
@@ -307,14 +311,26 @@ fn ecouter_le_coeur(mut flux: TcpStream, partage: Arc<Partage>) {
 
         match corps[0] {
             WELCOME => {
-                if let Some((id, (r, v, b))) = decoder_welcome(&corps[1..]) {
+                if let Some((id, (r, v, b), nom)) = decoder_welcome(&corps[1..]) {
                     let court = nom_court(&id);
-                    println!(
-                        "[sidecar] WELCOME — le cœur nous connaît sous « {court} », \
-                         couleur ({r:.2}, {v:.2}, {b:.2})."
-                    );
+                    // On affiche le pseudonyme QUAND IL Y EN A UN, et l'identité courte TOUJOURS.
+                    // L'identité est ce qui ne se falsifie pas ; le nom, lui, est un confort — deux
+                    // personnes peuvent porter le même, aucune ne peut porter la même clé.
+                    if nom.is_empty() {
+                        println!(
+                            "[sidecar] WELCOME — le cœur nous connaît sous « {court} », \
+                             couleur ({r:.2}, {v:.2}, {b:.2})."
+                        );
+                    } else {
+                        println!(
+                            "[sidecar] WELCOME — « {nom} » ({court}), couleur ({r:.2}, {v:.2}, {b:.2})."
+                        );
+                    }
                     if let Ok(mut m) = partage.moi.lock() {
                         *m = Some(id);
+                    }
+                    if let Ok(mut n) = partage.mon_nom.lock() {
+                        *n = nom;
                     }
                 }
             }
@@ -330,15 +346,43 @@ fn ecouter_le_coeur(mut flux: TcpStream, partage: Arc<Partage>) {
     }
 }
 
-/// `WELCOME` : 32 octets d'identité, puis `f32 r, g, b`.
-fn decoder_welcome(charge: &[u8]) -> Option<([u8; 32], (f32, f32, f32))> {
+/// `WELCOME` : 32 octets d'identité, `f32 r, g, b`, puis — depuis le 21 août 2026 — un octet de
+/// longueur suivi du PSEUDONYME.
+///
+/// # Ce que ces 32 octets sont, et ce qu'ils ne sont pas
+///
+/// C'est notre clé publique, telle que le cœur nous l'annonce. Nous ne la CHOISISSONS pas : la clé
+/// privée ne quitte jamais le cœur, et c'est lui qui signe tout ce qui part sur le réseau. Ce jeu
+/// peut donc afficher ce qu'il veut à l'écran, il ne peut pas se faire passer pour quelqu'un
+/// d'autre auprès des autres joueurs — il n'a pas de quoi signer à leur place.
+///
+/// ⚠ Le cœur a envoyé 32 ZÉROS ici jusqu'au 21 août 2026. Tout ce code existait déjà et ne recevait
+/// rien : le pont était complet d'un seul côté. D'où la garde ci-dessous — une identité nulle n'est
+/// pas une identité, et l'accepter en silence ramènerait exactement le même trou sans témoin.
+///
+/// La lecture reste tolérante sur la LONGUEUR (`>= 44`) : un cœur plus ancien qui n'enverrait pas
+/// encore le pseudonyme continue d'être compris, il nous laisse simplement sans nom.
+fn decoder_welcome(charge: &[u8]) -> Option<([u8; 32], (f32, f32, f32), String)> {
     if charge.len() < 32 + 12 {
         return None;
     }
     let mut id = [0u8; 32];
     id.copy_from_slice(&charge[..32]);
+    if id == [0u8; 32] {
+        eprintln!(
+            "[sidecar] ⚠ le cœur annonce une identité NULLE — on ne sait pas qui l'on est. \
+             Le cœur est-il plus ancien que le pont ?"
+        );
+        return None;
+    }
     let f = |i: usize| f32::from_le_bytes(charge[i..i + 4].try_into().unwrap());
-    Some((id, (f(32), f(36), f(40))))
+    let nom = match charge.get(44) {
+        Some(&n) if charge.len() >= 45 + n as usize => {
+            String::from_utf8_lossy(&charge[45..45 + n as usize]).to_string()
+        }
+        _ => String::new(),
+    };
+    Some((id, (f(32), f(36), f(40)), nom))
 }
 
 /// `SNAPSHOT` : `u16 count`, puis `count` enregistrements de 76 octets.
@@ -494,6 +538,9 @@ mod tests {
             for v in [0.2f32, 0.4, 0.6] {
                 charge.extend_from_slice(&v.to_le_bytes());
             }
+            // Le pseudonyme, ajouté APRÈS les 44 octets d'origine (extension compatible).
+            charge.push(5);
+            charge.extend_from_slice(b"shaza");
             ecrire(&mut flux, WELCOME, &charge);
 
             // 3. SNAPSHOT : un joueur distant.
@@ -539,6 +586,11 @@ mod tests {
         assert_eq!(combien, 1, "un joueur distant");
 
         assert_eq!(client.mon_identite(), Some([0xABu8; 32]), "le WELCOME nous nomme");
+        assert_eq!(
+            client.partage.mon_nom(),
+            "shaza",
+            "le pseudonyme doit suivre l'identité dans le WELCOME"
+        );
 
         let a = client.avatars();
         assert_eq!(a[0].id, [0x5Au8; 32]);
@@ -554,5 +606,14 @@ mod tests {
         trame.extend_from_slice(charge);
         flux.write_all(&trame).unwrap();
         flux.flush().unwrap();
+    }
+}
+
+impl Partage {
+    /// Notre pseudonyme tel que le cœur le diffuse, ou une chaîne vide s'il ne nous l'a pas encore
+    /// dit. À afficher À CÔTÉ de l'identité courte, jamais à sa place : c'est l'identité qui ne se
+    /// falsifie pas.
+    pub fn mon_nom(&self) -> String {
+        self.mon_nom.lock().map(|n| n.clone()).unwrap_or_default()
     }
 }
