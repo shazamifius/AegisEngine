@@ -139,7 +139,7 @@ mod tests {
         for x in 0..24 {
             g.set_tile(x, 0, crate::grid::TileType::SolidBlock);
         }
-        for y in 1..=4 {
+        for y in 1..=3 {
             g.set_tile(12, y, crate::grid::TileType::SolidBlock);
         }
         g
@@ -149,7 +149,7 @@ mod tests {
     fn deux_cartes_differentes_n_ont_pas_la_meme_empreinte() {
         let a = carte_bouchee();
         let mut b = a.clone();
-        b.set_tile(12, 4, crate::grid::TileType::Air);
+        b.set_tile(12, 3, crate::grid::TileType::Air);
         assert_ne!(empreinte_carte(&a), empreinte_carte(&b));
         assert_eq!(empreinte_carte(&a), empreinte_carte(&a.clone()), "stable");
     }
@@ -159,7 +159,7 @@ mod tests {
     fn une_reponse_honnete_est_acceptee_sans_relancer_la_recherche() {
         let grid = carte_bouchee();
         let vide = TrapManager::new();
-        let lot = Lot { carte: empreinte_carte(&grid), bloc: (12, 4) };
+        let lot = Lot { carte: empreinte_carte(&grid), bloc: (12, 3) };
 
         let r = traiter(&grid, &vide, &lot, 60_000);
         assert!(r.solution.is_some(), "retirer le sommet du mur doit debloquer");
@@ -173,7 +173,7 @@ mod tests {
     fn un_chemin_vrai_attribue_au_mauvais_bloc_est_rejete() {
         let grid = carte_bouchee();
         let vide = TrapManager::new();
-        let honnete = traiter(&grid, &vide, &Lot { carte: empreinte_carte(&grid), bloc: (12, 4) }, 60_000);
+        let honnete = traiter(&grid, &vide, &Lot { carte: empreinte_carte(&grid), bloc: (12, 3) }, 60_000);
         assert!(honnete.solution.is_some());
 
         // Le même chemin, présenté comme débloquant un bloc innocent, loin du mur.
@@ -202,7 +202,7 @@ mod tests {
     fn une_reponse_pour_une_autre_carte_est_rejetee() {
         let grid = carte_bouchee();
         let vide = TrapManager::new();
-        let mut r = traiter(&grid, &vide, &Lot { carte: empreinte_carte(&grid), bloc: (12, 4) }, 60_000);
+        let mut r = traiter(&grid, &vide, &Lot { carte: empreinte_carte(&grid), bloc: (12, 3) }, 60_000);
         r.carte ^= 1; // un bit de différence suffit
         assert!(!verifier(&grid, &vide, &r));
     }
@@ -221,7 +221,7 @@ mod tests {
     fn un_lot_pour_une_autre_carte_n_est_pas_traite_au_hasard() {
         let grid = carte_bouchee();
         let vide = TrapManager::new();
-        let r = traiter(&grid, &vide, &Lot { carte: 0xdead_beef, bloc: (12, 4) }, 60_000);
+        let r = traiter(&grid, &vide, &Lot { carte: 0xdead_beef, bloc: (12, 3) }, 60_000);
         assert!(r.solution.is_none());
     }
 }

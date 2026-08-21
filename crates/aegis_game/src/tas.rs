@@ -100,7 +100,7 @@ impl Manette {
 
     /// Traduit vers les entrées du jeu. `jump_pressed_this_frame` est posé au **front montant**
     /// du saut : c'est ce que fait un vrai clavier, et le jeu s'en sert pour le tampon de saut.
-    fn vers_entrees(self, saut_precedent: bool) -> InputState {
+    pub fn vers_entrees(self, saut_precedent: bool) -> InputState {
         InputState {
             left: self.gauche,
             right: self.droite,
@@ -367,6 +367,33 @@ pub fn resoudre_avec(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Ver
     // (`rejouer`, `simplifier`, `robustesse`) travaille dans le MÊME monde. Une solution validée
     // dans un monde et rejouée dans un autre serait un mensonge — le genre de mensonge que le
     // rejeu est précisément là pour empêcher.
+    let permanents = vue_permanente(traps);
+
+    // ── LA RECHERCHE SE FAIT PAR MANŒUVRES, PLUS PAR IMAGES ────────────────────────────────
+    //
+    // Le solveur image par image restait sous ce nom pendant des mois et il avait un défaut de
+    // FORME, pas de réglage : il décidait soixante fois par seconde. Sur une manche qu'il a
+    // réellement gagnée, le chemin dure 2 126 images — une profondeur qu'aucun budget n'atteint
+    // à six branches par pas. Mesuré sur cette manche : il s'arrêtait en (45.6, 12.0) pour une
+    // arrivée en (51.5, 2.0), après 150 000 états dépensés dans un cul-de-sac d'apparence proche.
+    //
+    // `manoeuvre::resoudre_par_appuis` décide d'appui en appui. La même manche demande alors une
+    // dizaine de décisions, et se résout en 34 ms.
+    //
+    // ⚠ Le budget reste exprimé en IMAGES par tous ses appelants ; on le convertit ici. Une
+    // manœuvre coûte au plus `IMAGES_MAX` images de simulation, mais en vaut **15,7 en moyenne**
+    // (mesuré sur une carte réelle par `sonde6`) : la plupart s'arrêtent à leur premier appui,
+    // bien avant le plafond. Le chiffre vient donc de la mesure, pas d'une estimation — la
+    // première version disait 60 et affamait la recherche d'un facteur quatre.
+    const IMAGES_PAR_MANOEUVRE: usize = 16;
+    crate::manoeuvre::resoudre_par_appuis(grid, &permanents, budget / IMAGES_PAR_MANOEUVRE)
+}
+
+/// L'ancienne recherche, image par image. Conservée : elle explore SANS répertoire de gestes,
+/// donc elle reste le seul recours si une carte demandait un mouvement que les manœuvres
+/// n'énumèrent pas. Elle n'est plus sur le chemin normal.
+#[allow(dead_code)]
+pub fn resoudre_image_par_image(grid: &TileGrid, traps: &TrapManager, budget: usize) -> Verdict {
     let permanents = vue_permanente(traps);
 
     // ── DEUX PASSES, ET LA SECONDE EXISTE PARCE QU'IL L'A VU EN JOUANT ──────────────────────
@@ -1501,15 +1528,21 @@ mod tests {
 
     #[test]
     fn le_tas_designe_un_bloc_dont_le_retrait_debloque_reellement() {
-        // Un mur de QUATRE, sur mesure : `sonde_hauteur_de_mur_franchissable` établit que le
-        // joueur passe un mur de 3 et bute sur 4. Retirer le bloc du sommet le ramène donc à 3.
+        // Un mur de TROIS : le retirer d'un bloc le ramène à deux, franchissable.
         //
-        // ⚠ La première version de ce test murait un couloir bas sur 2 de haut alors qu'il
-        // n'offrait que 2 de libre : il fallait retirer les DEUX blocs, et le TAS répondait
-        // `AucunSeul`. Il avait raison, le test avait tort. La hauteur vient maintenant d'une
-        // mesure, pas d'une intuition.
+        // ⚠ Ce test murait QUATRE tuiles jusqu'au 21 août 2026, sur la foi d'une sonde qui
+        // annonçait « le joueur passe un mur de 3 ». C'était vrai de l'ancien solveur, et ça
+        // tenait à un détail : en sautant l'image qui suit un atterrissage, le personnage
+        // flotte encore 14 cm au-dessus du sol, ce qui porte l'apogée à 4,02 pour un sommet à
+        // 4,00. Deux centimètres — alors que la hauteur de saut vaut 2,85 tuiles et qu'un mur
+        // de 3 devrait donc arrêter net.
+        //
+        // La question « ces 14 cm sont-ils un geste de jeu ou un résidu de calcul ? » n'est pas
+        // tranchée et ne l'est pas ICI : elle relève du ressenti, pas du solveur. Le test se
+        // contente donc d'un mur qui ne dépend pas d'elle — il prouve exactement la même
+        // chose : le bloc désigné débloque RÉELLEMENT.
         let mut grid = couloir(24);
-        for y in 1..=4 {
+        for y in 1..=3 {
             grid.set_tile(12, y, crate::grid::TileType::SolidBlock);
         }
         let vide = TrapManager::new();
@@ -2061,4 +2094,40 @@ mod tests {
         );
         assert!((demo.avancement() - 1.0).abs() < 1e-6);
     }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    //  LE JUGE : ses parties enregistrées
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // Ces fichiers sont des manches qu'un HUMAIN a réellement jouées et gagnées, sur des cartes que
+    // le solveur déclarait infranchissables. Ils ne sont pas des cartes que j'ai fabriquées pour
+    // valider mon propre code — c'est tout ce qui fait leur valeur.
+
+    /// La physique du solveur est-elle celle du jeu ? Sans ça, tout le reste est bavardage.
+    ///
+    /// On rejoue les entrées de l'humain dans le simulateur du TAS : si elles mènent à l'arrivée,
+    /// son monde contient la solution, et l'échec est un échec de RECHERCHE. Si elles n'y mènent
+    /// pas, le simulateur DIVERGE et tout verdict du solveur est suspect, y compris ses succès.
+    #[test]
+    fn la_physique_du_solveur_est_celle_du_jeu() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/manches");
+        for nom in [
+            "manche-002-arrive-CONTRADICTION.txt",
+            "manche-003-arrive-CONTRADICTION.txt",
+        ] {
+            let a = crate::boite_noire::analyser(&base.join(nom)).expect("manche lisible");
+            assert!(a.humain_arrive, "{nom} : l'entête annonce une manche gagnée");
+            assert!(
+                a.rejeu_arrive,
+                "{nom} : les entrées de l'humain NE mènent PAS à l'arrivée dans le simulateur du \
+                 TAS — le simulateur diverge du jeu, et plus rien de ce que dit le solveur ne vaut."
+            );
+            assert!(
+                a.ecart_max < 0.5,
+                "{nom} : écart max {:.3} tuile entre le jeu et le simulateur",
+                a.ecart_max
+            );
+        }
+    }
+
 }

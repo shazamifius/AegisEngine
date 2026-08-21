@@ -10,6 +10,7 @@ mod party_game;
 mod party_render_pass;
 mod hud;
 mod tas;
+mod manoeuvre;
 mod vote;
 mod entraide;
 mod console;

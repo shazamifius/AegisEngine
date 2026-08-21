@@ -256,7 +256,22 @@ pub struct Analyse {
 ///   et `divergence` dit à quelle image ça commence.
 ///
 /// Rien à l'écran ne sépare ces deux cas. Ce rejeu, si.
-pub fn analyser(chemin: &std::path::Path) -> Result<Analyse, String> {
+/// Une manche relue depuis son fichier : la carte telle qu'elle était, et ce que l'humain a tapé.
+///
+/// Séparé de [`analyser`] parce que ces deux besoins ne se recouvrent pas : le diagnostic veut un
+/// verdict, le **solveur** veut la carte pour s'y mesurer. Une partie enregistrée devient ainsi un
+/// cas de test permanent — et c'est le seul jeu d'épreuve dont on sache qu'un humain l'a franchi.
+pub struct Manche {
+    pub grid: TileGrid,
+    /// `(dt, gauche, droite, saut)` pour chaque image jouée.
+    pub entrees: Vec<(f32, bool, bool, bool)>,
+    /// Les positions réellement enregistrées, en regard des entrées.
+    pub positions: Vec<Vec2>,
+    pub humain_arrive: bool,
+}
+
+/// Relit un fichier de boîte noire sans rien en juger.
+pub fn charger_manche(chemin: &std::path::Path) -> Result<Manche, String> {
     let texte = std::fs::read_to_string(chemin).map_err(|e| format!("lecture : {e}"))?;
 
     let mut largeur = 0usize;
@@ -264,7 +279,8 @@ pub fn analyser(chemin: &std::path::Path) -> Result<Analyse, String> {
     let mut depart = Vec2::new(0.0, 0.0);
     let mut arrivee = Vec2::new(0.0, 0.0);
     let mut rangees: Vec<String> = Vec::new();
-    let mut trace: Vec<(f32, bool, bool, bool, f32, f32)> = Vec::new();
+    let mut entrees: Vec<(f32, bool, bool, bool)> = Vec::new();
+    let mut positions: Vec<Vec2> = Vec::new();
     let mut humain_arrive = false;
 
     for ligne in texte.lines() {
@@ -278,18 +294,14 @@ pub fn analyser(chemin: &std::path::Path) -> Result<Analyse, String> {
             ["depart", x, y] => depart = Vec2::new(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0)),
             ["arrivee", x, y] => arrivee = Vec2::new(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0)),
             ["g", r] => rangees.push((*r).to_string()),
-            ["t", dt, g, d, s, x, y, ..] => trace.push((
-                dt.parse().unwrap_or(0.0),
-                *g == "1",
-                *d == "1",
-                *s == "1",
-                x.parse().unwrap_or(0.0),
-                y.parse().unwrap_or(0.0),
-            )),
+            ["t", dt, g, d, s, x, y, ..] => {
+                entrees.push((dt.parse().unwrap_or(0.0), *g == "1", *d == "1", *s == "1"));
+                positions.push(Vec2::new(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0)));
+            }
             _ => {}
         }
     }
-    if largeur == 0 || rangees.len() != hauteur || trace.is_empty() {
+    if largeur == 0 || rangees.len() != hauteur || entrees.is_empty() {
         return Err("fichier incomplet ou illisible".to_string());
     }
 
@@ -305,6 +317,21 @@ pub fn analyser(chemin: &std::path::Path) -> Result<Analyse, String> {
             }
         }
     }
+
+    Ok(Manche { grid, entrees, positions, humain_arrive })
+}
+
+pub fn analyser(chemin: &std::path::Path) -> Result<Analyse, String> {
+    let manche = charger_manche(chemin)?;
+    let grid = manche.grid;
+    let arrivee = grid.finish_pos;
+    let humain_arrive = manche.humain_arrive;
+    let trace: Vec<(f32, bool, bool, bool, f32, f32)> = manche
+        .entrees
+        .iter()
+        .zip(manche.positions.iter())
+        .map(|((dt, g, d, s), p)| (*dt, *g, *d, *s, p.x, p.y))
+        .collect();
 
     // ⚠ Rejeu dans la VUE PERMANENTE, comme le solveur : c'est son monde qu'on éprouve, pas celui
     // du jeu. Utiliser les pièges complets comparerait deux choses différentes et n'apprendrait
