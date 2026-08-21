@@ -432,7 +432,7 @@ impl AegisApp {
         // jamais que cette convention est celle du moteur.
         //     AEGIS_DEMO_VOTE=1 aegis_game --screenshot vote.png
         if self.vote.is_none() && std::env::var("AEGIS_DEMO_VOTE").is_ok() {
-            self.vote = Some(vote::Vote::ouvrir((12, 4), 35));
+            self.vote = Some(vote::Vote::ouvrir(vote::Geste::Retirer, (12, 4), 35));
         }
 
         // ── LE VOTE S'OUVRE DÈS QUE LE TAS DIT « BOUCHÉ » ────────────────────────────────────
@@ -441,28 +441,52 @@ impl AegisApp {
         // pas la fin de la manche — la carte est déjà infranchissable, et chaque seconde passée
         // dessus est prise à une manche que personne ne peut gagner.
         //
-        // ⚠ On n'ouvre QUE sur un `Bloc` désigné. Sur `AucunSeul`, il n'y a rien à proposer :
-        // ouvrir un vote sans proposition demanderait aux joueurs de deviner, et un vote qu'on ne
-        // sait pas formuler use le mécanisme pour les fois où il compte.
+        // ⚠ ON OUVRE SUR LES DEUX GESTES, et c'est ce qui rendait le vote inutile jusqu'ici.
+        //
+        // Il l'avait constaté en jouant, plusieurs fois : « aucun vote ne se déclenche alors que
+        // le but du TAS c'est littéralement de savoir s'il faut supprimer un bloc ou ajouter un
+        // truc ». La cause était ici : on n'ouvrait que sur un `Bloc` à retirer, or le solveur
+        // répond très souvent « aucun bloc seul ne suffit » — et ce verdict, honnête, ne
+        // proposait RIEN. Les joueurs restaient devant une carte infinissable, sans recours.
+        //
+        // Un mur trop haut ne se perce pas toujours : parfois il se franchit. Le TAS cherche donc
+        // désormais aussi le marchepied, et le vote porte sur le geste qu'il a trouvé.
         if self.vote.is_none()
             && self.party_game.phase == party_game::GamePhase::Running
             && matches!(self.verificateur.etat(), tas::EtatCarte::PasTrouvee)
         {
-            if let tas::Bouchon::Bloc { x, y } = bouchon {
-                // Tout le monde vote — y compris qui a fini, et y compris qui a posé le bloc.
-                let inscrits = self.party_game.players.len();
-                log::info!("🗳 Carte bouchée : vote sur le retrait du bloc ({x},{y}) — {inscrits} inscrits.");
-                self.vote = Some(vote::Vote::ouvrir((x, y), inscrits));
+            // Tout le monde vote — y compris qui a fini, et y compris qui a posé le bloc.
+            let inscrits = self.party_game.players.len();
+            match bouchon {
+                tas::Bouchon::Bloc { x, y } => {
+                    log::info!("🗳 Carte bouchée : vote sur le RETRAIT du bloc ({x},{y}) — {inscrits} inscrits.");
+                    self.vote = Some(vote::Vote::ouvrir(vote::Geste::Retirer, (x, y), inscrits));
+                }
+                tas::Bouchon::Ajout { x, y } => {
+                    log::info!("🗳 Carte bouchée : vote sur l'AJOUT d'un appui en ({x},{y}) — {inscrits} inscrits.");
+                    self.vote = Some(vote::Vote::ouvrir(vote::Geste::Poser, (x, y), inscrits));
+                }
+                // Là, il n'y a vraiment rien à proposer : ni un retrait, ni un ajout unique ne
+                // débloque. Ouvrir un vote sans proposition demanderait aux joueurs de deviner, et
+                // un vote qu'on ne sait pas formuler use le mécanisme pour les fois où il compte.
+                tas::Bouchon::AucunSeul { .. } | tas::Bouchon::RienABoucher => {}
             }
         }
-
         if let Some(v) = self.vote.as_mut() {
             match v.update(dt) {
                 vote::Issue::EnCours => {}
                 vote::Issue::Adopte => {
                     let (x, y) = v.bloc;
-                    log::info!("🗳 Adopté ({}/{}) — le bloc ({x},{y}) est retiré.", v.pour(), v.inscrits());
-                    self.party_game.grid.set_tile(x, y, grid::TileType::Air);
+                    let (tuile, mot) = match v.geste {
+                        vote::Geste::Retirer => (grid::TileType::Air, "retiré"),
+                        vote::Geste::Poser => (grid::TileType::SolidBlock, "posé"),
+                    };
+                    log::info!(
+                        "🗳 Adopté ({}/{}) — le bloc ({x},{y}) est {mot}.",
+                        v.pour(),
+                        v.inscrits()
+                    );
+                    self.party_game.grid.set_tile(x, y, tuile);
                     // La carte a changé : le verdict précédent ne vaut plus rien. On redemande,
                     // plutôt que de laisser à l'écran un « bouché » que le vote vient de démentir.
                     self.verificateur.oublier();

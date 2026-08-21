@@ -502,6 +502,9 @@ unsafe fn verdict_carte(p: &Pinceau, carte: crate::tas::EtatCarte, bouchon: &cra
         // est juste envers celui qui a posé le bloc. Ça, c'est au vote de le dire.
         EtatCarte::PasTrouvee => match bouchon {
             Bouchon::Bloc { x, y } => (format!("BOUCHE — RETIRER ({x},{y}) ?"), couleurs::URGENCE),
+            // Et le symétrique : quand aucun retrait ne suffit, un marchepied peut suffire. Le
+            // verbe change parce que le geste change — on ne demande pas la même chose aux gens.
+            Bouchon::Ajout { x, y } => (format!("BOUCHE — AJOUTER ({x},{y}) ?"), couleurs::URGENCE),
             // On distingue « je n'ai pas trouvé de bloc seul » de « je n'ai pas cherché » : le
             // second se corrige en cherchant, le premier veut dire qu'il faudra en retirer
             // plusieurs. Les confondre ferait proposer un vote qui ne débloquerait rien.

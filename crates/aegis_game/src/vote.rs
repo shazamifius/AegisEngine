@@ -52,10 +52,26 @@ pub enum Bulletin {
 /// perdre de temps » —, assez long pour qu'on lise la question et qu'on appuie sur une touche.
 pub const DUREE_VOTE: f32 = 15.0;
 
-/// Un vote sur le retrait d'un bloc précis.
+/// Ce que le vote fera si les deux tiers l'approuvent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Geste {
+    /// Le bloc est de trop : on le retire.
+    Retirer,
+    /// Il manque un appui : on le pose. C'est le recours quand aucun retrait ne suffit —
+    /// sans lui, le TAS répondait « aucun bloc seul » et personne n'avait rien à voter.
+    Poser,
+}
+
+/// Un vote sur le retrait ou l'ajout d'un bloc précis.
 #[derive(Debug, Clone)]
 pub struct Vote {
-    /// Le bloc proposé au retrait, désigné par le TAS — jamais choisi à la main.
+    /// Ce qu'on propose de faire à ce bloc — le RETIRER, ou le POSER.
+    ///
+    /// Le geste fait partie de la question : « on retire celui-là ? » et « on ajoute un
+    /// marchepied ici ? » ne se votent pas de la même façon, et un vote dont on ne sait pas
+    /// ce qu'il fera n'est pas un vote.
+    pub geste: Geste,
+    /// Le bloc concerné, désigné par le TAS — jamais choisi à la main.
     pub bloc: (usize, usize),
     /// Qui a voté quoi. Un joueur ne pèse qu'une fois, quoi qu'il appuie ensuite.
     bulletins: HashMap<u32, Bulletin>,
@@ -72,8 +88,9 @@ pub struct Vote {
 
 impl Vote {
     /// Ouvre le vote. `inscrits` est le nombre de joueurs présents à cet instant.
-    pub fn ouvrir(bloc: (usize, usize), inscrits: usize) -> Vote {
+    pub fn ouvrir(geste: Geste, bloc: (usize, usize), inscrits: usize) -> Vote {
         Vote {
+            geste,
             bloc,
             bulletins: HashMap::new(),
             inscrits,
@@ -166,16 +183,16 @@ mod tests {
     #[test]
     fn le_seuil_est_bien_deux_tiers_arrondis_vers_le_haut() {
         // 35 joueurs — sa classe : 24 voix, pas 23.
-        assert_eq!(Vote::ouvrir((0, 0), 35).seuil(), 24);
-        assert_eq!(Vote::ouvrir((0, 0), 3).seuil(), 2);
-        assert_eq!(Vote::ouvrir((0, 0), 6).seuil(), 4);
+        assert_eq!(Vote::ouvrir(Geste::Retirer, (0, 0), 35).seuil(), 24);
+        assert_eq!(Vote::ouvrir(Geste::Retirer, (0, 0), 3).seuil(), 2);
+        assert_eq!(Vote::ouvrir(Geste::Retirer, (0, 0), 6).seuil(), 4);
         // ⚠ Le cas qui justifie l'arrondi VERS LE HAUT : 10 joueurs, 6 voix seraient 60 %.
-        assert_eq!(Vote::ouvrir((0, 0), 10).seuil(), 8);
+        assert_eq!(Vote::ouvrir(Geste::Retirer, (0, 0), 10).seuil(), 8);
     }
 
     #[test]
     fn deux_tiers_adoptent() {
-        let mut v = Vote::ouvrir((4, 2), 6);
+        let mut v = Vote::ouvrir(Geste::Retirer, (4, 2), 6);
         for j in 0..3 {
             v.voter(j, Bulletin::Pour);
         }
@@ -188,7 +205,7 @@ mod tests {
     /// les inscrits. Sans cela, deux voix sur trois-cent suffiraient à casser la carte.
     #[test]
     fn le_silence_ne_vaut_jamais_approbation() {
-        let mut v = Vote::ouvrir((4, 2), 30);
+        let mut v = Vote::ouvrir(Geste::Retirer, (4, 2), 30);
         for j in 0..3 {
             v.voter(j, Bulletin::Pour);
         }
@@ -203,7 +220,7 @@ mod tests {
     /// à faire de ces secondes.
     #[test]
     fn un_vote_perdu_d_avance_se_clot_tout_de_suite() {
-        let mut v = Vote::ouvrir((4, 2), 6); // seuil 4
+        let mut v = Vote::ouvrir(Geste::Retirer, (4, 2), 6); // seuil 4
         for j in 0..3 {
             v.voter(j, Bulletin::Contre);
         }
@@ -214,7 +231,7 @@ mod tests {
 
     #[test]
     fn un_joueur_ne_pese_qu_une_fois() {
-        let mut v = Vote::ouvrir((4, 2), 6);
+        let mut v = Vote::ouvrir(Geste::Retirer, (4, 2), 6);
         assert!(v.voter(7, Bulletin::Pour));
         assert!(!v.voter(7, Bulletin::Pour), "le second bulletin est refuse");
         assert!(!v.voter(7, Bulletin::Contre), "changer d'avis non plus");
@@ -223,7 +240,7 @@ mod tests {
 
     #[test]
     fn un_vote_clos_n_accepte_plus_de_bulletin() {
-        let mut v = Vote::ouvrir((4, 2), 3); // seuil 2
+        let mut v = Vote::ouvrir(Geste::Retirer, (4, 2), 3); // seuil 2
         v.voter(0, Bulletin::Pour);
         v.voter(1, Bulletin::Pour);
         assert_eq!(v.issue(), Issue::Adopte);
@@ -233,6 +250,6 @@ mod tests {
     /// Un vote sans personne ne doit pas rester ouvert quinze secondes pour rien.
     #[test]
     fn un_vote_sans_electeur_est_clos_d_emblee() {
-        assert_eq!(Vote::ouvrir((0, 0), 0).issue(), Issue::Rejete);
+        assert_eq!(Vote::ouvrir(Geste::Retirer, (0, 0), 0).issue(), Issue::Rejete);
     }
 }

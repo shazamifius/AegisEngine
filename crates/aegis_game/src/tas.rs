@@ -692,6 +692,13 @@ pub enum Bouchon {
     /// ⚠ Ce n'est pas « il faut en retirer plusieurs » : c'est « je n'ai pas trouvé de bloc seul
     /// qui débloque, en ayant regardé `testes` candidats ». La nuance est la même qu'entre
     /// [`Verdict::PasTrouve`] et « impossible », et elle se perd aussi facilement.
+    /// **Poser** ce bloc rend la carte franchissable — un marchepied, là où aucun retrait ne suffit.
+    ///
+    /// Son idée, et elle rend le vote enfin utile : un mur trop haut ne se perce pas toujours,
+    /// parfois il se FRANCHIT. Sans ce cas, le TAS répondait « aucun bloc seul » et les joueurs
+    /// restaient sur une carte infinissable sans le moindre recours à proposer.
+    Ajout { x: usize, y: usize },
+
     AucunSeul { testes: usize },
     /// La carte passe déjà : il n'y a rien à voter.
     RienABoucher,
@@ -820,9 +827,10 @@ pub fn designer_le_bouchon(grid: &TileGrid, traps: &TrapManager, budget: usize) 
 
     let candidats: Vec<(usize, usize)> =
         candidats.into_iter().take(CANDIDATS_MAX).map(|(x, y, _)| (x, y)).collect();
-    if candidats.is_empty() {
-        return Bouchon::AucunSeul { testes: 0 };
-    }
+    // ⚠ Pas de `return` ici quand la liste est vide : une carte peut n'avoir AUCUN bloc à
+    // retirer et quand même se débloquer par un AJOUT — c'est même le cas le plus net, celui du
+    // gouffre. La première version sortait ici et n'atteignait jamais la recherche de
+    // marchepied ; le test du gouffre l'a dit tout de suite (« reçu AucunSeul { testes: 0 } »).
 
     // ── Les candidats sont ÉPROUVÉS EN PARALLÈLE, mais le résultat reste DÉTERMINISTE ─────────
     //
@@ -838,63 +846,165 @@ pub fn designer_le_bouchon(grid: &TileGrid, traps: &TrapManager, budget: usize) 
     //
     // C'est ce qui rend cette fonction distribuable plus tard : un résultat qui dépend de la
     // vitesse des machines n'est pas partageable, un résultat trié l'est.
+    let verdicts = eprouver(grid, traps, &candidats, crate::grid::TileType::Air, budget);
+    if let Some(i) = verdicts.iter().position(|ok| *ok) {
+        return Bouchon::Bloc { x: candidats[i].0, y: candidats[i].1 };
+    }
+
+    // ── AUCUN RETRAIT NE SUFFIT : ALORS QUE FAUDRAIT-IL AJOUTER ? ────────────────────────────
+    //
+    // Son idée, et elle renverse le mécanisme : *« si le TAS voit que c'est pas possible, il fait
+    // une proposition — qu'est-ce qui est le mieux pour permettre à tous que ce soit réalisable,
+    // quel est le maillon faible à supprimer OU à corriger avec un ajout ? »*
+    //
+    // C'était le trou qui rendait le vote inutile en pratique. Répondre `AucunSeul` est honnête,
+    // mais ça n'ouvre aucun vote : les joueurs restent sur une carte que personne ne peut finir,
+    // sans recours. Or un mur trop haut ne se perce pas toujours — parfois il se FRANCHIT, et il
+    // suffit d'un marchepied.
+    //
+    // Le geste est le symétrique exact du précédent : au lieu de vider une tuile pleine, on
+    // remplit une tuile vide, et on redemande à la physique. Même machinerie, même déterminisme,
+    // même budget — c'est pour ça qu'`eprouver` est une fonction et non deux boucles jumelles.
+    let ajouts = candidats_a_poser(grid, plus_loin, arrivee, &atteint);
+    if !ajouts.is_empty() {
+        let verdicts = eprouver(grid, traps, &ajouts, crate::grid::TileType::SolidBlock, budget);
+        if let Some(i) = verdicts.iter().position(|ok| *ok) {
+            return Bouchon::Ajout { x: ajouts[i].0, y: ajouts[i].1 };
+        }
+        return Bouchon::AucunSeul { testes: candidats.len() + ajouts.len() };
+    }
+    Bouchon::AucunSeul { testes: candidats.len() }
+}
+
+/// Les tuiles VIDES qu'il vaudrait la peine de remplir pour faire un marchepied.
+///
+/// ⚠ **Un marchepied a le droit de FLOTTER, et c'est le cas le plus utile.** La première version
+/// exigeait un appui adjacent, pour éviter les cubes suspendus au milieu de rien. C'était une idée
+/// d'esthétique, et elle supprimait précisément ce à quoi la fonction sert : devant un gouffre trop
+/// large, le seul bloc qui débloque est celui du MILIEU, et il n'a par construction aucun voisin.
+/// Une règle qui fait disparaître le cas qu'on voulait traiter n'est pas une règle.
+///
+/// Le tri, lui, se fait par proximité au **point de blocage** et non à l'arrivée — contrairement
+/// aux retraits. La différence tient au geste : on perce un mur du côté où l'on veut aller, mais on
+/// pose un appui là où le joueur s'arrête, sinon il ne peut pas l'atteindre.
+fn candidats_a_poser(
+    grid: &TileGrid,
+    plus_loin: Vec2,
+    arrivee: Vec2,
+    atteint: &[(i32, i32)],
+) -> Vec<(usize, usize)> {
+    let (px, py) = (plus_loin.x.round() as i32, plus_loin.y.round() as i32);
+    let mut vus: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut candidats: Vec<(usize, usize, f32)> = Vec::new();
+
+    let zone: Vec<(i32, i32)> = atteint
+        .iter()
+        .copied()
+        .chain((-RAYON_CANDIDATS..=RAYON_CANDIDATS).flat_map(|dy| {
+            (-RAYON_CANDIDATS..=RAYON_CANDIDATS).map(move |dx| (px + dx, py + dy))
+        }))
+        .collect();
+
+    for (tx, ty) in zone {
+        for dy in -RAYON_CANDIDATS..=RAYON_CANDIDATS {
+            for dx in -RAYON_CANDIDATS..=RAYON_CANDIDATS {
+                let (x, y) = (tx + dx, ty + dy);
+                if x < 0 || y <= 0 || x >= grid.width as i32 || y >= grid.height as i32 {
+                    continue;
+                }
+                if grid.get_tile(x, y).is_solid() {
+                    continue; // déjà plein : ce n'est pas un ajout
+                }
+                let (ux, uy) = (x as usize, y as usize);
+                if vus.insert((ux, uy)) {
+                    let d = (Vec2::new(x as f32, y as f32) - plus_loin).length();
+                    // Départage par la distance à l'arrivée : à égale portée du joueur, autant
+                    // poser l'appui qui le rapproche du but.
+                    let vers_but = (Vec2::new(x as f32, y as f32) - arrivee).length();
+                    candidats.push((ux, uy, d * 1000.0 + vers_but));
+                }
+            }
+        }
+    }
+    // Même départage STABLE que pour les retraits : deux machines doivent proposer LE MÊME bloc,
+    // sinon le vote porte sur deux choses différentes selon l'écran qu'on regarde.
+    candidats.sort_by(|a, b| {
+        a.2.partial_cmp(&b.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+            .then(a.1.cmp(&b.1))
+    });
+    candidats.into_iter().take(CANDIDATS_MAX).map(|(x, y, _)| (x, y)).collect()
+}
+
+/// Éprouve des candidats en parallèle et rend, pour chacun, si la carte passe une fois modifié.
+///
+/// ⚠ **On ne prend pas « le premier qui répond ».** Plusieurs blocs peuvent débloquer, et l'ordre
+/// d'arrivée des fils dépend de l'humeur de l'ordonnanceur. Deux machines désigneraient alors des
+/// blocs DIFFÉRENTS pour la même carte — et le vote qui suit porterait sur deux propositions
+/// distinctes selon l'écran qu'on regarde. On éprouve donc tout le monde, et l'appelant retient le
+/// premier dans l'ORDRE DE TRI, le même partout. C'est aussi ce qui rend ce travail distribuable :
+/// un résultat qui dépend de la vitesse des machines ne se partage pas, un résultat trié si.
+fn eprouver(
+    grid: &TileGrid,
+    traps: &TrapManager,
+    candidats: &[(usize, usize)],
+    devient: crate::grid::TileType,
+    budget: usize,
+) -> Vec<bool> {
+    if candidats.is_empty() {
+        return Vec::new();
+    }
     let fils = std::thread::available_parallelism()
         .map(|n| n.get().saturating_sub(1).max(1)) // ⚠ un cœur laissé au jeu : il ne doit JAMAIS ramer
         .unwrap_or(1)
         .min(candidats.len());
 
-    let verdicts: Vec<bool> = {
-        let paquets: Vec<Vec<(usize, (usize, usize))>> = (0..fils)
-            .map(|f| {
-                candidats
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .skip(f)
-                    .step_by(fils) // entrelacé : les candidats coûteux se répartissent d'eux-mêmes
-                    .collect()
+    let paquets: Vec<Vec<(usize, (usize, usize))>> = (0..fils)
+        .map(|f| {
+            candidats
+                .iter()
+                .copied()
+                .enumerate()
+                .skip(f)
+                .step_by(fils) // entrelacé : les candidats coûteux se répartissent d'eux-mêmes
+                .collect()
+        })
+        .collect();
+
+    let mut resultats: Vec<(usize, bool)> = std::thread::scope(|portee| {
+        let mains: Vec<_> = paquets
+            .into_iter()
+            .map(|paquet| {
+                portee.spawn(move || {
+                    paquet
+                        .into_iter()
+                        .map(|(i, (x, y))| {
+                            let mut modifiee = grid.clone();
+                            modifiee.set_tile(x, y, devient);
+                            // ⚠ BUDGET RÉDUIT POUR LES CANDIDATS, et l'asymétrie le justifie : un
+                            // candidat qui DÉBLOQUE est trouvé vite — la recherche s'arrête au
+                            // premier succès. Un candidat inutile, lui, va au bout de son budget
+                            // avant d'avouer. C'est donc l'échec qu'on paie, douze fois, et c'est
+                            // lui qu'on borne.
+                            //
+                            // Le risque assumé : rater un bloc dont la solution serait longue à
+                            // trouver. On le préfère à douze budgets pleins — et le vote a besoin
+                            // d'une réponse pendant la manche, pas après.
+                            let ok = matches!(
+                                resoudre_avec(&modifiee, traps, budget / 4),
+                                Verdict::Franchissable(_)
+                            );
+                            (i, ok)
+                        })
+                        .collect::<Vec<_>>()
+                })
             })
             .collect();
-
-        let mut resultats: Vec<(usize, bool)> = std::thread::scope(|portee| {
-            let mains: Vec<_> = paquets
-                .into_iter()
-                .map(|paquet| {
-                    portee.spawn(move || {
-                        paquet
-                            .into_iter()
-                            .map(|(i, (x, y))| {
-                                let mut sans_lui = grid.clone();
-                                sans_lui.set_tile(x, y, crate::grid::TileType::Air);
-                                // ⚠ BUDGET RÉDUIT POUR LES CANDIDATS, et l'asymétrie le justifie :
-                                // un candidat qui DÉBLOQUE est trouvé vite — la recherche s'arrête
-                                // au premier succès. Un candidat inutile, lui, va au bout de son
-                                // budget avant d'avouer. C'est donc l'échec qu'on paie, treize
-                                // fois, et c'est lui qu'on borne.
-                                //
-                                // Le risque assumé : rater un bloc dont la solution serait longue
-                                // à trouver. On le préfère à douze budgets pleins — et le vote a
-                                // besoin d'une réponse pendant la manche, pas après.
-                                let ok = matches!(
-                                    resoudre_avec(&sans_lui, traps, budget / 4),
-                                    Verdict::Franchissable(_)
-                                );
-                                (i, ok)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            mains.into_iter().flat_map(|m| m.join().unwrap_or_default()).collect()
-        });
-        resultats.sort_by_key(|(i, _)| *i);
-        resultats.into_iter().map(|(_, ok)| ok).collect()
-    };
-
-    match verdicts.iter().position(|ok| *ok) {
-        Some(i) => Bouchon::Bloc { x: candidats[i].0, y: candidats[i].1 },
-        None => Bouchon::AucunSeul { testes: candidats.len() },
-    }
+        mains.into_iter().flat_map(|m| m.join().unwrap_or_default()).collect()
+    });
+    resultats.sort_by_key(|(i, _)| *i);
+    resultats.into_iter().map(|(_, ok)| ok).collect()
 }
 
 /// Rejoue une séquence d'entrées et dit si elle atteint réellement l'arrivée.
@@ -2130,4 +2240,53 @@ mod tests {
         }
     }
 
+
+    /// **Sa proposition, enfin en acte : quand rien ne se retire, le TAS dit quoi AJOUTER.**
+    ///
+    /// Ses mots : *« si le TAS voit que c'est pas possible, il fait une proposition — qu'est-ce
+    /// qui est le mieux pour permettre à tous que ce soit réalisable, quel est le maillon faible
+    /// à supprimer ou à corriger avec un ajout ? »*
+    ///
+    /// La carte est un gouffre trop large pour être sauté. C'est le cas où l'ancien mécanisme
+    /// était structurellement muet : il n'existe AUCUN bloc dont le retrait aide — il n'y a déjà
+    /// rien à cet endroit. Le TAS répondait donc « aucun bloc seul », le vote ne s'ouvrait pas, et
+    /// la table restait devant une manche que personne ne pouvait finir.
+    #[test]
+    fn devant_un_gouffre_le_tas_propose_un_marchepied_au_lieu_de_se_taire() {
+        let mut grid = couloir(30);
+        // On creuse : douze tuiles de vide, très au-delà des ~7 qu'un saut franchit.
+        for x in 9..21 {
+            grid.set_tile(x, 0, crate::grid::TileType::Air);
+        }
+        let vide = TrapManager::new();
+
+        // GARDE ANTI-TEST-CREUX : sans elle, « le TAS propose un ajout » ne prouverait rien si la
+        // carte passait déjà.
+        assert!(
+            matches!(resoudre_avec(&grid, &vide, 60_000), Verdict::PasTrouve { .. }),
+            "temoin creux : ce gouffre se franchit deja"
+        );
+
+        match designer_le_bouchon(&grid, &vide, 60_000) {
+            Bouchon::Ajout { x, y } => {
+                // On ne se contente PAS de constater qu'un bloc a été nommé : n'importe quel bug
+                // en nommerait un. On le pose, et la carte doit passer pour de vrai.
+                let mut avec = grid.clone();
+                avec.set_tile(x, y, crate::grid::TileType::SolidBlock);
+                assert!(
+                    matches!(resoudre_avec(&avec, &vide, 60_000), Verdict::Franchissable(_)),
+                    "l'appui propose en ({x},{y}) doit REELLEMENT debloquer — sinon on ferait \
+                     voter trente-cinq personnes sur une proposition fausse"
+                );
+                assert!(
+                    (9..21).contains(&x),
+                    "le marchepied doit etre DANS le gouffre, recu x={x}"
+                );
+            }
+            autre => panic!(
+                "devant un gouffre, le TAS doit proposer un ajout — recu {autre:?}. \
+                 C'est exactement le cas ou il se taisait et ou aucun vote ne s'ouvrait."
+            ),
+        }
+    }
 }
