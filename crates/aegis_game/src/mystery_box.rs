@@ -38,29 +38,31 @@ pub fn compute_box_item_offset(index: usize, total_items: usize) -> (Vec3, f32) 
     let col = index % cols;
     let row = index / cols;
 
-    // Dimensions intérieures maximales du carton mystère (Width = 7.6, Height = 4.4)
-    let width_span = 7.6f32;
-    let height_span = 4.4f32;
+    // ⚠ LA CAVITÉ UTILE N'EST PAS CELLE DE L'OUVERTURE — c'est ce qui a fait rater les DEUX
+    // réglages précédents (22 août 2026).
+    //
+    // `bornes_carton` mesure le MODÈLE ouvert : demi-largeur 0,8185/2 × 11,5 = 4,7. Mais c'est la
+    // boîte englobante, donc l'OUVERTURE — et les objets sont posés au FOND (`off_z` = 12,2, fond
+    // à 12,0), où les parois ont convergé. Disposer sur 4,7 place les objets là où il n'y a plus
+    // de carton : c'est le défaut qu'il a vu en premier, « les items sont en dehors de la boîte ».
+    // Puis les borner à 2,4 a produit l'inverse, « beaucoup trop proches, encore beaucoup de vide ».
+    //
+    // La cavité au PLAN DES OBJETS est mesurée sur sa capture, avec une échelle donnée par le
+    // réglage connu : l'écart entre deux objets valait 2,4 unités pour 264 px, soit 116 px/unité ;
+    // la cavité du fond s'étend sur ±295 px du centre → **±2,5 unités**. Cette valeur explique les
+    // deux plaintes d'un coup, ce qu'aucune des deux précédentes ne faisait : à ±3,8 les objets
+    // sortaient bel et bien, à ±1,2 il restait la moitié de la cavité vide.
+    //
+    // ⚠ Elle vient d'une capture, pas d'un outil : c'est SON œil qui tranche en jeu, et un
+    // `bornes_carton` qui saurait donner la section au plan Z des objets la remplacerait.
+    const DEMI_LARGEUR: f32 = 2.5;
+    const DEMI_HAUTEUR: f32 = 2.0;
+    // La grille est posée un peu bas dans le carton (le rabat avant masque le tiers inférieur) :
+    // ce décalage doit être RETIRÉ de l'étendue utile, sinon la rangée du bas sort par en dessous.
+    const DESCENTE: f32 = 0.4;
 
-    // ⚠ LES DEUX BORNES QUI CORRIGENT LE DÉFAUT. Elles sont choisies pour être SANS EFFET sur une
-    // grille pleine — à 7 colonnes le pas vaut 1,27 et à 6 rangées 0,88, tous deux en dessous —
-    // et pour ne mordre que sur les tirages peu nombreux, ceux qui s'éparpillaient.
-    const PAS_MAX_X: f32 = 2.4;
-    const PAS_MAX_Y: f32 = 1.6;
-
-    let dx = if cols > 1 { (width_span / (cols - 1) as f32).min(PAS_MAX_X) } else { 0.0 };
-    let dy = if rows > 1 { (height_span / (rows - 1) as f32).min(PAS_MAX_Y) } else { 0.0 };
-
-    // On centre sur l'étendue RÉELLEMENT occupée, et non sur celle du carton : c'est ce qui fait
-    // qu'un petit tirage se groupe au milieu au lieu de coller aux parois.
-    let start_x = -dx * (cols - 1) as f32 * 0.5;
-    let start_y = -dy * (rows - 1) as f32 * 0.5 - 0.4;
-
-    let off_x = start_x + (col as f32) * dx;
-    let off_y = start_y + (row as f32) * dy;
-    let off_z = 12.2; // Lancement légèrement devant le fond du carton (Z = 12.0) pour une visibilité 100% parfaite !
-
-    // Échelle adaptative garantissant que TOUS les objets (GLB & blocs) restent TOUJOURS parfaitement dimensionnés
+    // L'échelle est calculée AVANT la position, parce que c'est elle qui dit combien de place
+    // chaque objet prend — et donc combien il en reste pour les écarter.
     let scale_mult = match total_items {
         1..=4 => 1.25,
         5..=9 => 0.95,
@@ -69,6 +71,38 @@ pub fn compute_box_item_offset(index: usize, total_items: usize) -> (Vec3, f32) 
         26..=36 => 0.45,
         _ => 0.38,
     };
+
+    // ⚠ LES DEUX BORNES ARBITRAIRES ONT DISPARU (`PAS_MAX_X` = 2,4 / `PAS_MAX_Y` = 1,6).
+    // Elles avaient été posées à l'œil le matin même pour empêcher quatre objets de fuir aux
+    // parois, et elles réglaient le mauvais problème : le défaut n'était pas que les objets
+    // s'écartaient, c'est qu'ils DÉBORDAIENT. Les serrer au centre corrigeait le symptôme en
+    // créant l'inverse — « beaucoup trop proches, encore beaucoup de vide ».
+    //
+    // La règle juste ne se règle pas, elle se DÉDUIT : un objet ne doit pas dépasser la paroi,
+    // donc son CENTRE ne peut se poser que dans l'étendue amputée de son propre encombrement.
+    // Les objets remplissent alors tout l'espace qu'ils peuvent occuper, à n'importe quel nombre,
+    // et le débordement devient impossible par construction plutôt que par réglage.
+    //
+    // Le ×1.25 est le grossissement de l'objet SURVOLÉ (`party_render_pass`) : c'est lui qui
+    // décide du débordement, pas l'état au repos — viser l'état au repos ferait mordre la paroi
+    // au premier survol.
+    let encombrement = scale_mult * 1.25;
+
+    let utile_x = (2.0 * DEMI_LARGEUR - encombrement).max(0.0);
+    let utile_y = (2.0 * (DEMI_HAUTEUR - DESCENTE) - encombrement).max(0.0);
+
+    let dx = if cols > 1 { utile_x / (cols - 1) as f32 } else { 0.0 };
+    let dy = if rows > 1 { utile_y / (rows - 1) as f32 } else { 0.0 };
+
+    // On centre sur l'étendue RÉELLEMENT occupée : un tirage qui ne remplit pas sa dernière
+    // rangée reste centré au lieu de pencher d'un côté.
+    let start_x = -dx * (cols - 1) as f32 * 0.5;
+    let start_y = -dy * (rows - 1) as f32 * 0.5 - DESCENTE;
+
+    let off_x = start_x + (col as f32) * dx;
+    let off_y = start_y + (row as f32) * dy;
+    let off_z = 12.2; // Lancement légèrement devant le fond du carton (Z = 12.0) pour une visibilité 100% parfaite !
+
 
     (Vec3::new(off_x, off_y, off_z), scale_mult)
 }
@@ -234,29 +268,57 @@ mod tests {
         let total_items = 43; // 40 joueurs + 3
         for i in 0..total_items {
             let (offset, scale) = compute_box_item_offset(i, total_items);
-            // Vérifie que les offsets restent strictement dans les dimensions intérieures du carton (-2.7 <= X <= 2.7, -1.8 <= Y <= 1.8)
-            assert!(offset.x >= -3.85 && offset.x <= 3.85, "Offset X out of box bounds: {}", offset.x);
-            assert!(offset.y >= -2.65 && offset.y <= 2.65, "Offset Y out of box bounds: {}", offset.y);
+            // Les bornes sont celles de la CAVITÉ AU PLAN DES OBJETS (cf. `compute_box_item_offset`),
+            // pas celles de l'ouverture du carton : c'est la confusion des deux qui a fait sortir
+            // les objets de la boîte le 21 août.
+            assert!(offset.x >= -2.5 && offset.x <= 2.5, "Offset X hors cavité : {}", offset.x);
+            assert!(offset.y >= -2.0 && offset.y <= 2.0, "Offset Y hors cavité : {}", offset.y);
             assert!(scale > 0.1 && scale <= 1.25);
         }
     }
 
-    /// **NON-RÉGRESSION — le réglage à 38 objets ne doit pas bouger d'un millimètre.**
+    /// **LA RÈGLE QUI REMPLACE DEUX RÉGLAGES RATÉS : remplir la cavité sans jamais en sortir.**
     ///
-    /// C'est celui qu'il avait éprouvé à l'œil et qui rendait bien ; la correction ne vise QUE les
-    /// petits tirages. Les bornes sont choisies pour rester sans effet ici, et ce test l'exige
-    /// plutôt que de l'espérer : à 7 colonnes le pas vaut 1,267, à 6 rangées 0,88, tous deux sous
-    /// les bornes — donc le centrage retombe exactement sur l'ancien `-width_span * 0.5`.
+    /// Ce test a pris la place d'une « non-régression à 38 objets » qui figeait `-3,8`. Elle
+    /// gardait un réglage qui **débordait** : 3,8 dépasse la demi-cavité de 2,5 au plan où les
+    /// objets sont posés. Un test de non-régression qui protège un défaut est pire qu'aucun test,
+    /// parce qu'il interdit de le corriger.
+    ///
+    /// Il MORD des deux côtés, et c'est ce qui compte — les deux échecs de la journée sont chacun
+    /// attrapés par une moitié :
+    ///   - trop écarté → un objet sort du carton (plainte du matin) ;
+    ///   - trop serré  → la moitié de la cavité reste vide (plainte de l'après-midi).
     #[test]
-    fn a_trente_huit_objets_la_grille_est_identique_a_avant() {
-        let (p0, s0) = compute_box_item_offset(0, 38);
-        assert!((p0.x - (-3.8)).abs() < 1e-4, "premier objet en x = {} au lieu de -3.8", p0.x);
-        assert!((p0.y - (-2.6)).abs() < 1e-4, "premier objet en y = {} au lieu de -2.6", p0.y);
-        assert!((s0 - 0.38).abs() < 1e-6);
-
-        // Le dernier de la première rangée doit toujours atteindre le bord opposé.
-        let (p6, _) = compute_box_item_offset(6, 38);
-        assert!((p6.x - 3.8).abs() < 1e-4, "septième objet en x = {} au lieu de 3.8", p6.x);
+    fn la_grille_remplit_la_cavite_sans_jamais_en_sortir() {
+        const DEMI_L: f32 = 2.5;
+        const DEMI_H: f32 = 2.0;
+        for total in 1..=45 {
+            let mut bord_x: f32 = 0.0;
+            for i in 0..total {
+                let (p, s) = compute_box_item_offset(i, total);
+                // Le ×1.25 du survol compte : c'est l'état le plus encombrant qui décide.
+                let demi = s * 1.25 * 0.5;
+                assert!(
+                    p.x.abs() + demi <= DEMI_L + 1e-3,
+                    "à {total} objets, le n°{i} sort par le côté : {:.2} > {DEMI_L}",
+                    p.x.abs() + demi
+                );
+                assert!(
+                    p.y.abs() + demi <= DEMI_H + 1e-3,
+                    "à {total} objets, le n°{i} sort en haut ou en bas : {:.2} > {DEMI_H}",
+                    p.y.abs() + demi
+                );
+                bord_x = bord_x.max(p.x.abs() + demi);
+            }
+            // ET l'autre moitié : la grille doit VRAIMENT occuper la cavité. À 4 objets, le
+            // réglage borné du matin n'atteignait que 1,82 sur 2,5 — d'où « beaucoup de vide ».
+            if total > 1 {
+                assert!(
+                    bord_x >= DEMI_L * 0.9,
+                    "à {total} objets la grille n'occupe que {bord_x:.2} sur {DEMI_L} : trop serrée"
+                );
+            }
+        }
     }
 
     /// **LE DÉFAUT QU'IL A VU EN JOUANT : seul, les objets partaient aux quatre coins.**
@@ -270,18 +332,22 @@ mod tests {
             let (p, _) = compute_box_item_offset(i, 4);
             ecart_max = ecart_max.max(p.x.abs());
         }
-        // Avant la correction, ce chiffre valait 3,8 — la paroi elle-même.
+        // Avant la première correction ce chiffre valait 3,8 — hors de la cavité (demi 2,5).
+        // Après elle, 1,2 — soit moins de la moitié de la cavité, d'où « beaucoup trop proches ».
+        // La fourchette dit les DEUX défauts à la fois plutôt qu'un seul.
         assert!(
-            ecart_max < 2.0,
-            "à 4 objets, le plus écarté est à {ecart_max:.2} du centre : ils s'éparpillent encore"
+            (1.5..=2.0).contains(&ecart_max),
+            "à 4 objets, le plus écarté est à {ecart_max:.2} : hors de la fourchette [1,5 ; 2,0] \
+             (au-dessus ils sortent du carton, en dessous ils se tassent au centre)"
         );
     }
 
     /// **Aucun objet ne doit sortir du carton, quel que soit le nombre de joueurs.**
     ///
-    /// La demi-largeur intérieure vaut 4,7 : mesurée, pas supposée — `cargo run --bin bornes_carton`
-    /// donne une largeur de modèle de 0,8185, multipliée par l'échelle d'ouverture 11,5.
-    /// Le test balaie toute la plage possible (4 objets pour un joueur seul, 45 au plafond).
+    /// ⚠ 4,7 est la demi-largeur de l'OUVERTURE (`bornes_carton` : modèle 0,8185 × échelle 11,5).
+    /// Les objets étant posés au FOND, cette borne est bien trop permissive pour attraper quoi que
+    /// ce soit — elle laissait passer le débordement qu'il a vu à l'écran. Elle est conservée comme
+    /// garde-fou grossier ; c'est `la_grille_remplit_la_cavite_sans_jamais_en_sortir` qui mord.
     #[test]
     fn aucun_objet_ne_sort_du_carton_quel_que_soit_le_nombre_de_joueurs() {
         const DEMI_LARGEUR: f32 = 4.7;
