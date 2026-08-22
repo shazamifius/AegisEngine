@@ -1,7 +1,7 @@
 //! sidecar_client.rs — le pont vers le cœur réseau web3.
 //!
 //! Le cœur Rust (`jeu sidecar`) est SERVEUR sur `127.0.0.1:47800` ; les jeux sont CLIENTS. Ce
-//! module est notre côté du contrat (`prive/CONTRAT_SIDECAR.md` du dépôt web3game, et
+//! module est notre côté du contrat (`prive/aegis/CONTRAT_SIDECAR.md` du dépôt web3game, et
 //! `src/net/sidecar.rs` qui en est l'implémentation de référence). Comme le pont vers le
 //! launcher, il ne dépend de **rien** d'autre que la bibliothèque standard.
 //!

@@ -1,7 +1,7 @@
 //! nav_client.rs — le pont vers le launcher web3 (le « régisseur » de bascule entre jeux).
 //!
 //! Le launcher web3 est SERVEUR sur `127.0.0.1:47820` ; les jeux sont CLIENTS. Ce module est notre
-//! côté du contrat (`prive/sujets/launcher/CONTRAT_NAV.md` du dépôt web3game, et `launcher/src/nav.rs` qui en est
+//! côté du contrat (`prive/launcher/CONTRAT_NAV.md` du dépôt web3game, et `launcher/src/nav.rs` qui en est
 //! l'implémentation de référence). Il ne dépend de RIEN d'autre que la bibliothèque standard : une
 //! socket TCP locale, quatre types de messages, aucune bibliothèque tierce.
 //!
