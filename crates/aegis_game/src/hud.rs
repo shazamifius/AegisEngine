@@ -321,7 +321,7 @@ impl Pinceau<'_> {
     ///
     /// C'est la brique **unique** du HUD : un panneau, une barre de minuteur et le trait d'un
     /// caractère sont tous ce même rectangle.
-    unsafe fn quad(&self, x: f32, y: f32, largeur: f32, hauteur: f32, couleur: Vec4, couche: u8) {
+    pub(crate) unsafe fn quad(&self, x: f32, y: f32, largeur: f32, hauteur: f32, couleur: Vec4, couche: u8) {
         let push = PartyPushConstants {
             mvp_matrix: matrice_quad(self.aspect, x, y, largeur, hauteur, couche),
             // En couleur plate le shader ne consulte aucune normale : mettre l'identité plutôt
@@ -344,7 +344,7 @@ impl Pinceau<'_> {
 
     /// Écrit un texte, `x`/`y` désignant le coin haut-gauche de la première lettre. Renvoie la
     /// largeur occupée, pour enchaîner un second texte à la suite.
-    unsafe fn texte(&self, x: f32, y: f32, hauteur: f32, couleur: Vec4, couche: u8, texte: &str) -> f32 {
+    pub(crate) unsafe fn texte(&self, x: f32, y: f32, hauteur: f32, couleur: Vec4, couche: u8, texte: &str) -> f32 {
         let point = hauteur / GLYPHE_LIGNES as f32;
         let mut plume = x;
 
@@ -373,7 +373,7 @@ impl Pinceau<'_> {
     }
 
     /// Le même texte, centré horizontalement sur l'écran.
-    unsafe fn texte_centre(&self, y: f32, hauteur: f32, couleur: Vec4, couche: u8, texte: &str) -> f32 {
+    pub(crate) unsafe fn texte_centre(&self, y: f32, hauteur: f32, couleur: Vec4, couche: u8, texte: &str) -> f32 {
         let x = (self.aspect - largeur_texte(texte, hauteur)) * 0.5;
         unsafe { self.texte(x, y, hauteur, couleur, couche, texte) }
     }

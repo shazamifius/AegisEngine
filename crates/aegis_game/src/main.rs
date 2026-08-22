@@ -12,6 +12,7 @@ mod hud;
 mod tas;
 mod manoeuvre;
 mod vote;
+mod lobby;
 mod entraide;
 mod console;
 mod boite_noire;
@@ -63,6 +64,9 @@ struct AegisApp {
     verificateur: tas::Verificateur,
     /// Le vote en cours sur le retrait d'un bloc qui bouche — `None` la plupart du temps.
     vote: Option<vote::Vote>,
+    /// LE LOBBY — ouvrir une partie, en trouver une, attendre qu'elle commence. Fermé par défaut :
+    /// on tombe dans le jeu, pas dans un menu.
+    lobby: lobby::Lobby,
     /// La console de pilotage (inerte sans `AEGIS_CONSOLE`).
     pupitre: std::sync::Arc<console::Pupitre>,
     /// L'enregistreur de parties (inerte sans `AEGIS_BOITE_NOIRE`).
@@ -97,6 +101,7 @@ impl AegisApp {
             sidecar: SidecarClient::connecter(),
             verificateur: tas::Verificateur::nouveau(),
             vote: None,
+            lobby: lobby::Lobby::default(),
             pupitre: console::ouvrir(),
             boite: boite_noire::BoiteNoire::nouvelle(),
             a_relacher: Vec::new(),
@@ -107,6 +112,22 @@ impl AegisApp {
 
     /// Traite un clic gauche en phase Draft ou Placement.
     fn handle_left_click(&mut self) {
+        // ⚠ LE LOBBY PASSE DEVANT TOUT. Il est dessiné par-dessus l'écran entier : laisser un clic
+        // le traverser pour atteindre la carte, c'est poser un piège sur une case qu'on ne voit
+        // même pas. S'il consomme le clic, personne d'autre ne le voit.
+        if self.lobby.ouvert() {
+            if let Some(engine) = self.engine.as_ref() {
+                let h = engine.gpu.swapchain_extent.height as f32;
+                if h > 0.0 {
+                    let (mx, my) = self.mouse_pos;
+                    // Repère du HUD : y ∈ [0,1] du haut vers le bas, x ∈ [0, aspect]. La HAUTEUR
+                    // sert d'unité aux deux axes — c'est ce qui fait qu'un bouton reste carré
+                    // quand la fenêtre s'élargit.
+                    self.lobby.clic(mx / h, my / h);
+                }
+            }
+            return;
+        }
         match self.party_game.phase {
             party_game::GamePhase::Drafting => {
                 if let (Some(engine), Some(render_pass)) =
@@ -520,6 +541,7 @@ impl AegisApp {
                         bouchon: &bouchon,
                         vote: self.vote.as_ref(),
                         demonstration: self.demonstration.as_ref().map(|d| d.position()),
+                        lobby: &self.lobby,
                     },
                 );
                 if engine.gpu.end_frame(cmd, image_index, window).is_err() {
@@ -628,8 +650,38 @@ impl ApplicationHandler for AegisApp {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(key_code), state, .. }, .. } => {
+            WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(key_code), state, ref text, .. }, .. } => {
                 let is_pressed = state == ElementState::Pressed;
+
+                // ── LE LOBBY (22 août 2026) ─────────────────────────────────────────────────
+                // ÉCHAP l'ouvre et le referme : c'est le geste que tout le monde essaie en
+                // premier devant un jeu, et il était libre.
+                if key_code == KeyCode::Escape && is_pressed {
+                    if self.lobby.ouvert() {
+                        self.lobby.fermer();
+                    } else {
+                        self.lobby.ouvrir();
+                    }
+                    return;
+                }
+                // ⚠ TANT QUE LE LOBBY EST OUVERT, PLUS AUCUNE TOUCHE NE VA AU JEU. Sans ce
+                // verrou, taper le nom de sa partie ferait courir le personnage derrière l'écran
+                // — et un « S » dans un nom deviendrait un saut.
+                if self.lobby.ouvert() {
+                    if is_pressed {
+                        match key_code {
+                            KeyCode::Backspace => self.lobby.effacer(),
+                            _ => {
+                                if let Some(t) = text {
+                                    for c in t.chars() {
+                                        self.lobby.taper(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
 
                 match key_code {
                     // Contrôles de déplacement ZQSD (AZERTY) / WASD (QWERTY) / Flèches

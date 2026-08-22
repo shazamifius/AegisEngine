@@ -116,6 +116,9 @@ pub struct Exterieur<'a> {
     pub vote: Option<&'a crate::vote::Vote>,
     /// Où en est la démonstration du parcours, quand personne n'a réussi la manche.
     pub demonstration: Option<Vec2>,
+    /// LE LOBBY, quand il est ouvert. Dessiné PAR-DESSUS tout le reste : choisir sa partie n'est
+    /// pas une information de plus posée sur le jeu, c'est un moment à part.
+    pub lobby: &'a crate::lobby::Lobby,
 }
 
 pub struct PartyRenderPass {
@@ -1091,6 +1094,18 @@ impl PartyRenderPass {
                     exterieur.vote,
                     exterieur.demonstration.is_some(),
                 );
+            }
+            // LE LOBBY EN DERNIER, et hors du `is_play_mode` : on doit pouvoir choisir sa partie
+            // même quand aucune n'a commencé — c'est justement le moment où l'on en a besoin.
+            if exterieur.lobby.ouvert() {
+                context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+                exterieur.lobby.dessiner(&crate::hud::Pinceau {
+                    device: &context.device,
+                    cmd,
+                    layout: self.pipeline_layout,
+                    cube: &self.cube_mesh,
+                    aspect,
+                });
             }
 
             context.device.cmd_end_rendering(cmd);
