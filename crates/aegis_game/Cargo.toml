@@ -16,3 +16,11 @@ ash = "0.38"
 winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06"] }
 log = "0.4"
 env_logger = "0.11"
+
+# Sonde de diagnostic : les dimensions réelles des modèles de carton. Ce fichier existait depuis
+# le 12 août 2026 sans être déclaré nulle part — donc impossible à lancer, donc mort. Le brancher
+# coûte trois lignes et rend mesurable une question qu'on ne pouvait que supposer : « les objets
+# tiennent-ils dans la boîte ? »
+[[bin]]
+name = "bornes_carton"
+path = "src/test_glb_bounds.rs"

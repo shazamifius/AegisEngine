@@ -77,6 +77,19 @@ pub fn installer() {
 
 /// Dépose le témoin. Séparé du hook pour être testable **sans provoquer de vraie panique** : un test
 /// qui panique pour de bon empoisonne le processus de test et rend le résultat illisible.
+///
+/// # Ce que le témoin porte, et pourquoi chaque ligne a été ajoutée
+///
+/// Il ne contenait qu'un horodatage brut et le message. Trois manques, mesurés le 21 août 2026 en
+/// diagnostiquant un vrai rapport reçu :
+///
+/// * **la date était un nombre** (`1787162641`) — illisible sans conversion, donc impossible de
+///   dire « ça date d'avant ou d'après le correctif » d'un coup d'œil ;
+/// * **aucune version** — impossible de savoir QUELLE build a planté, donc impossible de savoir si
+///   le défaut est déjà corrigé. C'est le manque le plus coûteux : il oblige à tout re-diagnostiquer ;
+/// * **aucun contexte d'exécution** — j'ai perdu une heure à chercher un plantage `libxkbcommon`
+///   qui ne se produisait QUE lancé à la main hors de son enveloppe, jamais par le launcher. La
+///   ligne `session:` ci-dessous aurait tranché en une seconde.
 pub fn deposer(message: &str) {
     let Some(dossier) = dossier_web3() else { return };
     let ts = std::time::SystemTime::now()
@@ -84,7 +97,67 @@ pub fn deposer(message: &str) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let _ = std::fs::create_dir_all(&dossier);
-    let _ = std::fs::write(dossier.join(TEMOIN), format!("{ts}\n{message}\n"));
+    let _ = std::fs::write(
+        dossier.join(TEMOIN),
+        format!(
+            "{ts}\n{}\naegis v{} — {}\n{}\n{message}\n",
+            date_lisible(ts),
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            contexte(),
+        ),
+    );
+}
+
+/// L'horodatage en clair, calculé sans aucune dépendance (algorithme des jours civils de Howard
+/// Hinnant). En UTC : une heure locale serait plus agréable à lire et **impossible à comparer**
+/// entre deux machines, ce qui est justement ce qu'on fait avec des rapports.
+fn date_lisible(ts: u64) -> String {
+    let jours = (ts / 86_400) as i64;
+    let reste = ts % 86_400;
+    // Décalage vers une ère commençant en mars : février et son 29 passent alors en fin d'année,
+    // ce qui supprime tout cas particulier de bissextile.
+    let z = jours + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} UTC",
+        reste / 3600,
+        (reste % 3600) / 60,
+        reste % 60
+    )
+}
+
+/// Dans quelles conditions le jeu tournait. Uniquement des faits d'environnement — **rien de
+/// personnel** : pas de nom d'utilisateur, pas de chemin, pas d'adresse.
+///
+/// `enveloppe` dit si le jeu a été lancé par le launcher (qui l'entoure d'un environnement complet
+/// sur NixOS) ou à la main. C'est la ligne qui distingue « ça casse chez les joueurs » de « ça casse
+/// quand un développeur bricole », et les deux ne se corrigent pas au même endroit.
+fn contexte() -> String {
+    let session = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        "wayland"
+    } else if std::env::var_os("DISPLAY").is_some() {
+        "x11"
+    } else {
+        "aucune"
+    };
+    // `steam-run` exporte cette variable dans l'environnement FHS qu'il monte.
+    let enveloppe = if std::env::var_os("STEAM_RUNTIME").is_some()
+        || std::env::var_os("FHS_ENV").is_some()
+    {
+        "enveloppe FHS"
+    } else {
+        "lancement direct"
+    };
+    format!("session: {session} | {enveloppe}")
 }
 
 #[cfg(test)]
@@ -111,6 +184,33 @@ mod tests {
         let d = dossier_web3();
         if let Some(p) = d {
             assert!(p.ends_with(".web3"), "le témoin va dans ~/.web3, là où le launcher le relit");
+        }
+    }
+
+    /// La date se calcule sans dépendance : il faut donc la vérifier contre des repères connus,
+    /// sinon on aurait remplacé un nombre illisible par un nombre FAUX et lisible — bien pire.
+    #[test]
+    fn la_date_lisible_tombe_juste_sur_des_reperes_connus() {
+        assert_eq!(date_lisible(0), "1970-01-01 00:00:00 UTC");
+        // Repère classique : le milliard de secondes.
+        assert_eq!(date_lisible(1_000_000_000), "2001-09-09 01:46:40 UTC");
+        // Un 29 février — le cas que l'algorithme des jours civils est là pour rendre indolore.
+        assert_eq!(date_lisible(1_582_934_400), "2020-02-29 00:00:00 UTC");
+        // Et l'horodatage réellement reçu dans son rapport du 21 août 2026.
+        assert!(date_lisible(1_787_162_641).starts_with("2026-08-"));
+    }
+
+    /// Le contexte ne doit contenir QUE des faits d'environnement : jamais un nom, un chemin ou une
+    /// adresse. La promesse faite à l'écran (« ce fichier ne contient que l'activité de
+    /// l'application ») est une promesse, donc le code doit la rendre vraie.
+    #[test]
+    fn le_contexte_ne_dit_rien_de_personnel() {
+        let c = contexte();
+        assert!(!c.contains('/'), "aucun chemin ne doit apparaître : {c}");
+        if let Ok(user) = std::env::var("USER") {
+            if !user.is_empty() {
+                assert!(!c.contains(&user), "le nom d'utilisateur ne doit pas fuiter : {c}");
+            }
         }
     }
 }

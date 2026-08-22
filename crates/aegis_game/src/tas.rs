@@ -352,7 +352,29 @@ pub fn vue_permanente(traps: &TrapManager) -> TrapManager {
                     | crate::traps::TrapKind::LaserEmitter { .. }
             )
         })
-        .cloned()
+        .map(|t| {
+            let mut t = t.clone();
+            // ⚠ ON NORMALISE L'ÉTAT, ET C'EST TOUT L'INTÉRÊT DE CETTE FONCTION.
+            //
+            // Un piège « permanent » doit être vu DANS SON ÉTAT DANGEREUX, parce que c'est celui
+            // qu'il aura dès que le jeu tournera. Sans ça, le solveur juge une photo prise à un
+            // instant où le danger dort, et conclut qu'on passe.
+            //
+            // C'est exactement ce qui se produisait pour le laser, et il l'a vu en jouant : « le
+            // TAS oublie complètement les lasers, il passe carrément à travers ». Un laser est posé
+            // ÉTEINT (`active: false`, cf. `mystery_box.rs`) et c'est `TrapManager::update` qui
+            // l'allume — or le solveur n'appelle jamais `update`. Il recopiait donc un laser
+            // éteint, et `check_player_death` ne tue que `if *active`.
+            //
+            // ⚠⚠ ET MON TEST NE POUVAIT PAS L'ATTRAPER : je l'avais écrit avec `active: true`,
+            // c'est-à-dire avec l'état que je voulais plutôt que celui que le jeu produit. Un test
+            // ne valide que le modèle qu'on lui donne ; celui-ci encodait une hypothèse fausse sur
+            // le monde réel et la maquillait en preuve.
+            if let crate::traps::TrapKind::LaserEmitter { active, .. } = &mut t.kind {
+                *active = true;
+            }
+            t
+        })
         .collect();
     // Les projectiles ne sont pas recopiés : ils sont l'incarnation même du danger qui passe.
     vue
@@ -1848,7 +1870,12 @@ mod tests {
             Vec2::new(10.0, 1.0),
             crate::traps::TrapKind::LaserEmitter {
                 dir: crate::traps::Direction::Up,
-                active: true,
+                // ⚠ `active: false` — EXACTEMENT l'état dans lequel le jeu pose un laser
+                // (`mystery_box.rs`), c'est `TrapManager::update` qui l'allume ensuite. Ce test
+                // écrivait `true`, donc il éprouvait un laser déjà allumé : un monde que le
+                // solveur ne rencontre JAMAIS, puisqu'il n'appelle pas `update`. Il était vert
+                // pendant que le TAS traversait les lasers sous ses yeux.
+                active: false,
                 timer: 0.0,
             },
             0,
@@ -1869,7 +1896,11 @@ mod tests {
         tous.add_trap(p, TrapKind::SpikeTrap, 0);
         tous.add_trap(p, TrapKind::SawBlade { radius: 0.75, rotation: 0.0 }, 0);
         tous.add_trap(p, TrapKind::Flamethrower { dir: Direction::Up, active: true, timer: 0.0 }, 0);
-        tous.add_trap(p, TrapKind::LaserEmitter { dir: Direction::Up, active: true, timer: 0.0 }, 0);
+        // ⚠ `active: false` — EXACTEMENT comme le jeu le pose (`mystery_box.rs`). La version
+        // précédente de ce test écrivait `true`, donc elle éprouvait un monde qui n'existe pas :
+        // c'est ce qui a laissé le solveur traverser les lasers pendant des jours, test vert à
+        // l'appui. Un test ne prouve que le modèle qu'on lui donne.
+        tous.add_trap(p, TrapKind::LaserEmitter { dir: Direction::Up, active: false, timer: 0.0 }, 0);
         tous.add_trap(p, TrapKind::CannonTurret { dir: Direction::Up, fire_rate: 2.5, timer: 0.0 }, 0);
 
         let vue = vue_permanente(&tous);
