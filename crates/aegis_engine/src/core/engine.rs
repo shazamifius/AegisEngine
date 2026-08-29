@@ -58,10 +58,38 @@ impl Engine {
         self.gpu.resize(window);
     }
 
-    pub fn capture_screenshot(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// Rapatrie l'image affichée depuis la carte, en RVB (trois octets par pixel).
+    ///
+    /// ⚠ Extraite de la capture le 30 août 2026 parce que **deux choses en ont besoin** : écrire
+    /// un PNG, et mesurer ce que l'image fait à l'œil. Deux copies de ce transfert auraient
+    /// divergé — et la mesure aurait alors porté sur une image qui n'est pas celle qu'on regarde.
+    pub fn lire_image(&self) -> Result<(u32, u32, Vec<u8>), Box<dyn std::error::Error>> {
+        let extent = self.gpu.swapchain_extent;
+        let mut rvb = Vec::new();
+        self.transferer_image(&mut rvb)?;
+        Ok((extent.width, extent.height, rvb))
+    }
+
+    /// Mesure la tonalité de ce qui est actuellement affiché.
+    ///
+    /// ⚠ Ce que ça rend est un INDICATEUR, jamais un verdict : le juge du rendu perçu reste un
+    /// œil humain. L'instrument sert à rendre décidable ce qui ne l'était pas — comparer deux
+    /// réglages autrement que de mémoire, et nommer ce qui manque.
+    pub fn mesurer_tonalite(
+        &self,
+    ) -> Result<crate::image::tonalite::Analyse, Box<dyn std::error::Error>> {
+        let (_, _, rvb) = self.lire_image()?;
+        Ok(crate::image::tonalite::analyser(&rvb))
+    }
+
+    /// Le transfert Vulkan lui-meme : image de la carte vers un tampon lisible, puis RVB.
+    fn transferer_image(&self, sortie: &mut Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
         let extent = self.gpu.swapchain_extent;
         let format = self.gpu.swapchain_format;
-        let image = self.gpu.swapchain_images[0];
+        // ⚠ L'image RÉELLEMENT rendue, pas la première de la liste. Lire `[0]` marchait par
+        // accident tant qu'on ne regardait pas de près ; dès qu'on demande une mesure exacte, ça
+        // devient une photographie d'une image vieille de plusieurs trames.
+        let image = self.gpu.swapchain_images[self.gpu.derniere_image];
 
         let buffer_size = (extent.width * extent.height * 4) as vk::DeviceSize;
         let memory_props = unsafe { self.gpu.instance.get_physical_device_memory_properties(self.gpu.physical_device) };
@@ -172,6 +200,19 @@ impl Engine {
             }
         }
 
+        sortie.clear();
+        sortie.reserve(raw_pixels.len() / 4 * 3);
+        for pixel in raw_pixels.chunks_exact(4) {
+            sortie.extend_from_slice(&pixel[..3]);
+        }
+        Ok(())
+    }
+
+    pub fn capture_screenshot(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let extent = self.gpu.swapchain_extent;
+        let mut rvb = Vec::new();
+        self.transferer_image(&mut rvb)?;
+
         // ⚠⚠ ICI VIVAIT UN SCRIPT PYTHON, ÉCRIT SUR LE DISQUE PUIS EXÉCUTÉ (30 août 2026).
         //
         // Trois fautes en une : la règle la plus ferme du projet est « QUE du Rust, aucun autre
@@ -181,11 +222,6 @@ impl Engine {
         //
         // L'encodeur est maintenant dans le moteur, en Rust, et prouvé par aller-retour (il porte
         // son propre décodeur de test : ce qu'il écrit doit se relire octet pour octet).
-        let mut rvb = Vec::with_capacity((extent.width * extent.height * 3) as usize);
-        for pixel in raw_pixels.chunks_exact(4) {
-            rvb.extend_from_slice(&pixel[..3]);
-        }
-
         let png = crate::image::png::encoder(extent.width, extent.height, &rvb)
             .map_err(|e| format!("encodage PNG impossible : {e}"))?;
         std::fs::write(path, &png)?;

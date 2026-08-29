@@ -44,6 +44,14 @@ pub struct GpuContext {
     /// Sans écran, c'est nous qui décidons quelle image sert : ce compteur tourne à la place de
     /// `acquire_next_image`. Inutilisé dès qu'une chaîne de présentation existe.
     image_suivante: usize,
+    /// L'index de l'image la plus récemment rendue.
+    ///
+    /// ⚠ **La capture et la mesure lisaient toujours `swapchain_images[0]`**, quelle que soit
+    /// l'image réellement dessinée. Avec quatre images en rotation, on photographiait donc une
+    /// image vieille de trois trames — ou jamais rendue. C'est le genre de défaut qu'aucun test ne
+    /// voit et qu'aucun œil ne remarque, parce que deux images consécutives se ressemblent : il
+    /// ne se révèle que lorsqu'on demande à la mesure d'être exacte.
+    pub derniere_image: usize,
 }
 
 impl GpuContext {
@@ -273,6 +281,7 @@ impl GpuContext {
             in_flight_fence,
             chrono,
             image_suivante: 0,
+            derniere_image: 0,
         })
     }
 
@@ -513,6 +522,7 @@ impl GpuContext {
             command_buffers,
             chrono,
             image_suivante: 0,
+            derniere_image: 0,
             device,
         })
     }
@@ -573,6 +583,7 @@ impl GpuContext {
                 self.image_suivante as u32
             };
 
+            self.derniere_image = image_index as usize;
             let cmd = self.command_buffers[image_index as usize];
 
             self.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;

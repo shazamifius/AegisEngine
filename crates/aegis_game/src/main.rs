@@ -389,6 +389,48 @@ impl AegisApp {
                         chrono.remettre_a_zero();
                     }
                 }
+                console::Ordre::Tonalite => {
+                    // ⚠ Les trois issues sont dites. Une mesure qui echoue en silence ferait
+                    // chercher un defaut de rendu la ou il n'y a qu'un transfert manque.
+                    match self.engine.as_ref() {
+                        None => log::warn!("[tonalite] rien a mesurer : le moteur n'est pas encore ne"),
+                        Some(moteur) => match moteur.mesurer_tonalite() {
+                            Err(e) => log::warn!("[tonalite] mesure impossible : {e}"),
+                            Ok(a) => {
+                                log::info!(
+                                    "[tonalite] {} pixels mesures | clarte mediane {:.0}/100 | \
+                                     etendue tonale {:.0} | vivacite mediane {:.1} | \
+                                     {:.0} % percu gris | temperature {:+.2}",
+                                    a.pixels,
+                                    a.clarte_mediane,
+                                    a.etendue_tonale,
+                                    a.vivacite_mediane,
+                                    a.part_grise * 100.0,
+                                    a.temperature
+                                );
+                                for f in a.familles.iter().take(4) {
+                                    log::info!(
+                                        "[tonalite]   famille {:>3.0}° — {:>4.1} % de ce qui est \
+                                         colore, clarte {:.0}, vivacite {:.0}",
+                                        f.teinte,
+                                        f.part * 100.0,
+                                        f.clarte,
+                                        f.vivacite
+                                    );
+                                }
+                                for r in aegis_engine::image::tonalite::diagnostiquer(&a) {
+                                    // Le marqueur distingue ce qui franchit un seuil PERCEPTUEL
+                                    // documente de ce qui reste une observation discutable.
+                                    log::info!(
+                                        "[tonalite] {} {}",
+                                        if r.mesurable { "⚠" } else { " " },
+                                        r.texte
+                                    );
+                                }
+                            }
+                        },
+                    }
+                }
                 console::Ordre::Ambiance { champ, valeurs } => {
                     // ⚠ Les TROIS issues sont journalisees : retenu / refuse / impossible. Un
                     // reglage avale en silence ferait chercher le defaut dans le shader alors
@@ -837,8 +879,20 @@ impl ApplicationHandler for AegisApp {
 
                 if let Some(engine) = self.engine.as_ref() {
                     if self.screenshot_mode && engine.frame_count >= self.screenshot_frame {
-                        if let Err(e) = engine.capture_screenshot(&self.screenshot_path) {
-                            log::error!("Erreur lors de la capture d'écran: {:?}", e);
+                        // ⚠ Le compte rendu suit ce qui s'est RÉELLEMENT passé.
+                        //
+                        // Ces deux journaux étaient écrits l'un après l'autre : « erreur lors de
+                        // la capture » PUIS « capture écrite ». Constaté le 30 août sur un chemin
+                        // refusé en écriture — le fichier n'existait pas, et la console annonçait
+                        // qu'il était là. *Annoncer un succès qu'on n'a pas constaté est une
+                        // victoire prématurée de trois mots, et elle envoie chercher un problème
+                        // ailleurs.*
+                        match engine.capture_screenshot(&self.screenshot_path) {
+                            Ok(()) => log::info!("[console] capture écrite : {}", self.screenshot_path),
+                            Err(e) => log::error!(
+                                "[console] capture IMPOSSIBLE vers {} : {e}",
+                                self.screenshot_path
+                            ),
                         }
                         if self.capture_puis_quitter {
                             event_loop.exit();
@@ -846,7 +900,6 @@ impl ApplicationHandler for AegisApp {
                             // Une photo prise, le jeu continue de vivre : la suivante viendra
                             // quand la console la demandera, sur un autre écran.
                             self.screenshot_mode = false;
-                            log::info!("[console] capture écrite : {}", self.screenshot_path);
                             window.request_redraw();
                         }
                     } else {

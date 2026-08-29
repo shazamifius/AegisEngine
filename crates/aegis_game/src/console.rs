@@ -81,6 +81,12 @@ pub enum Ordre {
     GpuZero,
 
     // ── LE LABORATOIRE D'AMBIANCE (29 août 2026) ────────────────────────────────────────────
+    /// Mesurer ce que l'image affichée fait à l'œil, et l'écrire dans le journal.
+    ///
+    /// ⚠ Le relevé passe par le JOURNAL et non par la réponse de la console : la mesure demande
+    /// un aller-retour avec la carte, elle ne peut pas répondre dans le même souffle. Le dire
+    /// évite de croire que la commande n'a rien fait.
+    Tonalite,
     /// Régler un champ de l'`Ambiance` sans recompiler.
     ///
     /// ⚠ Le nom du champ n'est PAS validé ici, et c'est délibéré : c'est le moteur qui sait quels
@@ -257,6 +263,7 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
             "gpu zero            — repart de zero pour l agregation GPU",
             "— le laboratoire d'ambiance : regle EN DIRECT, l'oeil tranche —",
             "ambiance            — le reglage courant, pret a recoller dans le code du jeu",
+            "tonalite            — MESURE ce que l'image fait a l'oeil (clarte, vivacite, familles)",
             "ambiance <champ> <valeurs...>",
             "                      ciel <r> <v> <b> | sol <r> <v> <b> | exposition <x>",
             "                      point_blanc <x>  | rugosite <x>    | reflectance <x>",
@@ -381,6 +388,11 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
                 .collect::<Vec<_>>()
                 .join(" ");
             format!("derniere image : {detail} | total={total:.3} ms")
+        }
+
+        ["tonalite"] => {
+            pupitre.deposer(Ordre::Tonalite);
+            "mesure demandee — le releve arrive dans le journal du jeu".to_string()
         }
 
         // ── LE LABORATOIRE D'AMBIANCE ───────────────────────────────────────────────────────
