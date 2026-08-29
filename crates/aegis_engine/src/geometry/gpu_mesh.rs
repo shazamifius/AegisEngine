@@ -68,6 +68,10 @@ impl GpuMesh {
     }
 
     pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer) {
+        // Le passage obligé de tout maillage : compter ICI, c'est compter tout ce qui est dessiné,
+        // sans demander à personne d'y penser. Un compteur qu'on appelle à la main finit toujours
+        // par manquer le dessin ajouté un soir de correction.
+        crate::mesure::noter_dessin(self.index_count / 3);
         unsafe {
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
             device.cmd_bind_index_buffer(cmd, self.index_buffer, 0, vk::IndexType::UINT32);

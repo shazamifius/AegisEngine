@@ -3,6 +3,7 @@
 pub mod core;
 pub mod geometry;
 pub mod materials;
+pub mod mesure;
 pub mod physics;
 pub mod render;
 pub mod scene;

@@ -352,6 +352,9 @@ impl PartyRenderPass {
             let scissor = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent };
             context.device.cmd_set_viewport(cmd, 0, &[viewport]);
             context.device.cmd_set_scissor(cmd, 0, &[scissor]);
+            // Le fond ne passe pas par un maillage (le shader fabrique ses trois sommets) :
+            // c'est le seul dessin du projet qui doit s'annoncer lui-même.
+            aegis_engine::mesure::noter_dessin(1);
             context.device.cmd_draw(cmd, 3, 1, 0, 0);
 
             // 2. Pipeline Opaque : Rendu des Blocs de la Grille Posés par le Joueur

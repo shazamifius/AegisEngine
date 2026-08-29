@@ -786,6 +786,9 @@ impl ApplicationHandler for AegisApp {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Une image de plus : c'est le dénominateur du banc. Compté ici et nulle part
+                // ailleurs — au seul endroit où une image est réellement demandée.
+                aegis_engine::mesure::noter_image();
                 self.render_frame();
 
                 if let Some(engine) = self.engine.as_ref() {

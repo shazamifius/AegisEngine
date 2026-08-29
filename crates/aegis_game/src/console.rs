@@ -219,6 +219,8 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
             "capture <fichier>   — ecrit une capture d'ecran",
             "quitter             — ferme la session (le jeu continue)",
             "arret               — arrete le JEU proprement",
+            "travail             — le banc : dessins et triangles par image",
+            "travail zero        — repart de zero pour mesurer une phase",
             "— le lobby —",
             "echap               — ouvre ou referme le lobby",
             "zones               — les boutons atteignables sur l'ecran courant",
@@ -277,6 +279,24 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
         ["capture", chemin] => {
             pupitre.deposer(Ordre::Capture { chemin: chemin.to_string() });
             format!("ok capture {chemin}")
+        }
+
+        // ── LE BANC DU RENDU ────────────────────────────────────────────────────────────────
+        // Deux mots seulement : `travail` lit, `travail zero` repart de zéro pour mesurer une
+        // phase précise. Le relevé est déterministe — même scène, même compte, sur n'importe
+        // quelle machine — ce qui est tout l'intérêt face à des millisecondes qui ne voyagent pas.
+        ["travail"] => {
+            let t = aegis_engine::mesure::releve();
+            format!(
+                "images={} dessins={} triangles={} | par image : dessins={:.1} triangles={:.0}",
+                t.images, t.dessins, t.triangles,
+                t.dessins_par_image(), t.triangles_par_image()
+            )
+        }
+
+        ["travail", "zero"] => {
+            aegis_engine::mesure::remettre_a_zero();
+            "ok travail zero".to_string()
         }
 
         ["echap"] => {
