@@ -49,7 +49,6 @@ impl CannonTurretObject {
             * Mat4::from_scale(Vec3::splat(scale));
 
         let push = PushConstants {
-            mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.92, 0.92, 0.95, 1.0), // Blanc Coque Portal
             params: Vec4::new(0.1, 1.5, 0.0, 0.0),
@@ -73,7 +72,6 @@ impl CannonTurretObject {
             // 1. Œil Rouge Lumineux au centre de la tourelle
             let eye_m = Mat4::from_translation(pos + eye_offset) * Mat4::from_scale(Vec3::splat(0.12));
             let push_eye = PushConstants {
-                mvp_matrix: vp * eye_m,
                 model_matrix: eye_m,
                 color_tint: Vec4::new(1.0, 0.0, 0.05, 1.0), // Œil Rouge Portal Émissif
                 params: Vec4::new(0.0, 16.0, 0.0, 0.0),
@@ -92,7 +90,6 @@ impl CannonTurretObject {
             };
 
             let push_sight = PushConstants {
-                mvp_matrix: vp * line_m,
                 model_matrix: line_m,
                 color_tint: sight_color,
                 params: Vec4::new(0.0, 12.0, 0.0, 0.0),

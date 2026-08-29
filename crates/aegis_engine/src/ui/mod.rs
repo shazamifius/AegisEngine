@@ -259,10 +259,11 @@ impl Pinceau<'_> {
     /// caractère sont tous ce même rectangle.
     pub unsafe fn quad(&self, x: f32, y: f32, largeur: f32, hauteur: f32, couleur: Vec4, couche: u8) {
         let push = PushConstants {
-            mvp_matrix: matrice_quad(self.aspect, x, y, largeur, hauteur, couche),
-            // En couleur plate le shader ne consulte aucune normale : mettre l'identité plutôt
-            // qu'une matrice recopiée évite de laisser croire qu'elle sert à quelque chose ici.
-            model_matrix: Mat4::IDENTITY,
+            // ⚠ La matrice d'écran voyage dans `model_matrix`, et le shader NE lui applique PAS
+            // la caméra : `params.w == COULEUR_PLATE` signifie « déjà en espace écran ». C'est ce
+            // qui permet au HUD de rester du HUD pendant que la caméra bouge — et c'est la raison
+            // pour laquelle une seule matrice suffit désormais, là où deux étaient poussées.
+            model_matrix: matrice_quad(self.aspect, x, y, largeur, hauteur, couche),
             color_tint: couleur,
             params: Vec4::new(0.0, 0.0, 0.0, COULEUR_PLATE),
         };

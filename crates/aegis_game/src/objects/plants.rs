@@ -31,7 +31,6 @@ impl PlantsObject {
             * Mat4::from_scale(Vec3::new(2.5, 4.0, 2.5));
 
         let push = PushConstants {
-            mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.15, 0.65, 0.25, 1.0), // Vert Feuillage
             params: Vec4::new(0.1, 1.0, 0.0, 0.0),

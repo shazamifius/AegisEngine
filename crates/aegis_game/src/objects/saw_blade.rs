@@ -47,7 +47,6 @@ impl SawBladeObject {
             * Mat4::from_scale(Vec3::splat(scale));
 
         let push = PushConstants {
-            mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.85, 0.88, 0.92, 1.0), // Acier Métallique
             params: Vec4::new(0.1, 2.0, 0.0, 0.0),

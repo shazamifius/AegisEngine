@@ -51,7 +51,6 @@ impl LaserEmitterObject {
             * Mat4::from_scale(Vec3::splat(scale));
 
         let push = PushConstants {
-            mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.25, 0.75, 0.95, 1.0),
             params: Vec4::new(0.1, 2.0, 0.0, 0.0),
@@ -76,7 +75,6 @@ impl LaserEmitterObject {
                 * Mat4::from_scale(beam_scale);
 
             let push_beam = PushConstants {
-                mvp_matrix: vp * beam_model,
                 model_matrix: beam_model,
                 color_tint: Vec4::new(0.0, 0.95, 1.0, 1.0), // Laser Néon Cyan
                 params: Vec4::new(0.0, 10.0, 0.0, 0.0),     // Émission maximale !
@@ -124,7 +122,6 @@ impl LaserEmitterObject {
                 };
 
                 let push_particle = PushConstants {
-                    mvp_matrix: vp * p_model,
                     model_matrix: p_model,
                     color_tint: p_color,
                     params: Vec4::new(0.0, 14.0, 0.0, 0.0), // Émission maximale !

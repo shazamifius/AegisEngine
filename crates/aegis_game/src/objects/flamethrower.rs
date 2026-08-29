@@ -53,7 +53,6 @@ impl FlamethrowerObject {
             * Mat4::from_scale(Vec3::splat(scale));
 
         let push = PushConstants {
-            mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.85, 0.45, 0.1, 1.0),
             params: Vec4::new(0.1, 1.5, 0.0, 0.0),
@@ -118,7 +117,6 @@ impl FlamethrowerObject {
                 };
 
                 let push_particle = PushConstants {
-                    mvp_matrix: vp * p_model,
                     model_matrix: p_model,
                     color_tint: p_color,
                     params: Vec4::new(0.0, 10.0, 0.0, 0.0),

@@ -1,11 +1,34 @@
+// ── CE QUI CHANGE A CHAQUE OBJET ────────────────────────────────────────────────────────────
+// 96 octets, et le chiffre compte : Vulkan ne garantit que 128 octets de constantes poussees.
+// Ce shader en poussait 160 (une matrice vue-projection redondante par objet) et n'aurait donc
+// tres probablement pas pu creer son pipeline sur un GPU mobile — la machine de reference du
+// projet est un Meta Quest 2.
 struct PushConstants {
-    mvp_matrix: mat4x4<f32>,
+    // ⚠ En couleur plate cette matrice est deja une matrice d'ECRAN : aucune camera ne lui est
+    // appliquee. C'est ce qui tient le HUD en place pendant que la camera bouge.
     model_matrix: mat4x4<f32>,
     color_tint: vec4<f32>,
     params: vec4<f32>,
 };
 
 var<push_constant> pc: PushConstants;
+
+// ── CE QUI EST VRAI POUR TOUTE L'IMAGE ──────────────────────────────────────────────────────
+// La vue-projection est la meme pour tous les objets : l'envoyer par objet, c'etait ~2000 fois
+// les memes 64 octets par image. Les lumieres arrivent par le meme chemin.
+struct Lumiere {
+    position_type: vec4<f32>,     // xyz = position monde, w = type (0 dir, 1 point, 2 projecteur)
+    couleur_intensite: vec4<f32>, // rgb = couleur, w = intensite
+    direction_cone: vec4<f32>,    // xyz = direction, w = cosinus du demi-angle du cone
+};
+
+struct Cadre {
+    view_proj: mat4x4<f32>,
+    camera_et_compte: vec4<f32>,  // xyz = position camera, w = nombre de lumieres allumees
+    lumieres: array<Lumiere, 16>,
+};
+
+@group(0) @binding(0) var<uniform> cadre: Cadre;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -41,7 +64,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.uv = in.uv0;
     out.params = pc.params;
 
-    out.clip_position = pc.mvp_matrix * vec4<f32>(in.position, 1.0);
+    // Le shader compose lui-meme la vue-projection, sauf en couleur plate ou `model_matrix` est
+    // deja une matrice d'ecran (le HUD, le lobby). `select(faux, vrai, condition)`.
+    let en_espace_ecran = pc.params.w == 1.0;
+    out.clip_position = select(cadre.view_proj * world_pos, world_pos, en_espace_ecran);
     return out;
 }
 

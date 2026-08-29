@@ -37,7 +37,6 @@ impl SpikeTrapObject {
             * Mat4::from_scale(Vec3::splat(scale));
 
         let push = PushConstants {
-            mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.9, 0.25, 0.25, 1.0), // Rouge Métal Acéré
             params: Vec4::new(0.2, 1.5, 0.0, 0.0),

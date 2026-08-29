@@ -62,6 +62,8 @@ pub struct PartyRenderPass {
     pipeline: vk::Pipeline,
     particle_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
+    /// Ce qui est vrai pour toute l'image : la vue-projection, la caméra, les lumières.
+    cadre: aegis_engine::render::cadre::Cadre,
 
     pub cube_mesh: GpuMesh,
     pub char_mesh: GpuMesh,
@@ -161,6 +163,9 @@ impl PartyRenderPass {
         let p_vert_mod = PipelineFactory::create_shader_module_from_bytes(&gpu.device, p_vert_spv)?;
         let p_frag_mod = PipelineFactory::create_shader_module_from_bytes(&gpu.device, p_frag_spv)?;
 
+        // Le cadre naît avant les layouts : c'est lui qui fournit la description du descripteur.
+        let cadre = aegis_engine::render::cadre::Cadre::nouveau(gpu, memory_props)?;
+
         let bg_pipeline_layout = PipelineFactory::create_pipeline_layout(&gpu.device, &[], &[])?;
 
         let push_constant_range = vk::PushConstantRange::default()
@@ -168,7 +173,11 @@ impl PartyRenderPass {
             .offset(0)
             .size(std::mem::size_of::<PushConstants>() as u32);
 
-        let pipeline_layout = PipelineFactory::create_pipeline_layout(&gpu.device, &[], &[push_constant_range])?;
+        let pipeline_layout = PipelineFactory::create_pipeline_layout(
+            &gpu.device,
+            std::slice::from_ref(&cadre.layout_descripteur),
+            &[push_constant_range],
+        )?;
 
         let bg_pipeline = PipelineFactory::create_graphics_pipeline(
             &gpu.device,
@@ -219,6 +228,7 @@ impl PartyRenderPass {
             pipeline,
             particle_pipeline,
             pipeline_layout,
+            cadre,
 
             cube_mesh,
             char_mesh,
@@ -293,6 +303,21 @@ impl PartyRenderPass {
         let camera = self.camera(aspect);
         let vp = camera.compute_projection_matrix() * camera.compute_view_matrix();
 
+        // Ce que TOUTE l'image partage, écrit une fois. ⚠ Une seule lumière pour l'instant, et
+        // c'est délibéré : elle reproduit exactement celle qui était codée en dur dans le shader,
+        // pour que ce changement de plomberie se prouve par une image IDENTIQUE au sha256 près.
+        // Les lumières multiples viennent ensuite, une fois cette moitié-là hors de doute.
+        let soleil = aegis_engine::scene::light::GpuLight::new_directional(
+            Vec3::new(0.4, 0.9, 0.7),
+            Vec3::new(1.0, 0.96, 0.88),
+            0.65,
+        );
+        self.cadre.ecrire(&aegis_engine::render::cadre::DonneesImage::nouvelle(
+            vp,
+            [self.camera_pos.x, self.camera_pos.y, self.camera_pos.z],
+            &[soleil],
+        ));
+
         unsafe {
             let barrier_present = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::UNDEFINED)
@@ -361,6 +386,9 @@ impl PartyRenderPass {
 
             // 2. Pipeline Opaque : Rendu des Blocs de la Grille Posés par le Joueur
             context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            // Le descripteur est lié une fois pour toute la passe : tous les dessins qui suivent
+            // partagent la même caméra et les mêmes lumières.
+            self.cadre.lier(&context.device, cmd, self.pipeline_layout);
 
             for y in 0..game.grid.height {
                 for x in 0..game.grid.width {
@@ -379,7 +407,6 @@ impl PartyRenderPass {
                         };
 
                         let push = PushConstants {
-                            mvp_matrix: vp * model,
                             model_matrix: model,
                             color_tint: col,
                             params: Vec4::new(0.3, 0.0, 0.0, 0.0),
@@ -399,7 +426,6 @@ impl PartyRenderPass {
                                 let sub_m = Mat4::from_translation(Vec3::new(x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y, 0.05))
                                     * Mat4::from_scale(Vec3::new(sz, sz, 0.92));
                                 let sub_push = PushConstants {
-                                    mvp_matrix: vp * sub_m,
                                     model_matrix: sub_m,
                                     color_tint: Vec4::new(0.40, 0.43, 0.48, 1.0), // Gris Roche Plus Sombre
                                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
@@ -420,7 +446,6 @@ impl PartyRenderPass {
                                 let sub_m = Mat4::from_translation(Vec3::new(x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y, 0.05))
                                     * Mat4::from_scale(Vec3::new(sz, sz, 0.92));
                                 let sub_push = PushConstants {
-                                    mvp_matrix: vp * sub_m,
                                     model_matrix: sub_m,
                                     color_tint: Vec4::new(0.42, 0.27, 0.16, 1.0), // Très légèrement plus sombre, ultra-subtil
                                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
@@ -450,7 +475,6 @@ impl PartyRenderPass {
                                         * Mat4::from_rotation_z(((h % 20) as f32 - 10.0) * 0.02)
                                         * Mat4::from_scale(Vec3::new(blade_w, blade_h, 0.18));
                                     let blade_push = PushConstants {
-                                        mvp_matrix: vp * blade_m,
                                         model_matrix: blade_m,
                                         color_tint: green_color,
                                         params: Vec4::new(0.3, 0.0, 0.0, 0.0),
@@ -469,7 +493,6 @@ impl PartyRenderPass {
                 * Mat4::from_scale(Vec3::new(500.0, 1.0, 2.0)); // Bande noire infinie sur les côtés X, 1 bloc de hauteur Y
 
             let push_void = PushConstants {
-                mvp_matrix: vp * void_model,
                 model_matrix: void_model,
                 color_tint: Vec4::new(0.02, 0.02, 0.05, 1.0), // Noir Abyssal Profond
                 params: Vec4::new(0.8, 0.0, 0.0, 0.0),
@@ -512,7 +535,6 @@ impl PartyRenderPass {
                 let bullet_m = Mat4::from_translation(Vec3::new(proj.position.x, proj.position.y, 0.2))
                     * Mat4::from_scale(Vec3::splat(0.22)); // Compacte et légère !
                 let push_bullet = PushConstants {
-                    mvp_matrix: vp * bullet_m,
                     model_matrix: bullet_m,
                     color_tint: Vec4::new(1.00, 0.85, 0.20, 1.0), // Or Incandescent Vif
                     params: Vec4::new(0.0, 14.0, 0.0, 0.0),        // Lueur émissive
@@ -540,7 +562,6 @@ impl PartyRenderPass {
                     };
 
                     let push_trail = PushConstants {
-                        mvp_matrix: vp * trail_m,
                         model_matrix: trail_m,
                         color_tint: trail_color,
                         params: Vec4::new(0.0, 8.0, 0.0, 0.0),
@@ -598,7 +619,6 @@ impl PartyRenderPass {
 
                                 let item_m = Mat4::from_translation(item_pos) * Mat4::from_scale(Vec3::splat(0.70 * scale_mult));
                                 let push_item = PushConstants {
-                                    mvp_matrix: vp * item_m,
                                     model_matrix: item_m,
                                     color_tint: block_color,
                                     params: Vec4::new(0.3, 1.0, 0.0, 0.0),
@@ -614,7 +634,6 @@ impl PartyRenderPass {
                                 * Mat4::from_rotation_z(trap_t * 3.0)
                                 * Mat4::from_scale(Vec3::splat(0.18));
                             let push_gem = PushConstants {
-                                mvp_matrix: vp * gem_m,
                                 model_matrix: gem_m,
                                 color_tint: Vec4::new(0.98, 0.85, 0.15, 1.0),
                                 params: Vec4::new(0.0, 8.0, 0.0, 0.0),
@@ -650,7 +669,6 @@ impl PartyRenderPass {
                                 let item_m = Mat4::from_translation(Vec3::new(gx as f32 + 0.5, gy as f32 + 0.5, 0.3))
                                     * Mat4::from_scale(Vec3::splat(0.90));
                                 let push_item = PushConstants {
-                                    mvp_matrix: vp * item_m,
                                     model_matrix: item_m,
                                     color_tint: Vec4::new(0.35, 0.75, 0.95, 0.5), // Semi-transparence 50%
                                     params: Vec4::new(0.0, 2.0, 0.0, 0.0),
@@ -682,7 +700,6 @@ impl PartyRenderPass {
                             * Mat4::from_scale(limb.scale);
 
                         let push = PushConstants {
-                            mvp_matrix: vp * m,
                             model_matrix: m,
                             color_tint: limb.color,
                             params: Vec4::new(0.4, 0.0, 0.0, 0.0),
@@ -740,7 +757,6 @@ impl PartyRenderPass {
                         let spark_m = Mat4::from_translation(Vec3::new(spark_x, spark_y, 0.25))
                             * Mat4::from_scale(Vec3::new(0.08, 0.08, 0.08));
                         let push_spark = PushConstants {
-                            mvp_matrix: vp * spark_m,
                             model_matrix: spark_m,
                             color_tint: Vec4::new(0.98, 0.75, 0.20, 1.0), // Étincelles Or
                             params: Vec4::new(0.0, 6.0, 0.0, 0.0), // Lueur intense
@@ -763,7 +779,6 @@ impl PartyRenderPass {
                     * Mat4::from_translation(Vec3::new(0.0, -0.175, 0.0))
                     * Mat4::from_scale(Vec3::new(0.22, 0.35, 0.20));
                 let push_leg = PushConstants {
-                    mvp_matrix: vp * left_leg_m,
                     model_matrix: left_leg_m,
                     color_tint: Vec4::new(0.12, 0.15, 0.28, 1.0), // Pantalon Indigo
                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
@@ -778,7 +793,6 @@ impl PartyRenderPass {
                     * Mat4::from_translation(Vec3::new(0.0, -0.175, 0.0))
                     * Mat4::from_scale(Vec3::new(0.22, 0.35, 0.20));
                 let push_leg_r = PushConstants {
-                    mvp_matrix: vp * right_leg_m,
                     model_matrix: right_leg_m,
                     color_tint: Vec4::new(0.10, 0.12, 0.22, 1.0), // Jambe arrière plus sombre
                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
@@ -791,7 +805,6 @@ impl PartyRenderPass {
                     * Mat4::from_translation(Vec3::new(0.0, 0.65, 0.0))
                     * Mat4::from_scale(Vec3::new(0.48, 0.65, 0.40));
                 let push_torso = PushConstants {
-                    mvp_matrix: vp * torso_m,
                     model_matrix: torso_m,
                     color_tint: Vec4::new(0.20, 0.65, 0.95, 1.0), // Veste Cyan
                     params: Vec4::new(0.2, 0.0, 0.0, 0.0),
@@ -807,7 +820,6 @@ impl PartyRenderPass {
                     * Mat4::from_translation(Vec3::new(0.0, -0.18, 0.0))
                     * Mat4::from_scale(Vec3::new(0.20, 0.38, 0.18));
                 let push_arm_f = PushConstants {
-                    mvp_matrix: vp * arm_front_m,
                     model_matrix: arm_front_m,
                     color_tint: Vec4::new(0.15, 0.18, 0.25, 1.0),
                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
@@ -822,7 +834,6 @@ impl PartyRenderPass {
                     * Mat4::from_translation(Vec3::new(0.0, -0.18, 0.0))
                     * Mat4::from_scale(Vec3::new(0.20, 0.38, 0.18));
                 let push_arm_b = PushConstants {
-                    mvp_matrix: vp * arm_back_m,
                     model_matrix: arm_back_m,
                     color_tint: Vec4::new(0.12, 0.14, 0.20, 1.0),
                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
@@ -848,7 +859,6 @@ impl PartyRenderPass {
                     * Mat4::from_rotation_z(head_choupi_tilt)
                     * Mat4::from_scale(Vec3::new(0.46 * (1.0 + bump_squash * 0.3), head_scale_y, 0.42));
                 let push_head = PushConstants {
-                    mvp_matrix: vp * head_m,
                     model_matrix: head_m,
                     color_tint: Vec4::new(0.96, 0.96, 0.98, 1.0), // Tête Blanche Pur
                     params: Vec4::new(0.1, 0.0, 0.0, 0.0),
@@ -863,7 +873,6 @@ impl PartyRenderPass {
                     * Mat4::from_scale(Vec3::new(0.16, 0.10 * (1.0 - bump_squash * 0.3), 0.32));
                 let visor_glow = 3.5 + 1.2 * (t * 4.0).sin();
                 let push_visor = PushConstants {
-                    mvp_matrix: vp * visor_m,
                     model_matrix: visor_m,
                     color_tint: Vec4::new(0.98, 0.82, 0.10, 1.0), // Visière Or
                     params: Vec4::new(0.0, visor_glow, 0.0, 0.0), // Lueur Émissive Respiratoire
@@ -883,7 +892,6 @@ impl PartyRenderPass {
                     * Mat4::from_rotation_z(trail_angle + head_choupi_tilt)
                     * Mat4::from_scale(Vec3::new(0.48 * (1.0 + bump_squash * 0.35), cap_scale_y, 0.44));
                 let push_cap = PushConstants {
-                    mvp_matrix: vp * cap_m,
                     model_matrix: cap_m,
                     color_tint: Vec4::new(0.92, 0.20, 0.25, 1.0), // Bonnet Rouge Vif
                     params: Vec4::new(0.2, 0.0, 0.0, 0.0),
@@ -901,7 +909,6 @@ impl PartyRenderPass {
                             * Mat4::from_rotation_z(t * 22.0 + i as f32)
                             * Mat4::from_scale(Vec3::new(0.09, 0.09, 0.09));
                         let push_star = PushConstants {
-                            mvp_matrix: vp * star_m,
                             model_matrix: star_m,
                             color_tint: Vec4::new(0.98, 0.90, 0.15, 1.0), // Étoile "BONK !" Or Brillant
                             params: Vec4::new(0.0, 8.0, 0.0, 0.0),
@@ -916,7 +923,6 @@ impl PartyRenderPass {
                     let p_m = Mat4::from_translation(particle.pos)
                         * Mat4::from_scale(particle.size);
                     let push_p = PushConstants {
-                        mvp_matrix: vp * p_m,
                         model_matrix: p_m,
                         color_tint: particle.color,
                         params: Vec4::new(0.0, particle.emissive, 0.0, 0.0),
@@ -943,7 +949,6 @@ impl PartyRenderPass {
                     let m = Mat4::from_translation(base + Vec3::new(0.0, hauteur, 0.0))
                         * Mat4::from_scale(taille);
                     let push = PushConstants {
-                        mvp_matrix: vp * m,
                         model_matrix: m,
                         color_tint: teinte,
                         params: Vec4::new(0.2, 0.0, 0.0, 0.0),
@@ -970,7 +975,6 @@ impl PartyRenderPass {
                     * Mat4::from_rotation_z(distant.yaw)
                     * Mat4::from_scale(Vec3::new(0.62, 0.90, 0.62));
                 let push_corps = PushConstants {
-                    mvp_matrix: vp * corps,
                     model_matrix: corps,
                     color_tint: teinte,
                     params: Vec4::new(0.2, 0.0, 0.0, 0.0),
@@ -981,7 +985,6 @@ impl PartyRenderPass {
                 let tete = Mat4::from_translation(base + Vec3::new(0.0, 1.12, 0.0))
                     * Mat4::from_scale(Vec3::new(0.52, 0.46, 0.52));
                 let push_tete = PushConstants {
-                    mvp_matrix: vp * tete,
                     model_matrix: tete,
                     // Un ton plus clair que le corps : la tête se détache sans changer la
                     // couleur qui identifie le joueur.
@@ -1003,7 +1006,6 @@ impl PartyRenderPass {
             for particule in &game.particles.particles {
                 let m = Mat4::from_translation(particule.pos) * Mat4::from_scale(particule.size);
                 let push = PushConstants {
-                    mvp_matrix: vp * m,
                     model_matrix: m,
                     color_tint: particule.color,
                     params: Vec4::new(0.0, particule.emissive, 0.0, 0.0),
@@ -1024,7 +1026,6 @@ impl PartyRenderPass {
                     * Mat4::from_scale(Vec3::new(1.08, 1.08, 1.08));
 
                 let push_preview = PushConstants {
-                    mvp_matrix: vp * preview_model,
                     model_matrix: preview_model,
                     color_tint: preview_col,
                     params: Vec4::new(0.0, 5.0, 0.0, 0.0), // Lueur Émissive Wireframe Preview

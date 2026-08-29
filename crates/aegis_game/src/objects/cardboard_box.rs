@@ -137,7 +137,6 @@ impl CardboardBoxObject {
 
         // Couleur Kraft Carton Warm Naturelle
         let push = PushConstants {
-            mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.78, 0.58, 0.36, 1.0), // Kraft Carton Chaud
             params: Vec4::new(0.3, 0.0, 0.0, 0.0),

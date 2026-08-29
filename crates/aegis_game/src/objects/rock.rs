@@ -31,7 +31,6 @@ impl RockObject {
             * Mat4::from_scale(Vec3::new(4.0, 4.0, 4.0));
 
         let push = PushConstants {
-            mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.45, 0.42, 0.40, 1.0), // Roche Naturelle
             params: Vec4::new(0.3, 1.0, 0.0, 0.0),

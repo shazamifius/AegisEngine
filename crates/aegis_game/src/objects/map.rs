@@ -61,7 +61,6 @@ impl MapObject {
         let model = self.get_model_matrix();
 
         let push = PushConstants {
-            mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.85, 0.88, 0.92, 1.0), // Gris studio clair
             params: Vec4::new(0.2, 1.0, 0.0, 0.0),
