@@ -116,6 +116,10 @@ pub struct Etat {
     /// La MOYENNE sert a comparer deux versions ; le PIRE CAS dit si le rendu saccade. Sur un
     /// casque, une seule image ratee se ressent — les deux se lisent ensemble.
     pub gpu: Vec<(String, f32, f32, u32)>,
+    /// Les images par seconde observees. ⚠ **A lire AVANT le cout** : une cadence effondree
+    /// signale une fenetre masquee, et le releve qui l'accompagne surestime alors le cout d'un
+    /// facteur 4 environ (mesure le 29 aout : 11 images en 6 s, 0,841 ms au lieu de 0,222 ms).
+    pub gpu_cadence: f32,
     /// Le releve de la derniere image seule, pour voir ce qui se passe a l'instant present.
     pub gpu_image: Vec<(String, f32)>,
 }
@@ -330,8 +334,17 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
                 .join(" ");
             // Le compte d'images est affiche EXPRES : une moyenne sur trois images n'est pas une
             // mesure, et c'est invisible si on ne le montre pas.
+            // La cadence est dite EN PREMIER, et c'est deliberé : elle decide si le reste de la
+            // ligne vaut quelque chose. Une fenetre masquee tombe a quelques images par seconde et
+            // fait grossir toutes les durees — le chiffre se croirait sans elle.
+            let alerte = if e.gpu_cadence > 0.0 && e.gpu_cadence < 20.0 {
+                "  ⚠ CADENCE EFFONDREE — fenetre masquee ? ce releve surestime le cout"
+            } else {
+                ""
+            };
             format!(
-                "moy/pire par etape : {detail} | total moy={moyenne:.3} ms ({:.1}% du budget Quest 2 de {budget:.1} ms), pire={pire:.3} ms | sur {images} images",
+                "{:.0} img/s sur {images} images{alerte} | moy/pire par etape : {detail} | total moy={moyenne:.3} ms ({:.1}% du budget Quest 2 de {budget:.1} ms), pire={pire:.3} ms",
+                e.gpu_cadence,
                 moyenne / budget * 100.0
             )
         }

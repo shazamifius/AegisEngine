@@ -129,10 +129,40 @@ pub struct Cumul {
 /// ⚠ **Le pic est gardé à côté de la moyenne, et il n'est pas décoratif.** Sur un casque, une seule
 /// image ratée se voit et se ressent ; une moyenne confortable qui cache un pic à 20 ms décrit un
 /// rendu agréable qui donne la nausée. Les deux chiffres se lisent ensemble, jamais l'un sans l'autre.
-#[derive(Default)]
+///
+/// ## ⚠⚠ LA SONDE QUI MENT, ET C'EST LUI QUI L'A VUE (29 août 2026)
+///
+/// Sa remarque : *« si un programme visible en fenêtre fait un calcul mais que je vais sur une
+/// autre fenêtre, ça va complètement freeze le jeu »*. Mesuré, et c'est pire que ça :
+///
+/// | état de la fenêtre | images en 6 s | coût moyen mesuré |
+/// |---|---|---|
+/// | visible | 996 (165 img/s) | 0,222 ms |
+/// | **masquée** (autre espace de travail) | **11 (≈2 img/s)** | **0,841 ms** |
+///
+/// Le compositeur cesse d'envoyer ses invitations à dessiner : le rendu s'arrête presque
+/// complètement. **Et le piège n'est pas le gel — c'est que les durées GONFLENT d'un facteur 4.**
+/// Entre deux images espacées d'une demi-seconde, le GPU redescend ses horloges et vide ses
+/// caches ; chaque image repart à froid. Une mesure prise fenêtre masquée fait donc paraître le
+/// rendu **quatre fois plus coûteux** qu'il ne l'est — elle ment dans le sens qui trompe le plus,
+/// celui qui ferait « optimiser » un code qui n'a aucun problème.
+///
+/// **La garde n'est pas un avertissement à lire, c'est un chiffre qui rend le défaut visible :**
+/// la cadence est rendue avec chaque relevé. Onze images en six secondes se repère d'un coup d'œil
+/// là où « 0,841 ms » se croit sans hésiter. *(Une première tentative de ce test a été faussée
+/// parce qu'il a regardé l'espace de travail où je venais d'envoyer le jeu — d'où le contrôle
+/// explicite dans le scénario, et la mesure refaite.)*
 pub struct Historique {
     /// nom, somme des durées, pire durée vue, nombre d'images
     lignes: Vec<(&'static str, f64, f32, u32)>,
+    /// Depuis quand on agrège — pour rendre la cadence, seul témoin d'une fenêtre bridée.
+    depuis: std::time::Instant,
+}
+
+impl Default for Historique {
+    fn default() -> Self {
+        Self { lignes: Vec::new(), depuis: std::time::Instant::now() }
+    }
 }
 
 impl Historique {
@@ -173,8 +203,19 @@ impl Historique {
         self.lignes.iter().map(|l| l.3).max().unwrap_or(0)
     }
 
+    /// Les images par seconde observées depuis la dernière remise à zéro.
+    ///
+    /// **À regarder AVANT le coût.** Une cadence effondrée (quelques images par seconde) signale
+    /// une fenêtre masquée ou minimisée : le relevé qui l'accompagne est alors sans valeur, et
+    /// surestime le coût. Rend `0.0` tant que rien n'a été observé.
+    pub fn cadence(&self) -> f32 {
+        let s = self.depuis.elapsed().as_secs_f32();
+        if s <= 0.0 { 0.0 } else { self.images() as f32 / s }
+    }
+
     pub fn remettre_a_zero(&mut self) {
         self.lignes.clear();
+        self.depuis = std::time::Instant::now();
     }
 }
 
@@ -306,6 +347,12 @@ impl ChronoGpu {
     /// Le nombre d'images agrégées — à regarder avant de conclure quoi que ce soit.
     pub fn images_agregees(&self) -> u32 {
         self.historique.images()
+    }
+
+    /// Les images par seconde observées. Voir [`Historique::cadence`] : c'est le témoin qui dit si
+    /// le relevé vaut quelque chose.
+    pub fn cadence(&self) -> f32 {
+        self.historique.cadence()
     }
 
     /// Repart de zéro, pour mesurer une phase précise plutôt que depuis le lancement.
@@ -478,9 +525,13 @@ mod tests {
         assert!((c[1].pic_ms - 4.0).abs() < 1e-5, "{:?}", c[1]);
         assert_eq!(h.images(), 2);
 
+        // La cadence existe des qu'il y a des images, et repart a zero avec le reste.
+        assert!(h.cadence() > 0.0, "deux images versees, la cadence ne peut pas etre nulle");
+
         h.remettre_a_zero();
         assert_eq!(h.images(), 0);
         assert!(h.cumuls().is_empty());
+        assert_eq!(h.cadence(), 0.0, "sans image, pas de cadence — et surtout pas de division");
     }
 
     /// ⚠ Le cas qui justifie de compter les images PAR ÉTAPE : un écran qui s'ouvre à mi-parcours

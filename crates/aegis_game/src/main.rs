@@ -306,6 +306,7 @@ fn publier_etat_console(
                         .collect()
                 })
                 .unwrap_or_default(),
+            gpu_cadence: chrono.map(|c| c.cadence()).unwrap_or(0.0),
             gpu_image: chrono
                 .map(|c| {
                     c.etapes()
