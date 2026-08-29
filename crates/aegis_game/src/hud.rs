@@ -227,6 +227,38 @@ pub fn largeur_texte(texte: &str, hauteur_caractere: f32) -> f32 {
     point * (n as f32 * GLYPHE_COLONNES as f32 + (n - 1) as f32)
 }
 
+/// La hauteur de caractère qui fait tenir `texte` dans `largeur_max`.
+///
+/// **Sa règle, le 29 août 2026 :** *« peu importe la taille de la fenêtre, il faut que le texte ne
+/// parte jamais sur les autres box »*. Elle n'était garantie nulle part — chaque écran posait son
+/// texte à une abscisse et espérait. Résultat mesuré sur ses captures : `MALUS SI PERSONNE
+/// N'ARRIVE` réclame 0,58 de large, une fenêtre étroite n'en laisse que 0,33, et le libellé
+/// s'écrivait PAR-DESSUS ses propres boutons — illisible des deux côtés.
+///
+/// Corriger écran par écran aurait été une rustine : le même défaut vivait sur trois écrans à la
+/// fois (le sous-titre coupé aux deux bords, le code d'accès sur son explication, la liste des
+/// membres sur la sienne), et le suivant serait revenu au premier libellé un peu long. La garantie
+/// vit donc **ici**, dans la seule fonction qui sait ce qu'un texte occupe.
+///
+/// On RÉTRÉCIT, on n'agrandit jamais : un texte court garde la taille voulue. Et l'on ne tronque
+/// pas — un réglage à moitié nommé se devine mal, alors qu'un libellé plus petit se lit encore.
+///
+/// ⚠ Rend `0.0` quand la place est nulle ou négative. Un texte de hauteur nulle ne dessine rien,
+/// ce qui vaut mieux qu'un texte qui déborde sur son voisin : l'absence se remarque, la
+/// superposition se subit.
+pub fn hauteur_pour_tenir(texte: &str, hauteur_voulue: f32, largeur_max: f32) -> f32 {
+    if hauteur_voulue <= 0.0 || largeur_max <= 0.0 {
+        return 0.0;
+    }
+    let voulue = largeur_texte(texte, hauteur_voulue);
+    if voulue <= largeur_max {
+        return hauteur_voulue;
+    }
+    // `largeur_texte` est proportionnelle à la hauteur : la mise à l'échelle est exacte, pas
+    // approchée — aucune marge de sécurité à inventer, donc aucune constante à justifier.
+    hauteur_voulue * largeur_max / voulue
+}
+
 /// Écrit un score de façon lisible.
 ///
 /// Les points du jeu sont entiers la plupart du temps (+4, +3, +1, +1 par piège), mais la

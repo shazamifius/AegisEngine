@@ -73,6 +73,19 @@ impl Reglage {
             format!("{} {}", self.valeur, self.unite)
         }
     }
+
+    /// Le plus large de tous les affichages que ce réglage puisse prendre.
+    ///
+    /// Sert à figer la taille du texte de la valeur : la calculer sur la valeur COURANTE la ferait
+    /// changer sous le doigt en cliquant « + », ce qui se lit comme un défaut d'affichage. On
+    /// dimensionne donc une fois pour toutes sur le pire cas — les bornes sont connues, autant s'en
+    /// servir. `min` autant que `max` : un malus part vers le bas, et « -300 PTS » est plus large
+    /// que « 0 PTS ».
+    pub fn affichage_le_plus_large(&self) -> String {
+        let candidat = |v: i32| Reglage { valeur: v, ..*self }.affichage();
+        let (a, b) = (candidat(self.min), candidat(self.max));
+        if a.chars().count() >= b.chars().count() { a } else { b }
+    }
 }
 
 /// ⚠ Les numéros 1..=5 sont un CONTRAT avec le cœur : ils voyagent tels quels dans l'annonce.
@@ -426,6 +439,27 @@ const H_TITRE: f32 = 0.046;
 const H_TEXTE: f32 = 0.026;
 const H_PETIT: f32 = 0.020;
 const MARGE: f32 = 0.026;
+
+/// Le côté d'un bouton rond « − » / « + ».
+const BOUTON_PAS: f32 = 0.040;
+/// La largeur du bouton « DEFAUT », et l'écart qui le sépare du « + ».
+const W_DEFAUT: f32 = 0.13;
+const ECART_DEFAUT: f32 = 0.02;
+/// La colonne où s'écrit la valeur.
+const W_VALEUR: f32 = 0.15;
+
+/// Les deux boutons que l'hôte voit en face d'un membre (« SORTIR », « BANNIR »), et leur écart.
+const W_BOUTON_MEMBRE: f32 = 0.15;
+const ECART_BOUTONS: f32 = 0.012;
+/// Ce qu'ils prennent ensemble : la place que le nom d'un membre ne doit jamais atteindre.
+const LARGEUR_BOUTONS_HOTE: f32 = 2.0 * W_BOUTON_MEMBRE + ECART_BOUTONS;
+
+/// Ce que les commandes d'une ligne de réglage prennent, à droite : `− valeur + DEFAUT`.
+///
+/// Écrit UNE fois et vérifié sur place (`debug_assert` dans `ligne_reglage`) : c'est ce chiffre qui
+/// dit combien de place reste au libellé, et une copie qui dérive rendrait le calcul de taille faux
+/// sans que rien ne le signale — le texte recommencerait à passer sous les boutons.
+const LARGEUR_COMMANDES: f32 = W_DEFAUT + ECART_DEFAUT + BOUTON_PAS + W_VALEUR + BOUTON_PAS;
 /// Hauteur d'une ligne de réglage — assez pour deux boutons au pouce, assez peu pour que les cinq
 /// réglages tiennent sans faire défiler.
 const H_LIGNE: f32 = 0.058;
@@ -492,6 +526,23 @@ impl Lobby {
     /// Une ligne « NOM ……… − valeur + [DEFAUT] ». Le bouton défaut n'apparaît que si le réglage a
     /// bougé : toujours visible, il ajouterait cinq zones cliquables qui ne disent rien
     /// (« remettre 150 à 150 » n'est pas une action) ; conditionnel, il devient une INFORMATION.
+    /// La hauteur de caractère des libellés de réglages, **commune à toutes les lignes**.
+    ///
+    /// Le plus long décide : sinon chaque ligne prendrait sa propre taille et la colonne des noms
+    /// serait en dents de scie — ce qui se lit comme un défaut, pas comme une adaptation.
+    ///
+    /// C'est ici que sa règle du 29 août est tenue — *« peu importe la taille de la fenêtre, le
+    /// texte ne doit jamais partir sur les autres box »*. La place disponible est CALCULÉE
+    /// (la largeur utile, moins ce que les commandes prennent à droite, moins une marge), jamais
+    /// supposée. Le débordement devient impossible par construction plutôt que par réglage — même
+    /// patron que les bornes du carton mystère, où deux constantes réglées à l'œil ont disparu.
+    fn hauteur_des_libelles(&self, premier: Reglage, larg: f32) -> f32 {
+        let place = larg - LARGEUR_COMMANDES - MARGE;
+        std::iter::once(premier.nom)
+            .chain(self.creation.reglages.iter().map(|r| r.nom))
+            .fold(H_TEXTE, |h, nom| h.min(crate::hud::hauteur_pour_tenir(nom, H_TEXTE, place)))
+    }
+
     unsafe fn ligne_reglage(
         &self,
         p: &Pinceau,
@@ -500,21 +551,29 @@ impl Lobby {
         y: f32,
         r: Reglage,
         acts: (Action, Action, Option<Action>),
+        h_libelle: f32,
     ) {
         let droite = x0 + larg;
-        let c = 0.040;
+        let c = BOUTON_PAS;
         // Les commandes sont calées à DROITE dans un ordre fixe : une colonne de valeurs qui
         // s'aligne se lit d'un coup d'œil, des valeurs qui suivent la longueur du nom obligent
         // l'œil à chercher à chaque ligne.
-        let w_defaut = 0.13;
+        let w_defaut = W_DEFAUT;
         let x_defaut = droite - w_defaut;
-        let x_plus = x_defaut - 0.02 - c;
-        let w_val = 0.15;
+        let x_plus = x_defaut - ECART_DEFAUT - c;
+        let w_val = W_VALEUR;
         let x_val = x_plus - w_val;
         let x_moins = x_val - c;
+        debug_assert!(
+            (x_moins - (droite - LARGEUR_COMMANDES)).abs() < 1e-6,
+            "LARGEUR_COMMANDES ne decrit plus la place que les commandes prennent"
+        );
 
         unsafe {
-            p.texte(x0, y + (c - H_TEXTE) * 0.5, H_TEXTE, couleurs::TEXTE, COUCHE + 1, r.nom);
+            // La hauteur vient de l'appelant : elle est COMMUNE à toutes les lignes, calculée sur
+            // le libellé le plus long. Chaque ligne choisissant la sienne, la colonne des noms
+            // aurait des tailles différentes d'une ligne à l'autre — ce qui se lit comme un défaut.
+            p.texte(x0, y + (c - h_libelle) * 0.5, h_libelle, couleurs::TEXTE, COUCHE + 1, r.nom);
         }
         unsafe {
             self.bouton_pas(p, x_moins, y, false, r.valeur > r.min, acts.0);
@@ -524,11 +583,16 @@ impl Lobby {
         // La valeur modifiée passe en OR : la couleur dit « touché » avant même qu'on lise le
         // bouton à côté. La même information portée deux fois, à deux vitesses de lecture.
         let teinte = if r.modifie() { couleurs::OR } else { couleurs::TEXTE };
+        // La valeur tient dans SA colonne, elle aussi : « -30 PTS » réclame 0,175 quand la colonne
+        // en offre 0,150, et mordait donc sur les deux boutons qui l'encadrent. La hauteur est
+        // calculée sur la valeur la plus large que ce réglage puisse ATTEINDRE, pas sur celle du
+        // moment — sinon le texte changerait de taille à chaque clic, sous le doigt.
+        let h_val = crate::hud::hauteur_pour_tenir(&r.affichage_le_plus_large(), H_TEXTE, w_val);
         unsafe {
             p.texte(
-                x_val + (w_val - largeur_texte(&aff, H_TEXTE)) * 0.5,
-                y + (c - H_TEXTE) * 0.5,
-                H_TEXTE, teinte, COUCHE + 1, &aff,
+                x_val + (w_val - largeur_texte(&aff, h_val)) * 0.5,
+                y + (c - h_val) * 0.5,
+                h_val, teinte, COUCHE + 1, &aff,
             );
         }
         if let (true, Some(a)) = (r.modifie(), acts.2) {
@@ -662,9 +726,15 @@ impl Lobby {
         let larg = (p.aspect * 0.76).min(1.15);
         let x0 = (p.aspect - larg) * 0.5;
         unsafe {
-            p.texte_centre(0.055, H_TITRE, couleurs::TEXTE, COUCHE + 1, "CREER UNE PARTIE");
-            p.texte_centre(0.112, H_PETIT, couleurs::TEXTE_FAIBLE, COUCHE + 1,
-                "TU TIENS LA PORTE - TU CHOISIS QUI ENTRE ET QUAND CA COMMENCE");
+            // Bornés à la largeur de l'écran : ce sous-titre sortait des DEUX côtés en fenêtre
+            // étroite (« …TIENS LA PORTE — TU CHOISIS QUI ENTRE ET QUAND CA COMME… »).
+            let utile = p.aspect - 2.0 * MARGE;
+            let titre = "CREER UNE PARTIE";
+            let sous = "TU TIENS LA PORTE - TU CHOISIS QUI ENTRE ET QUAND CA COMMENCE";
+            p.texte_centre(0.055, crate::hud::hauteur_pour_tenir(titre, H_TITRE, utile),
+                couleurs::TEXTE, COUCHE + 1, titre);
+            p.texte_centre(0.112, crate::hud::hauteur_pour_tenir(sous, H_PETIT, utile),
+                couleurs::TEXTE_FAIBLE, COUCHE + 1, sous);
         }
 
         // ── LE NOM ───────────────────────────────────────────────────────────────────────────
@@ -693,9 +763,14 @@ impl Lobby {
             valeur: self.creation.joueurs as i32, defaut: JOUEURS_DEFAUT as i32,
             min: JOUEURS_MIN as i32, max: JOUEURS_MAX as i32, pas: 1,
         };
+        // La taille des libellés est DÉRIVÉE de la place qui leur reste vraiment, et le libellé le
+        // plus long décide pour tous. Rien n'est réglé à l'œil ici : le texte ne peut plus
+        // atteindre les commandes à AUCUNE largeur de fenêtre, parce que la place disponible entre
+        // dans le calcul au lieu d'être supposée.
+        let h_libelle = self.hauteur_des_libelles(joueurs, larg);
         unsafe {
             self.ligne_reglage(p, x0, larg, y_j, joueurs,
-                (Action::JoueursMoins, Action::JoueursPlus, None));
+                (Action::JoueursMoins, Action::JoueursPlus, None), h_libelle);
         }
 
         // ── LE CODE D'ACCÈS ──────────────────────────────────────────────────────────────────
@@ -704,7 +779,9 @@ impl Lobby {
         let y_c = y_j + H_LIGNE;
         let ferme = self.creation.code.is_some();
         unsafe {
-            p.texte(x0, y_c + 0.008, H_TEXTE, couleurs::TEXTE, COUCHE + 1, "CODE D'ACCES");
+            // La MÊME taille que les libellés de réglages : c'est la même colonne, et deux
+            // tailles côte à côte se lisent comme un défaut de rendu, pas comme une hiérarchie.
+            p.texte(x0, y_c + 0.008, h_libelle, couleurs::TEXTE, COUCHE + 1, "CODE D'ACCES");
             let (bw, bh) = (0.09, 0.040);
             let bx = x0 + larg - bw;
             p.quad(bx, y_c, bw, bh, if ferme { couleurs::OR } else { couleurs::LIGNE }, COUCHE);
@@ -745,7 +822,8 @@ impl Lobby {
         for (i, r) in self.creation.reglages.iter().enumerate() {
             unsafe {
                 self.ligne_reglage(p, x0, larg, y, *r,
-                    (Action::ReglageMoins(i), Action::ReglagePlus(i), Some(Action::ReglageDefaut(i))));
+                    (Action::ReglageMoins(i), Action::ReglagePlus(i), Some(Action::ReglageDefaut(i))),
+                    h_libelle);
             }
             y += H_LIGNE;
         }
@@ -791,23 +869,46 @@ impl Lobby {
                 p.texte(x0 + MARGE, y + 0.012, H_PETIT, couleurs::TEXTE_FAIBLE, COUCHE + 1,
                     "LE CODE A DONNER");
                 let esp: String = code.chars().flat_map(|c| [c, ' ']).collect();
-                p.texte(x0 + MARGE, y + 0.040, H_TITRE, couleurs::OR, COUCHE + 1, esp.trim_end());
+                let esp = esp.trim_end();
+                // Le code passe en premier et prend ce qu'il lui faut — c'est LUI qu'on vient
+                // lire, et le lire de travers ferait entrer la mauvaise personne.
+                let h_code = crate::hud::hauteur_pour_tenir(esp, H_TITRE, larg - 2.0 * MARGE);
+                let l_code = p.texte(x0 + MARGE, y + 0.040, h_code, couleurs::OR, COUCHE + 1, esp);
+                // L'avertissement se contente de CE QUI RESTE sur la ligne du code. Il était posé
+                // au bord droit sans regarder où le code s'arrêtait : les deux s'écrivaient l'un
+                // sur l'autre dès que la fenêtre se resserrait, et aucun des deux ne se lisait.
                 let av = "PERSONNE D'AUTRE NE LE VOIT";
-                p.texte(x0 + larg - MARGE - largeur_texte(av, H_PETIT), y + 0.058, H_PETIT,
+                let reste = larg - 2.0 * MARGE - l_code - 0.020;
+                let h_av = crate::hud::hauteur_pour_tenir(av, H_PETIT, reste);
+                p.texte(x0 + larg - MARGE - largeur_texte(av, h_av), y + 0.058, h_av,
                     couleurs::TEXTE_FAIBLE, COUCHE + 1, av);
             }
             y += h + 0.020;
         }
 
-        let h_l = 0.062;
+        // ⚠ LA LIGNE D'UN MEMBRE PORTE DEUX TEXTES EMPILÉS, et sa hauteur ne les contenait pas :
+        // 0,010 de marge + le nom (0,026) + le nom de son rôle (0,020) + la marge du bas font
+        // 0,068, quand la boîte n'en offrait que 0,054. « MOI » et « TIENT LA PORTE - TOI » se
+        // chevauchaient donc, et le second sortait par le bas. La hauteur est maintenant DÉDUITE
+        // de ce qu'on y met, au lieu d'être un chiffre rond posé à côté.
+        const MARGE_LIGNE: f32 = 0.010;
+        const ECART_ETIQ: f32 = 0.002;
+        let h_boite = MARGE_LIGNE + H_TEXTE + ECART_ETIQ + H_PETIT + MARGE_LIGNE;
+        let h_l = h_boite + 0.008;
         for (i, m) in s.membres.iter().enumerate() {
             if y + h_l > 0.84 {
                 break;
             }
             let fond = if m.c_est_moi { couleurs::LIGNE_MOI } else { couleurs::LIGNE };
             unsafe {
-                p.quad(x0, y, larg, h_l - 0.008, fond, COUCHE);
-                p.texte(x0 + MARGE, y + 0.012, H_TEXTE, couleurs::TEXTE, COUCHE + 1, &m.nom);
+                p.quad(x0, y, larg, h_boite, fond, COUCHE);
+                // La place d'un texte s'arrête où commencent les boutons de l'hôte — sinon un nom
+                // un peu long viendrait s'écrire dessus.
+                let place = larg - 2.0 * MARGE
+                    - if s.je_suis_hote && !m.est_hote { LARGEUR_BOUTONS_HOTE } else { 0.0 };
+                p.texte(x0 + MARGE, y + MARGE_LIGNE,
+                    crate::hud::hauteur_pour_tenir(&m.nom, H_TEXTE, place),
+                    couleurs::TEXTE, COUCHE + 1, &m.nom);
                 let mut etiq = Vec::new();
                 if m.est_hote {
                     etiq.push("TIENT LA PORTE");
@@ -816,17 +917,23 @@ impl Lobby {
                     etiq.push("TOI");
                 }
                 if !etiq.is_empty() {
-                    p.texte(x0 + MARGE, y + 0.038, H_PETIT, couleurs::TEXTE_FAIBLE, COUCHE + 1,
-                        &etiq.join(" - "));
+                    let e = etiq.join(" - ");
+                    p.texte(x0 + MARGE, y + MARGE_LIGNE + H_TEXTE + ECART_ETIQ,
+                        crate::hud::hauteur_pour_tenir(&e, H_PETIT, place),
+                        couleurs::TEXTE_FAIBLE, COUCHE + 1, &e);
                 }
             }
             // ⚠ Les deux boutons n'apparaissent QUE pour l'hôte, ET jamais en face de lui-même :
             // montrer un bouton qui échouera toujours est une promesse qu'on ne tient pas.
             if s.je_suis_hote && !m.est_hote {
-                let (bw, bh) = (0.15, 0.038);
-                let by = y + (h_l - 0.008 - bh) * 0.5;
+                let (bw, bh) = (W_BOUTON_MEMBRE, 0.038);
+                let by = y + (h_boite - bh) * 0.5;
                 let bx2 = x0 + larg - MARGE - bw;
-                let bx1 = bx2 - bw - 0.012;
+                let bx1 = bx2 - bw - ECART_BOUTONS;
+                debug_assert!(
+                    (bx1 - (x0 + larg - MARGE - LARGEUR_BOUTONS_HOTE)).abs() < 1e-6,
+                    "LARGEUR_BOUTONS_HOTE ne decrit plus la place que ces boutons prennent"
+                );
                 unsafe {
                     // « SORTIR » d'abord, « BANNIR » ensuite et plus loin du bord : le geste
                     // réparable est le plus à portée, le définitif demande de viser.
@@ -870,6 +977,80 @@ impl Lobby {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Le réglage « JOUEURS AU MAXIMUM », qui n'est pas dans la liste mais partage sa colonne.
+    fn ligne_joueurs() -> Reglage {
+        Reglage {
+            numero: 0, nom: "JOUEURS AU MAXIMUM", unite: "",
+            valeur: JOUEURS_DEFAUT as i32, defaut: JOUEURS_DEFAUT as i32,
+            min: JOUEURS_MIN as i32, max: JOUEURS_MAX as i32, pas: 1,
+        }
+    }
+
+    /// ⚠ **SA RÈGLE DU 29 AOÛT 2026, ÉPROUVÉE SUR TOUTE LA PLAGE DES FORMATS.**
+    ///
+    /// Ses mots, devant des captures où les valeurs s'écrivaient par-dessus leurs libellés :
+    /// *« peu importe la taille de la fenêtre, il faut que le texte ne parte jamais sur les autres
+    /// box »*. Un test à une seule largeur ne prouverait rien — c'est justement la largeur qui
+    /// faisait basculer le défaut : `MALUS SI PERSONNE N'ARRIVE` demande 0,58 quand une fenêtre
+    /// étroite n'en laisse que 0,33.
+    ///
+    /// Vérifié par mutation : rendre `hauteur_des_libelles` constante (`H_TEXTE`) fait tomber ce
+    /// test dès le format 0,40 — il mord donc bien des deux côtés.
+    #[test]
+    fn aucun_libelle_ne_deborde_sur_les_commandes_a_aucune_largeur() {
+        let l = Lobby::default();
+        let joueurs = ligne_joueurs();
+        // Du portrait le plus étroit à l'ultra-large : 0,40 → 4,40.
+        for i in 0..=200 {
+            let aspect = 0.40 + i as f32 * 0.02;
+            let larg = (aspect * 0.76).min(1.15);
+            let h = l.hauteur_des_libelles(joueurs, larg);
+            let place = (larg - LARGEUR_COMMANDES - MARGE).max(0.0);
+            for nom in std::iter::once(joueurs.nom).chain(l.creation.reglages.iter().map(|r| r.nom))
+            {
+                let pris = largeur_texte(nom, h);
+                assert!(
+                    pris <= place + 1e-6,
+                    "a l aspect {aspect:.2} (larg {larg:.3}), {nom} prend {pris:.4} \
+                     pour une place de {place:.4}"
+                );
+            }
+        }
+    }
+
+    /// La valeur d'un réglage tient dans SA colonne, à n'importe quelle valeur atteignable — et
+    /// sans changer de taille quand on clique, ce qui se lirait comme un défaut.
+    #[test]
+    fn aucune_valeur_ne_deborde_de_sa_colonne_a_aucun_reglage() {
+        for r in reglages_par_defaut().into_iter().chain([ligne_joueurs()]) {
+            let h = crate::hud::hauteur_pour_tenir(&r.affichage_le_plus_large(), H_TEXTE, W_VALEUR);
+            let mut v = r;
+            // Toutes les valeurs que l'on peut réellement atteindre, du minimum au maximum.
+            v.valeur = v.min;
+            while v.valeur < v.max {
+                let pris = largeur_texte(&v.affichage(), h);
+                assert!(
+                    pris <= W_VALEUR + 1e-6,
+                    "{} a {} prend {pris:.4} pour une colonne de {W_VALEUR:.4}",
+                    v.nom, v.valeur
+                );
+                v.bouger(1);
+            }
+        }
+    }
+
+    /// Un texte plus court que la place disponible garde sa taille : on rétrécit, on n'agrandit
+    /// jamais — sinon la taille du texte deviendrait une fonction de la fenêtre, et deux écrans
+    /// côte à côte ne se ressembleraient plus.
+    #[test]
+    fn un_libelle_qui_tient_garde_sa_taille() {
+        assert_eq!(crate::hud::hauteur_pour_tenir("MANCHES", H_TEXTE, 10.0), H_TEXTE);
+        assert_eq!(crate::hud::hauteur_pour_tenir("", H_TEXTE, 10.0), H_TEXTE);
+        // Place nulle ou négative : on ne dessine rien plutôt que de déborder.
+        assert_eq!(crate::hud::hauteur_pour_tenir("MANCHES", H_TEXTE, 0.0), 0.0);
+        assert_eq!(crate::hud::hauteur_pour_tenir("MANCHES", H_TEXTE, -1.0), 0.0);
+    }
 
     /// **AUCUN ACCENT DANS LES LIBELLÉS — la fonte du jeu n'en a pas.**
     ///

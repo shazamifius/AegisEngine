@@ -63,26 +63,41 @@ fn main() {
         std::process::exit(2);
     }
 
-    let mut jeu = match lancer_le_jeu() {
-        Ok(j) => j,
-        Err(e) => {
-            eprintln!("le jeu n'a pas démarré : {e}");
+    // ── DEUX FORMATS, À CHAQUE EXÉCUTION ────────────────────────────────────────────────────
+    // Sa règle du 29 août : *« peu importe la taille de la fenêtre, il faut que le texte ne parte
+    // jamais sur les autres box »*. Une planche prise à UNE largeur ne peut pas en témoigner — et
+    // c'est justement la largeur qui faisait basculer le défaut. On photographie donc l'écran d'un
+    // joueur (plein écran) ET le cas étroit qu'un compositeur en mosaïque impose, dans deux
+    // dossiers distincts, pour que la comparaison soit immédiate.
+    let mut code = 0;
+    for (nom, plein) in [("plein-ecran", true), ("fenetre", false)] {
+        let dossier = sortie.join(nom);
+        if let Err(e) = std::fs::create_dir_all(&dossier) {
+            eprintln!("impossible de créer {} : {e}", dossier.display());
             std::process::exit(2);
         }
-    };
-
-    let code = match Console::attendre(PORT) {
-        Ok(mut c) => derouler(&mut c, &sortie),
-        Err(e) => {
-            eprintln!("la console n'a jamais répondu sur {PORT} : {e}");
-            2
-        }
-    };
-
-    // Le jeu est tué quoi qu'il arrive : un scénario qui laisse une fenêtre Vulkan derrière lui
-    // fausse la mesure suivante, et occupe l'écran de quelqu'un.
-    let _ = jeu.kill();
-    let _ = jeu.wait();
+        println!("\n════ {nom} ════");
+        let mut jeu = match lancer_le_jeu(plein) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("le jeu n'a pas démarré : {e}");
+                std::process::exit(2);
+            }
+        };
+        code |= match Console::attendre(PORT) {
+            Ok(mut c) => derouler(&mut c, &dossier),
+            Err(e) => {
+                eprintln!("la console n'a jamais répondu sur {PORT} : {e}");
+                2
+            }
+        };
+        // Le jeu est tué quoi qu'il arrive : un scénario qui laisse une fenêtre Vulkan derrière
+        // lui fausse la mesure suivante, et occupe l'écran de quelqu'un.
+        let _ = jeu.kill();
+        let _ = jeu.wait();
+        // Le port doit être rendu avant la passe suivante.
+        std::thread::sleep(Duration::from_millis(500));
+    }
     std::process::exit(code);
 }
 
@@ -96,18 +111,34 @@ fn aegis_game_bonjour() -> &'static str {
     "aegis console"
 }
 
-fn lancer_le_jeu() -> std::io::Result<Child> {
+fn lancer_le_jeu(plein_ecran: bool) -> std::io::Result<Child> {
     let binaire = std::env::var("AEGIS_BINAIRE")
         .unwrap_or_else(|_| "target/release/aegis_game".to_string());
-    println!("→ lancement de {binaire} avec la console sur {PORT}");
-    Command::new(&binaire)
-        .env("AEGIS_CONSOLE", PORT.to_string())
-        // Le format de l'écran, pas celui qu'un compositeur en mosaïque impose : une planche
-        // jugée en portrait ferait corriger des chevauchements qu'aucun joueur ne voit.
-        .env("AEGIS_PLEIN_ECRAN", "1")
+
+    // ⚠ ON RECONSTRUIT LE JEU AVANT DE LE PHOTOGRAPHIER, ET CE N'EST PAS UNE PRÉCAUTION DE CONFORT.
+    // `cargo run --example` compile l'EXEMPLE, pas le binaire qu'il lance. La planche a donc
+    // photographié, en toute confiance, un jeu vieux d'une demi-heure : les corrections de layout
+    // étaient dans le source, absentes de l'image, et j'ai conclu qu'elles n'avaient rien changé.
+    // C'est le pire genre de panne — l'instrument répond, et il répond faux. Reconstruire ici rend
+    // la faute inatteignable au lieu de demander à chacun d'y penser.
+    println!("→ compilation du jeu (sinon la planche photographie l'ancien binaire)");
+    let build = Command::new("cargo")
+        .args(["build", "--release", "--bin", "aegis_game"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .status()?;
+    if !build.success() {
+        return Err(std::io::Error::other("la compilation du jeu a échoué"));
+    }
+
+    println!("→ lancement de {binaire} avec la console sur {PORT}");
+    let mut cmd = Command::new(&binaire);
+    cmd.env("AEGIS_CONSOLE", PORT.to_string()).stdout(Stdio::null()).stderr(Stdio::null());
+    if plein_ecran {
+        // Le format de l'écran d'un joueur. Sans lui, un compositeur en mosaïque impose le sien —
+        // le jeu a été rendu en 1256×1356, un portrait que personne ne voit en jouant.
+        cmd.env("AEGIS_PLEIN_ECRAN", "1");
+    }
+    cmd.spawn()
 }
 
 /// Le déroulé. Rend le code de sortie : 0 si toutes les étapes ont été VUES.
