@@ -53,6 +53,14 @@ struct AegisApp {
     screenshot_path: String,
     /// L'image à laquelle la capture est prise (`--frame`).
     screenshot_frame: u64,
+    /// Faut-il SORTIR une fois la capture écrite ?
+    ///
+    /// Vrai pour `--screenshot` en ligne de commande : c'est un one-shot autonome, capturer puis
+    /// rendre la main EST sa raison d'être. Faux pour la commande `capture` de la console, qui
+    /// sert justement à photographier plusieurs écrans d'une même session. Les deux partageaient
+    /// un seul drapeau : la console tuait donc le jeu à la première photo, en promettant
+    /// seulement « écrit une capture d'écran ».
+    capture_puis_quitter: bool,
     /// Position de la souris en pixels (pour la sélection d'items par clic)
     mouse_pos: (f32, f32),
     /// Le pont vers le launcher web3 (régisseur de bascule). Inerte si le jeu est lancé tout seul.
@@ -90,6 +98,8 @@ impl AegisApp {
             screenshot_mode,
             screenshot_path,
             screenshot_frame,
+            // Seule la ligne de commande demande à sortir après la photo.
+            capture_puis_quitter: screenshot_mode,
             mouse_pos: (0.0, 0.0),
             // On s'annonce AVANT d'ouvrir la fenêtre et d'initialiser Vulkan : le régisseur tient son
             // rideau baissé tant qu'aucune image n'est prouvée, et il vaut mieux qu'il sache tout de
@@ -107,6 +117,18 @@ impl AegisApp {
             a_relacher: Vec::new(),
             phase_precedente: party_game::GamePhase::Drafting,
             demonstration: None,
+        }
+    }
+
+    /// Ouvre le lobby, ou le referme. **Un seul endroit**, appelé par ÉCHAP et par la console.
+    ///
+    /// Le dupliquer laisserait les deux chemins diverger un jour, et la console cesserait alors
+    /// d'éprouver le jeu qu'on joue — ce qui est tout ce qu'on lui demande.
+    fn bascule_lobby(&mut self) {
+        if self.lobby.ouvert() {
+            self.lobby.fermer();
+        } else {
+            self.lobby.ouvrir();
         }
     }
 
@@ -282,6 +304,7 @@ fn publier_etat_console(
     verificateur: &tas::Verificateur,
     vote: Option<&vote::Vote>,
     demonstration: bool,
+    lobby: &lobby::Lobby,
 ) {
     {
         let moi = g.players.iter().find(|p| p.is_human);
@@ -302,6 +325,20 @@ fn publier_etat_console(
             vote: vote.map(|v| (v.bloc.0, v.bloc.1, v.pour(), v.seuil(), v.reste)),
             position: moi.map(|p| (p.player.position.x, p.player.position.y)).unwrap_or((0.0, 0.0)),
             demonstration,
+            // Le nom de l'écran, et ses boutons tels qu'ils viennent d'être DESSINÉS. C'est la
+            // seule façon pour un scénario de viser un bouton sans en coder la position — donc
+            // sans qu'un ajustement de pixel ne le fasse cliquer dans le vide en silence.
+            lobby: match lobby.vue {
+                lobby::VueLobby::Fermee => String::new(),
+                lobby::VueLobby::Liste => "liste".to_string(),
+                lobby::VueLobby::Creer => "creer".to_string(),
+                lobby::VueLobby::Attente => "attente".to_string(),
+            },
+            zones: lobby
+                .zones_visibles()
+                .into_iter()
+                .map(|((x, y, w, h), a)| (format!("{a:?}"), x, y, w, h))
+                .collect(),
         });
     }
 }
@@ -340,11 +377,33 @@ impl AegisApp {
                     self.screenshot_mode = true;
                     self.screenshot_path = chemin;
                     self.screenshot_frame = 0;
+                    // Photographier, puis CONTINUER : c'est tout l'intérêt d'une session pilotée.
+                    self.capture_puis_quitter = false;
                 }
                 console::Ordre::Quitter => {
                     log::info!("[console] arrêt demandé.");
                     std::process::exit(0);
                 }
+
+                // ── LE LOBBY ────────────────────────────────────────────────────────────────
+                // Les quatre passent par les MÊMES fonctions que la souris et le clavier :
+                // `bascule_lobby`, `clic`, `taper`, `effacer`. Un chemin de test parallèle
+                // éprouverait un lobby qui n'est pas celui qu'on manipule.
+                console::Ordre::Echap => self.bascule_lobby(),
+                console::Ordre::Clic { x, y } => {
+                    // Les trois issues sont dites. Un clic tombé dans un lobby fermé ne produit
+                    // rien de visible : sans ce mot, on chercherait le défaut dans le lobby alors
+                    // qu'il est dans l'ordre des commandes du scénario.
+                    if !self.lobby.clic(x, y) {
+                        log::info!("[console] clic ({x:.3},{y:.3}) ignoré — lobby fermé");
+                    }
+                }
+                console::Ordre::Texte { texte } => {
+                    for c in texte.chars() {
+                        self.lobby.taper(c);
+                    }
+                }
+                console::Ordre::Effacer => self.lobby.effacer(),
             }
         }
 
@@ -367,6 +426,7 @@ impl AegisApp {
             &self.verificateur,
             self.vote.as_ref(),
             self.demonstration.is_some(),
+            &self.lobby,
         );
 
         // On pousse NOTRE position au cœur, et rien d'autre : lui seul décide ce que les autres
@@ -588,6 +648,18 @@ impl ApplicationHandler for AegisApp {
                 }
             };
 
+            // ── LE PLEIN ÉCRAN, SUR DEMANDE (`AEGIS_PLEIN_ECRAN=1`) ─────────────────────────
+            // La taille demandée ci-dessus n'est qu'un SOUHAIT : un compositeur en mosaïque
+            // (niri, sway…) impose la sienne, et le jeu s'est retrouvé rendu en 1256×1356 —
+            // un portrait, quand un joueur le voit en 16:9. Juger une interface dans un format
+            // que personne n'a sous les yeux, c'est corriger des défauts qui n'existent pas et
+            // manquer ceux qui existent. Le plein écran rend la mesure REPRÉSENTATIVE, parce
+            // qu'il donne exactement le format de l'écran — celui de la vraie partie.
+            if std::env::var("AEGIS_PLEIN_ECRAN").is_ok() {
+                window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+                log::info!("Plein écran demandé (AEGIS_PLEIN_ECRAN).");
+            }
+
             log::info!("Fenêtre créée avec succès. Initialisation du moteur AegisEngine...");
             // Ces trois jalons ne sont PAS décoratifs : l'initialisation Vulkan et la compilation des
             // pipelines peuvent durer plusieurs secondes au premier lancement. Sans eux, le régisseur
@@ -657,11 +729,7 @@ impl ApplicationHandler for AegisApp {
                 // ÉCHAP l'ouvre et le referme : c'est le geste que tout le monde essaie en
                 // premier devant un jeu, et il était libre.
                 if key_code == KeyCode::Escape && is_pressed {
-                    if self.lobby.ouvert() {
-                        self.lobby.fermer();
-                    } else {
-                        self.lobby.ouvrir();
-                    }
+                    self.bascule_lobby();
                     return;
                 }
                 // ⚠ TANT QUE LE LOBBY EST OUVERT, PLUS AUCUNE TOUCHE NE VA AU JEU. Sans ce
@@ -769,7 +837,15 @@ impl ApplicationHandler for AegisApp {
                         if let Err(e) = engine.capture_screenshot(&self.screenshot_path) {
                             log::error!("Erreur lors de la capture d'écran: {:?}", e);
                         }
-                        event_loop.exit();
+                        if self.capture_puis_quitter {
+                            event_loop.exit();
+                        } else {
+                            // Une photo prise, le jeu continue de vivre : la suivante viendra
+                            // quand la console la demandera, sur un autre écran.
+                            self.screenshot_mode = false;
+                            log::info!("[console] capture écrite : {}", self.screenshot_path);
+                            window.request_redraw();
+                        }
                     } else {
                         window.request_redraw();
                     }

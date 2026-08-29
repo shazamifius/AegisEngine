@@ -29,6 +29,17 @@
 //! **lit** un instantané que la boucle publie une fois par image. Les deux côtés ne se croisent
 //! jamais plus longtemps qu'un `lock` sur un `Vec` court.
 
+/// Le port de la console quand `AEGIS_CONSOLE=1`. **Pas 47820** : le régisseur du launcher y est.
+pub const PORT_PAR_DEFAUT: u16 = 47830;
+
+/// Ce que la console dit en accueillant un client.
+///
+/// Il ne sert pas à faire joli : c'est ce qui permet à un scénario de vérifier qu'il parle bien à
+/// la console du JEU. Sans cette vérification, une connexion réussie vers un tout autre programme
+/// occupant le port se lit comme un succès — c'est exactement ce qui est arrivé le 29 août avec le
+/// régisseur du launcher, et le scénario a accusé le lobby pendant deux essais.
+pub const BONJOUR: &str = "aegis console — 'aide' pour la liste";
+
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -48,6 +59,24 @@ pub enum Ordre {
     Capture { chemin: String },
     /// Terminer le jeu proprement.
     Quitter,
+
+    // ── LE LOBBY (29 août 2026) ─────────────────────────────────────────────────────────────
+    // Ces quatre-là existent parce que le lobby se pilote à la SOURIS, et que la console ne
+    // savait qu'appuyer sur des touches. Conséquence mesurée : aucun test ne pouvait entrer dans
+    // le lobby, personne ne l'avait jamais vu, et ses trois écrans — complets, dessinés, avec
+    // neuf tests de logique au vert — n'avaient jamais été affichés une seule fois.
+    /// Ouvrir ou refermer le lobby : exactement ce que fait ÉCHAP sous une vraie main.
+    Echap,
+    /// Un clic aux coordonnées du HUD : `x ∈ [0, aspect]`, `y ∈ [0, 1]` du HAUT vers le bas.
+    ///
+    /// Ce repère-là et pas des pixels : il est celui dans lequel le lobby définit ses zones, donc
+    /// un scénario reste juste à n'importe quelle taille de fenêtre. En pixels, il ne vaudrait que
+    /// pour la résolution du jour où on l'a écrit.
+    Clic { x: f32, y: f32 },
+    /// Une suite de frappes, pour les champs de saisie (nom de la partie, code d'accès).
+    Texte { texte: String },
+    /// Retour arrière dans le champ de saisie.
+    Effacer,
 }
 
 /// L'instantané que la boucle publie pour la console. Volontairement plat et textuel : ce qui se
@@ -66,6 +95,16 @@ pub struct Etat {
     pub vote: Option<(usize, usize, usize, usize, f32)>, // x, y, pour, seuil, reste
     pub position: (f32, f32),
     pub demonstration: bool,
+    /// L'écran de lobby ouvert (`liste`, `creer`, `attente`), ou vide s'il est fermé.
+    pub lobby: String,
+    /// Les zones cliquables du dernier écran de lobby dessiné : le nom de l'action, puis
+    /// `x, y, largeur, hauteur` dans le repère du HUD.
+    ///
+    /// Publiées plutôt que devinées : c'est ce qui permet à un scénario de dire « clique sur
+    /// CRÉER » sans coder un rectangle qui se périmerait au premier ajustement de pixel — et de
+    /// CONSTATER, quand la liste ne contient pas ce qu'on attend, qu'un bouton dessiné n'est pas
+    /// atteignable.
+    pub zones: Vec<(String, f32, f32, f32, f32)>,
 }
 
 /// Le point de rencontre entre la console et la boucle de jeu.
@@ -105,16 +144,23 @@ impl Pupitre {
 
 /// Ouvre la console si `AEGIS_CONSOLE` est défini. Renvoie le pupitre partagé.
 ///
-/// La valeur est le port ; `AEGIS_CONSOLE=1` prend le port par défaut 47820, choisi juste après le
-/// sidecar (47800) et le contrôle (47810) pour que les trois se lisent ensemble dans un `ss`.
+/// La valeur est le port ; `AEGIS_CONSOLE=1` prend le port par défaut **47830**.
+///
+/// ⚠ **Ce fut 47820, et c'était une collision** (corrigée le 29 août 2026). Le raisonnement
+/// d'alors — « juste après le sidecar (47800) et le contrôle (47810), pour que les trois se lisent
+/// ensemble dans un `ss` » — était esthétique, et personne n'avait regardé si le port était libre :
+/// **le launcher y est SERVEUR** (`launcher/src/nav.rs`, le régisseur de bascule), et c'est par là
+/// que le jeu lui parle. Dès que le launcher tourne — le cas normal chez un joueur — la console
+/// n'ouvrait donc pas, et qui s'y connectait dialoguait avec le RÉGISSEUR en croyant parler au jeu.
+/// Mesuré : `ss -ltnp` donnait `47820 users:(("launcher"))`. On laisse un cran de plus.
 pub fn ouvrir() -> Arc<Pupitre> {
     let pupitre = Arc::new(Pupitre::default());
     let Ok(v) = std::env::var("AEGIS_CONSOLE") else {
         return pupitre; // absente : le jeu se comporte exactement comme avant
     };
     let port: u16 = match v.trim() {
-        "1" | "" => 47820,
-        autre => autre.parse().unwrap_or(47820),
+        "1" | "" => PORT_PAR_DEFAUT,
+        autre => autre.parse().unwrap_or(PORT_PAR_DEFAUT),
     };
 
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
@@ -145,7 +191,7 @@ fn servir(flux: TcpStream, pupitre: Arc<Pupitre>) {
         Err(_) => return,
     };
     let mut sortie = flux;
-    let _ = writeln!(sortie, "aegis console — 'aide' pour la liste");
+    let _ = writeln!(sortie, "{BONJOUR}");
     for ligne in BufReader::new(lecture).lines().map_while(Result::ok) {
         let reponse = repondre(ligne.trim(), &pupitre);
         if writeln!(sortie, "{reponse}").is_err() {
@@ -173,6 +219,13 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
             "capture <fichier>   — ecrit une capture d'ecran",
             "quitter             — ferme la session (le jeu continue)",
             "arret               — arrete le JEU proprement",
+            "— le lobby —",
+            "echap               — ouvre ou referme le lobby",
+            "zones               — les boutons atteignables sur l'ecran courant",
+            "cliquer <action>    — clique au centre de cette zone (nom donne par 'zones')",
+            "clic <x> <y>        — clique a ces coordonnees du HUD (y de haut en bas)",
+            "texte <mots>        — tape dans le champ actif",
+            "effacer             — retour arriere dans le champ actif",
         ]
         .join("\n"),
 
@@ -184,11 +237,13 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
                 }
                 None => "vote=aucun".to_string(),
             };
+            let lobby = if e.lobby.is_empty() { "fermee" } else { &e.lobby };
             format!(
                 "phase={} manche={} minuteur={:.1} joueurs={} distants={} envoyes={} recus={} \
-                 carte={} bouchon={} {vote} pos=({:.2},{:.2}) demo={}",
+                 carte={} bouchon={} {vote} pos=({:.2},{:.2}) demo={} lobby={lobby} zones={}",
                 e.phase, e.manche, e.minuteur, e.joueurs.len(), e.avatars_distants,
-                e.envoyes, e.recus, e.carte, e.bouchon, e.position.0, e.position.1, e.demonstration
+                e.envoyes, e.recus, e.carte, e.bouchon, e.position.0, e.position.1,
+                e.demonstration, e.zones.len()
             )
         }
 
@@ -222,6 +277,73 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
         ["capture", chemin] => {
             pupitre.deposer(Ordre::Capture { chemin: chemin.to_string() });
             format!("ok capture {chemin}")
+        }
+
+        ["echap"] => {
+            pupitre.deposer(Ordre::Echap);
+            "ok echap".to_string()
+        }
+
+        ["zones"] => {
+            let e = pupitre.lire_etat();
+            if e.zones.is_empty() {
+                return "(aucune — lobby ferme, ou aucune image encore dessinee)".to_string();
+            }
+            e.zones
+                .iter()
+                .map(|(n, x, y, w, h)| format!("{n} {x:.3} {y:.3} {w:.3} {h:.3}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        ["cliquer", quoi] => {
+            let e = pupitre.lire_etat();
+            let cible = quoi.to_ascii_lowercase();
+            match e.zones.iter().find(|(nom, ..)| nom.to_ascii_lowercase() == cible) {
+                Some((nom, x, y, w, h)) => {
+                    // Le CENTRE, jamais un bord : viser un bord éprouverait l'arrondi du calcul
+                    // de rectangle, pas l'intention du scénario.
+                    pupitre.deposer(Ordre::Clic { x: x + w / 2.0, y: y + h / 2.0 });
+                    format!("ok cliquer {nom}")
+                }
+                // ⚠ UN ÉCHEC ANNONCÉ, JAMAIS AVALÉ. Sans ce message, un scénario qui vise un
+                // bouton disparu cliquerait dans le vide et « réussirait » en ne faisant rien :
+                // c'est exactement ainsi qu'un mécanisme meurt sans témoin. On dit donc ce qui
+                // est réellement à l'écran, pour que la faute se lise sans relancer le jeu.
+                None => {
+                    let dispo: Vec<&str> = e.zones.iter().map(|(n, ..)| n.as_str()).collect();
+                    let vues =
+                        if dispo.is_empty() { "aucune".to_string() } else { dispo.join(" ") };
+                    format!("absent de l'ecran : {quoi} (a l'ecran : {vues})")
+                }
+            }
+        }
+
+        ["clic", x, y] => match (x.parse::<f32>(), y.parse::<f32>()) {
+            (Ok(x), Ok(y)) => {
+                pupitre.deposer(Ordre::Clic { x, y });
+                format!("ok clic {x} {y}")
+            }
+            _ => format!("inconnu : clic veut deux nombres, recu '{x} {y}'"),
+        },
+
+        // La ligne BRUTE après le mot, pas les mots recollés : un nom de partie a le droit de
+        // porter deux espaces, et un scénario doit pouvoir taper exactement ce qu'un humain
+        // taperait — sinon on teste une saisie qui n'est pas la sienne. Les bords, eux, sont
+        // rognés : ils viennent du transport (une ligne réseau finit par un retour), jamais de
+        // l'intention de qui tape.
+        ["texte", ..] => {
+            let texte = ligne["texte".len()..].trim().to_string();
+            if texte.is_empty() {
+                return "inconnu : texte veut quelque chose a taper".to_string();
+            }
+            pupitre.deposer(Ordre::Texte { texte: texte.clone() });
+            format!("ok texte {texte}")
+        }
+
+        ["effacer"] => {
+            pupitre.deposer(Ordre::Effacer);
+            "ok effacer".to_string()
         }
 
         ["arret"] => {
@@ -291,6 +413,97 @@ mod tests {
         assert!(r.contains("phase=Running"), "{r}");
         assert!(r.contains("manche=3"), "{r}");
         assert!(r.contains("distants=2"), "{r}");
+    }
+
+    /// Une zone d'essai : « CRÉER » occupe le quart supérieur gauche.
+    fn etat_avec_zones() -> Etat {
+        Etat {
+            lobby: "liste".into(),
+            zones: vec![
+                ("CreerLaMienne".into(), 0.10, 0.20, 0.20, 0.10),
+                ("Retour".into(), 0.02, 0.90, 0.20, 0.05),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cliquer_vise_le_centre_de_la_zone_publiee() {
+        let p = Pupitre::default();
+        p.publier(etat_avec_zones());
+        assert_eq!(repondre("cliquer CreerLaMienne", &p), "ok cliquer CreerLaMienne");
+        let pris = p.prendre_les_ordres();
+        // centre = (0.10 + 0.20/2, 0.20 + 0.10/2)
+        assert_eq!(pris, vec![Ordre::Clic { x: 0.20, y: 0.25 }]);
+    }
+
+    #[test]
+    fn le_nom_de_zone_est_insensible_a_la_casse() {
+        let p = Pupitre::default();
+        p.publier(etat_avec_zones());
+        assert_eq!(repondre("cliquer creerlamienne", &p), "ok cliquer CreerLaMienne");
+        assert_eq!(p.prendre_les_ordres().len(), 1);
+    }
+
+    /// ⚠ LE TEST QUI COMPTE LE PLUS ICI. Un bouton absent de l'écran doit faire ÉCHOUER le
+    /// scénario bruyamment. S'il déposait un clic « quelque part », le scénario cliquerait dans
+    /// le vide, ne ferait rien, et passerait quand même — un mécanisme mort sans témoin.
+    #[test]
+    fn cliquer_une_zone_absente_ne_depose_rien_et_dit_ce_qui_est_a_l_ecran() {
+        let p = Pupitre::default();
+        p.publier(etat_avec_zones());
+        let r = repondre("cliquer Lancer", &p);
+        assert!(r.starts_with("absent de l'ecran"), "{r}");
+        assert!(r.contains("CreerLaMienne"), "doit dire ce qui EST la : {r}");
+        assert!(p.prendre_les_ordres().is_empty(), "aucun clic ne doit partir");
+    }
+
+    #[test]
+    fn sans_aucune_zone_le_message_le_dit_au_lieu_de_mentir() {
+        let p = Pupitre::default();
+        let r = repondre("cliquer Retour", &p);
+        assert!(r.contains("a l'ecran : aucune"), "{r}");
+        assert!(p.prendre_les_ordres().is_empty());
+        assert!(repondre("zones", &p).starts_with("(aucune"));
+    }
+
+    #[test]
+    fn le_texte_garde_les_espaces_tels_qu_ils_sont_tapes() {
+        let p = Pupitre::default();
+        repondre("texte  la  partie de shaza ", &p);
+        assert_eq!(
+            p.prendre_les_ordres(),
+            vec![Ordre::Texte { texte: "la  partie de shaza".into() }]
+        );
+        assert!(repondre("texte", &p).starts_with("inconnu"));
+        assert!(p.prendre_les_ordres().is_empty());
+    }
+
+    #[test]
+    fn echap_et_effacer_se_deposent() {
+        let p = Pupitre::default();
+        repondre("echap", &p);
+        repondre("effacer", &p);
+        assert_eq!(p.prendre_les_ordres(), vec![Ordre::Echap, Ordre::Effacer]);
+    }
+
+    #[test]
+    fn un_clic_mal_forme_ne_depose_rien() {
+        let p = Pupitre::default();
+        assert!(repondre("clic gauche 0.5", &p).starts_with("inconnu"));
+        assert!(p.prendre_les_ordres().is_empty());
+        repondre("clic 0.5 0.25", &p);
+        assert_eq!(p.prendre_les_ordres(), vec![Ordre::Clic { x: 0.5, y: 0.25 }]);
+    }
+
+    #[test]
+    fn l_etat_dit_quel_ecran_de_lobby_est_ouvert() {
+        let p = Pupitre::default();
+        assert!(repondre("etat", &p).contains("lobby=fermee"), "ferme par defaut");
+        p.publier(etat_avec_zones());
+        let r = repondre("etat", &p);
+        assert!(r.contains("lobby=liste"), "{r}");
+        assert!(r.contains("zones=2"), "{r}");
     }
 
     #[test]

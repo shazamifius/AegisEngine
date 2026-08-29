@@ -250,6 +250,19 @@ impl Lobby {
         self.saisie_active = false;
     }
 
+    /// Les zones cliquables du dernier écran DESSINÉ, avec le sens de chacune.
+    ///
+    /// Existe pour la console de pilotage, et le détour a une raison. Un scénario de test pourrait
+    /// appeler `agir` directement — c'est d'ailleurs ce que `agir` est fait pour. Mais il ne
+    /// prouverait alors que la RÈGLE, jamais qu'un bouton dessiné est réellement atteignable : le
+    /// jour où le dessin et les zones divergent d'un pixel, la règle continue de passer et
+    /// personne ne peut plus cliquer. En passant par ici, un scénario dit « clique sur CRÉER »
+    /// sans coder aucun rectangle en dur — la coordonnée est LUE au lieu d'être écrite, donc elle
+    /// ne peut pas se périmer, et un bouton devenu inatteignable fait échouer le scénario.
+    pub fn zones_visibles(&self) -> Vec<(Zone, Action)> {
+        self.zones.borrow().clone()
+    }
+
     /// Un clic aux coordonnées normalisées. Rend `true` s'il a été consommé.
     pub fn clic(&mut self, x: f32, y: f32) -> bool {
         if !self.ouvert() {
