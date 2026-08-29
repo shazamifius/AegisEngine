@@ -4,7 +4,6 @@ mod grid;
 mod traps;
 mod particles;
 mod player;
-mod mls_mpm;
 mod mystery_box;
 mod party_game;
 mod party_render_pass;

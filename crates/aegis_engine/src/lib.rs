@@ -7,6 +7,7 @@ pub mod physics;
 pub mod render;
 pub mod scene;
 pub mod shaders;
+pub mod ui;
 pub mod vr;
 
 pub use core::math;
