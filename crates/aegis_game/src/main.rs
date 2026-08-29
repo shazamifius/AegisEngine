@@ -166,34 +166,17 @@ impl AegisApp {
                     // ne le dise, et cherché le défaut dans la détection plutôt que dans la copie.
                     let camera = render_pass.camera(w / h);
 
-                    let box_pos = aegis_engine::math::Vec3::new(
-                        self.party_game.grid.width as f32 / 2.0,
-                        self.party_game.grid.height as f32 / 2.0,
-                        0.0,
+                    // La visée vit dans `mystery_box`, avec le calcul de placement des objets
+                    // — et elle y est éprouvée par un test. Ici, on ne fait plus que réagir.
+                    let best_idx = crate::mystery_box::objet_vise(
+                        &render_pass.camera(w / h),
+                        self.party_game.grid.width as f32,
+                        self.party_game.grid.height as f32,
+                        total,
+                        (mx, my),
+                        w,
+                        h,
                     );
-                    let t = self.party_game.round_timer;
-
-                    // ⚠ LE RAYON DE CLIC SUIT L'ÉCRAN, IL NE SE COMPTE PLUS EN PIXELS.
-                    // Il valait « 90 pixels » : généreux sur un écran de portable, deux fois plus
-                    // serré sur un 4K pour exactement la même image. La tolérance de visée d'un
-                    // humain se mesure en fraction d'écran, jamais en pixels — 7 % de la hauteur.
-                    let rayon = h * 0.07;
-                    let mut best_idx = None;
-                    let mut min_dist_sq = rayon * rayon;
-
-                    for i in 0..total {
-                        let (offset_vec, _) = crate::mystery_box::compute_box_item_offset(i, total);
-                        let item_world = box_pos + offset_vec;
-
-                        if let Some((sx, sy)) = camera.projeter_vers_ecran(item_world, w, h) {
-                            let (dx, dy) = (mx - sx, my - sy);
-                            let dist_sq = dx * dx + dy * dy;
-                            if dist_sq < min_dist_sq {
-                                min_dist_sq = dist_sq;
-                                best_idx = Some(i);
-                            }
-                        }
-                    }
 
                     if let Some(idx) = best_idx {
                         self.party_game.mystery_box.select_item(idx);

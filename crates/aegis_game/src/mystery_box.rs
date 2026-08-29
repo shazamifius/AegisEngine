@@ -19,6 +19,63 @@ use crate::traps::{TrapManager, TrapKind};
 /// La correction **borne** l'espacement et **centre** la grille sur l'étendue réellement occupée.
 /// À 38 objets le pas calculé (1,27) reste sous la borne, donc **rien ne change** de ce qui
 /// plaisait ; à 4 objets, ils se regroupent au milieu au lieu de fuir vers les bords.
+/// **QUEL OBJET DU CARTON VISE-T-ON ?** — la visée, sortie de la boucle d'événements.
+///
+/// Elle vivait dans `main.rs`, mêlée au traitement du clic, et elle y était FAUSSE : elle
+/// recalculait la position du carton à la main (`w/2, h/2, 0`) là où le rendu la prend de
+/// `CardboardBoxObject::position` (`w×0,5, h×0,5 − 0,5, 12.0`). **Douze unités d'écart en
+/// profondeur.** Les objets étaient donc cherchés loin devant l'endroit où ils sont peints, et le
+/// clic tombait sur le voisin. Ses mots, en jouant : *« j'ai cliqué sur un cube de droite, ça m'a
+/// pris un laser »*.
+///
+/// Elle prend la TAILLE DE LA CARTE, jamais une position toute faite : c'est ce qui rend la
+/// divergence impossible plutôt qu'improbable. Aucun appelant ne peut plus lui donner un carton
+/// qui n'est pas celui qu'on voit — et un test peut enfin l'éprouver, ce qu'aucun test ne pouvait
+/// faire tant que le calcul dormait au milieu d'une boucle d'événements.
+///
+/// Le rayon de tolérance est une FRACTION de la hauteur d'écran, pas un nombre de pixels : la
+/// précision d'un humain ne change pas parce qu'il a acheté un écran plus fin.
+pub fn objet_vise(
+    camera: &aegis_engine::scene::camera::Camera,
+    largeur_carte: f32,
+    hauteur_carte: f32,
+    total: usize,
+    souris: (f32, f32),
+    largeur_px: f32,
+    hauteur_px: f32,
+) -> Option<usize> {
+    if total == 0 {
+        return None;
+    }
+    let box_pos = crate::objects::cardboard_box::CardboardBoxObject::position(
+        largeur_carte,
+        hauteur_carte,
+    );
+    let rayon = hauteur_px * RAYON_VISEE;
+    let mut meilleur = None;
+    let mut plus_proche = rayon * rayon;
+    for i in 0..total {
+        let (offset, _) = compute_box_item_offset(i, total);
+        let Some((sx, sy)) = camera.projeter_vers_ecran(box_pos + offset, largeur_px, hauteur_px)
+        else {
+            continue;
+        };
+        let (dx, dy) = (souris.0 - sx, souris.1 - sy);
+        let d2 = dx * dx + dy * dy;
+        if d2 < plus_proche {
+            plus_proche = d2;
+            meilleur = Some(i);
+        }
+    }
+    meilleur
+}
+
+/// La tolérance de visée, en fraction de la hauteur d'écran.
+///
+/// Elle valait « 90 pixels » : généreuse sur un portable, deux fois plus serrée sur un 4K pour
+/// exactement la même image.
+const RAYON_VISEE: f32 = 0.07;
+
 pub fn compute_box_item_offset(index: usize, total_items: usize) -> (Vec3, f32) {
     if total_items == 0 {
         return (Vec3::ZERO, 1.0);
@@ -241,6 +298,65 @@ impl MysteryBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn camera_de_partie(aspect: f32) -> aegis_engine::scene::camera::Camera {
+        // Les mêmes réglages que `PartyRenderPass::camera` : c'est la caméra qu'on regarde.
+        aegis_engine::scene::camera::Camera {
+            position: Vec3::new(24.0, 12.0, 28.0),
+            target: Vec3::new(24.0, 12.0, 0.0),
+            up: Vec3::Y,
+            fov_y_radians: 38.0f32.to_radians(),
+            aspect_ratio: aspect,
+            z_near: 0.1,
+            z_far: 500.0,
+        }
+    }
+
+    /// ⚠ **LE TEST QUI AURAIT ATTRAPÉ LE DÉFAUT DU 29 AOÛT** : cliquer exactement sur un objet
+    /// doit sélectionner CET objet, et pas son voisin.
+    ///
+    /// Il n'existait pas parce que le calcul dormait au milieu de la boucle d'événements de
+    /// `main.rs`, où rien ne peut l'éprouver. Le défaut a donc été trouvé en jouant — « j'ai
+    /// cliqué sur un cube de droite, ça m'a pris un laser » — et il aurait pu y rester longtemps :
+    /// une visée décalée ne plante pas, elle donne un mauvais objet, ce qui ressemble à de la
+    /// maladresse plutôt qu'à un bug.
+    ///
+    /// Vérifié par mutation : remettre la position d'alors (`w/2, h/2, 0.0`, douze unités devant)
+    /// le fait tomber sur plusieurs tailles de tirage.
+    #[test]
+    fn cliquer_sur_un_objet_selectionne_cet_objet_la() {
+        let (w, h) = (1920.0_f32, 1080.0_f32);
+        let cam = camera_de_partie(w / h);
+        let (carte_l, carte_h) = (48.0_f32, 24.0_f32);
+        let box_pos = crate::objects::cardboard_box::CardboardBoxObject::position(carte_l, carte_h);
+
+        for total in [1usize, 2, 4, 6, 9, 12, 20] {
+            for i in 0..total {
+                let (offset, _) = compute_box_item_offset(i, total);
+                let (sx, sy) = cam
+                    .projeter_vers_ecran(box_pos + offset, w, h)
+                    .expect("un objet du carton est devant la camera");
+                assert_eq!(
+                    objet_vise(&cam, carte_l, carte_h, total, (sx, sy), w, h),
+                    Some(i),
+                    "a {total} objets, viser le centre du {i} doit rendre le {i}"
+                );
+            }
+        }
+    }
+
+    /// Un clic loin du carton ne sélectionne RIEN.
+    ///
+    /// Sans cette borne, la visée rendrait toujours « le moins loin », donc un clic à l'autre bout
+    /// de l'écran choisirait un objet — le joueur poserait un piège qu'il n'a pas demandé.
+    #[test]
+    fn un_clic_loin_du_carton_ne_selectionne_rien() {
+        let (w, h) = (1920.0_f32, 1080.0_f32);
+        let cam = camera_de_partie(w / h);
+        assert_eq!(objet_vise(&cam, 48.0, 24.0, 6, (5.0, 5.0), w, h), None);
+        // Et un carton vide ne rend jamais d'indice, même au centre.
+        assert_eq!(objet_vise(&cam, 48.0, 24.0, 0, (w / 2.0, h / 2.0), w, h), None);
+    }
 
     #[test]
     fn test_n_plus_3_draft_generation() {
