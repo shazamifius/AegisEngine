@@ -3,7 +3,8 @@ use aegis_engine::math::{Mat4, Vec2, Vec3, Vec4};
 use aegis_engine::GpuContext;
 use aegis_engine::geometry::glb_loader::GlbLoader;
 use aegis_engine::bytes::as_bytes;
-use crate::party_render_pass::{GpuMesh, PartyPushConstants};
+use aegis_engine::geometry::gpu_mesh::GpuMesh;
+use aegis_engine::render::push_constants::PushConstants;
 
 pub struct SawBladeObject {
     pub mesh: GpuMesh,
@@ -45,7 +46,7 @@ impl SawBladeObject {
             * Mat4::from_rotation_x(90.0f32.to_radians())
             * Mat4::from_scale(Vec3::splat(scale));
 
-        let push = PartyPushConstants {
+        let push = PushConstants {
             mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.85, 0.88, 0.92, 1.0), // Acier Métallique

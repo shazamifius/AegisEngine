@@ -42,21 +42,20 @@
 //! en profondeur normalisée, alors que la scène ne descend jamais sous ~0,5 : le HUD passe donc
 //! devant le jeu **par construction**, sans qu'aucun ordre d'appel n'ait à être respecté.
 
-use ash::vk;
-use aegis_engine::bytes::as_bytes;
-use aegis_engine::math::{Mat4, Vec4};
-
+// ⚠ PLUS AUCUN LIEN AVEC VULKAN ICI. Depuis que le dessin est monté dans le moteur, ce fichier
+// ne connaît plus ni `ash`, ni les matrices, ni le GPU : il décrit ce que le PARTY PLATFORMER
+// affiche, et confie le comment au moteur. Le compilateur l'a attesté en déclarant ces imports
+// inutilisés — c'est la preuve que la séparation a bien mordu, obtenue gratuitement.
 use crate::party_game::PartyGame;
-use crate::party_render_pass::{GpuMesh, PartyPushConstants};
 // ── LE 2D EST DANS LE MOTEUR ────────────────────────────────────────────────────────────────
 // Le repère d'écran, la police 5×7 et la mesure d'un texte ont été remontés dans
 // `aegis_engine::ui` le 29 août 2026 : ils ne connaissent pas le party platformer, donc ils
 // appartiennent au moteur. Ce renvoi n'est PAS une copie — c'est le même code, à un seul endroit.
 // Ce qui reste ci-dessous parle de score, de manche et de minuteur : ça, c'est le jeu.
-pub use aegis_engine::ui::{
-    glyphe, hauteur_pour_tenir, largeur_texte, matrice_quad, segments_de_ligne,
-    COULEUR_PLATE, GLYPHE_COLONNES, GLYPHE_LIGNES,
-};
+// Le jeu ne garde que les deux fonctions de MESURE, et c'est le partage juste : les écrans
+// composent (« ce libellé tient-il ici ? »), le moteur dessine. Tout le reste — la police, le
+// repère, le pinceau — a cessé d'être visible d'ici, et le compilateur l'a dit tout seul.
+pub use aegis_engine::ui::{hauteur_pour_tenir, largeur_texte, Pinceau};
 
 /// Écrit un score de façon lisible.
 ///
@@ -127,88 +126,7 @@ pub fn largeur_bandeau_minuteur(libelle: &str) -> f32 {
         + largeur_texte("000", BANDEAU_TEXTE)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-//  Le pinceau, et ce qu'on dessine avec
-// ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// De quoi dessiner sur l'écran : tout ce qui **ne change pas** d'un élément d'interface à
-/// l'autre — le périphérique, le tampon de commandes, la disposition du pipeline, le maillage,
-/// le format de la fenêtre.
-///
-/// Le porter à part n'est pas de la coquetterie : sans lui, chaque rectangle et chaque lettre
-/// traînaient ces cinq mêmes valeurs dans leur liste d'arguments, et le HUD entier vivait au
-/// milieu du rendu 3D auquel il ne doit justement rien.
-pub struct Pinceau<'a> {
-    pub device: &'a ash::Device,
-    pub cmd: vk::CommandBuffer,
-    pub layout: vk::PipelineLayout,
-    pub cube: &'a GpuMesh,
-    /// Largeur de la fenêtre divisée par sa hauteur.
-    pub aspect: f32,
-}
-
-impl Pinceau<'_> {
-    /// Un rectangle plein, en coordonnées d'écran (voir le repère en tête de module).
-    ///
-    /// C'est la brique **unique** du HUD : un panneau, une barre de minuteur et le trait d'un
-    /// caractère sont tous ce même rectangle.
-    pub(crate) unsafe fn quad(&self, x: f32, y: f32, largeur: f32, hauteur: f32, couleur: Vec4, couche: u8) {
-        let push = PartyPushConstants {
-            mvp_matrix: matrice_quad(self.aspect, x, y, largeur, hauteur, couche),
-            // En couleur plate le shader ne consulte aucune normale : mettre l'identité plutôt
-            // qu'une matrice recopiée évite de laisser croire qu'elle sert à quelque chose ici.
-            model_matrix: Mat4::IDENTITY,
-            color_tint: couleur,
-            params: Vec4::new(0.0, 0.0, 0.0, COULEUR_PLATE),
-        };
-        unsafe {
-            self.device.cmd_push_constants(
-                self.cmd,
-                self.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                as_bytes(&push),
-            );
-            self.cube.draw(self.device, self.cmd);
-        }
-    }
-
-    /// Écrit un texte, `x`/`y` désignant le coin haut-gauche de la première lettre. Renvoie la
-    /// largeur occupée, pour enchaîner un second texte à la suite.
-    pub(crate) unsafe fn texte(&self, x: f32, y: f32, hauteur: f32, couleur: Vec4, couche: u8, texte: &str) -> f32 {
-        let point = hauteur / GLYPHE_LIGNES as f32;
-        let mut plume = x;
-
-        for c in texte.chars() {
-            for (ligne, bits) in glyphe(c).iter().enumerate() {
-                let mut segments = [(0u8, 0u8); 3];
-                let n = segments_de_ligne(*bits, &mut segments);
-                for &(depart, longueur) in &segments[..n] {
-                    unsafe {
-                        self.quad(
-                            plume + depart as f32 * point,
-                            y + ligne as f32 * point,
-                            longueur as f32 * point,
-                            point,
-                            couleur,
-                            couche,
-                        );
-                    }
-                }
-            }
-            // Cinq colonnes de glyphe, plus une d'écart avec le caractère suivant.
-            plume += point * (GLYPHE_COLONNES as f32 + 1.0);
-        }
-
-        largeur_texte(texte, hauteur)
-    }
-
-    /// Le même texte, centré horizontalement sur l'écran.
-    pub(crate) unsafe fn texte_centre(&self, y: f32, hauteur: f32, couleur: Vec4, couche: u8, texte: &str) -> f32 {
-        let x = (self.aspect - largeur_texte(texte, hauteur)) * 0.5;
-        unsafe { self.texte(x, y, hauteur, couleur, couche, texte) }
-    }
-}
 
 /// Ce que le HUD sait du pont vers le cœur réseau.
 ///

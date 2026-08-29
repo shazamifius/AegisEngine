@@ -3,6 +3,7 @@ pub mod object_space_shading;
 pub mod oit_pass;
 pub mod restir_pt;
 pub mod pipeline;
+pub mod push_constants;
 pub mod bindless;
 pub mod compute_pipeline;
 pub mod visibility_pass;

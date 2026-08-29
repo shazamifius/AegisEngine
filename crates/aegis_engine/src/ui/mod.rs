@@ -15,7 +15,11 @@
 //! c'est ce qui fait qu'un bouton reste carré quand la fenêtre s'élargit, sans qu'aucun écran ait
 //! à s'en occuper.
 
-use crate::math::{Mat4, Vec3};
+use ash::vk;
+use crate::bytes::as_bytes;
+use crate::geometry::gpu_mesh::GpuMesh;
+use crate::math::{Mat4, Vec3, Vec4};
+use crate::render::push_constants::PushConstants;
 
 
 /// Profondeur de la couche la plus au fond du HUD. La scène de jeu vit vers 0,99 (caméra à 18
@@ -226,6 +230,89 @@ pub fn hauteur_pour_tenir(texte: &str, hauteur_voulue: f32, largeur_max: f32) ->
     // `largeur_texte` est proportionnelle à la hauteur : la mise à l'échelle est exacte, pas
     // approchée — aucune marge de sécurité à inventer, donc aucune constante à justifier.
     hauteur_voulue * largeur_max / voulue
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//  Le pinceau, et ce qu'on dessine avec
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// De quoi dessiner sur l'écran : tout ce qui **ne change pas** d'un élément d'interface à
+/// l'autre — le périphérique, le tampon de commandes, la disposition du pipeline, le maillage,
+/// le format de la fenêtre.
+///
+/// Le porter à part n'est pas de la coquetterie : sans lui, chaque rectangle et chaque lettre
+/// traînaient ces cinq mêmes valeurs dans leur liste d'arguments, et le HUD entier vivait au
+/// milieu du rendu 3D auquel il ne doit justement rien.
+pub struct Pinceau<'a> {
+    pub device: &'a ash::Device,
+    pub cmd: vk::CommandBuffer,
+    pub layout: vk::PipelineLayout,
+    pub cube: &'a GpuMesh,
+    /// Largeur de la fenêtre divisée par sa hauteur.
+    pub aspect: f32,
+}
+
+impl Pinceau<'_> {
+    /// Un rectangle plein, en coordonnées d'écran (voir le repère en tête de module).
+    ///
+    /// C'est la brique **unique** du HUD : un panneau, une barre de minuteur et le trait d'un
+    /// caractère sont tous ce même rectangle.
+    pub unsafe fn quad(&self, x: f32, y: f32, largeur: f32, hauteur: f32, couleur: Vec4, couche: u8) {
+        let push = PushConstants {
+            mvp_matrix: matrice_quad(self.aspect, x, y, largeur, hauteur, couche),
+            // En couleur plate le shader ne consulte aucune normale : mettre l'identité plutôt
+            // qu'une matrice recopiée évite de laisser croire qu'elle sert à quelque chose ici.
+            model_matrix: Mat4::IDENTITY,
+            color_tint: couleur,
+            params: Vec4::new(0.0, 0.0, 0.0, COULEUR_PLATE),
+        };
+        unsafe {
+            self.device.cmd_push_constants(
+                self.cmd,
+                self.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                as_bytes(&push),
+            );
+            self.cube.draw(self.device, self.cmd);
+        }
+    }
+
+    /// Écrit un texte, `x`/`y` désignant le coin haut-gauche de la première lettre. Renvoie la
+    /// largeur occupée, pour enchaîner un second texte à la suite.
+    pub unsafe fn texte(&self, x: f32, y: f32, hauteur: f32, couleur: Vec4, couche: u8, texte: &str) -> f32 {
+        let point = hauteur / GLYPHE_LIGNES as f32;
+        let mut plume = x;
+
+        for c in texte.chars() {
+            for (ligne, bits) in glyphe(c).iter().enumerate() {
+                let mut segments = [(0u8, 0u8); 3];
+                let n = segments_de_ligne(*bits, &mut segments);
+                for &(depart, longueur) in &segments[..n] {
+                    unsafe {
+                        self.quad(
+                            plume + depart as f32 * point,
+                            y + ligne as f32 * point,
+                            longueur as f32 * point,
+                            point,
+                            couleur,
+                            couche,
+                        );
+                    }
+                }
+            }
+            // Cinq colonnes de glyphe, plus une d'écart avec le caractère suivant.
+            plume += point * (GLYPHE_COLONNES as f32 + 1.0);
+        }
+
+        largeur_texte(texte, hauteur)
+    }
+
+    /// Le même texte, centré horizontalement sur l'écran.
+    pub unsafe fn texte_centre(&self, y: f32, hauteur: f32, couleur: Vec4, couche: u8, texte: &str) -> f32 {
+        let x = (self.aspect - largeur_texte(texte, hauteur)) * 0.5;
+        unsafe { self.texte(x, y, hauteur, couleur, couche, texte) }
+    }
 }
 
 #[cfg(test)]

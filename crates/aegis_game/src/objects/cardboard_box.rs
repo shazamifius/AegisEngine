@@ -3,7 +3,8 @@ use aegis_engine::math::{Mat4, Vec3, Vec4};
 use aegis_engine::GpuContext;
 use aegis_engine::geometry::glb_loader::GlbLoader;
 use aegis_engine::bytes::as_bytes;
-use crate::party_render_pass::{GpuMesh, PartyPushConstants};
+use aegis_engine::geometry::gpu_mesh::GpuMesh;
+use aegis_engine::render::push_constants::PushConstants;
 
 pub struct CardboardBoxObject {
     pub mesh_closed: GpuMesh,
@@ -135,7 +136,7 @@ impl CardboardBoxObject {
             * Mat4::from_translation(offset);
 
         // Couleur Kraft Carton Warm Naturelle
-        let push = PartyPushConstants {
+        let push = PushConstants {
             mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.78, 0.58, 0.36, 1.0), // Kraft Carton Chaud

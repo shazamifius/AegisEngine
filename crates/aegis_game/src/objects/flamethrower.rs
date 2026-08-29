@@ -3,7 +3,8 @@ use aegis_engine::math::{Mat4, Vec2, Vec3, Vec4};
 use aegis_engine::GpuContext;
 use aegis_engine::geometry::glb_loader::GlbLoader;
 use aegis_engine::bytes::as_bytes;
-use crate::party_render_pass::{GpuMesh, PartyPushConstants};
+use aegis_engine::geometry::gpu_mesh::GpuMesh;
+use aegis_engine::render::push_constants::PushConstants;
 use crate::traps::Direction;
 
 pub struct FlamethrowerObject {
@@ -51,7 +52,7 @@ impl FlamethrowerObject {
             * rot_matrix
             * Mat4::from_scale(Vec3::splat(scale));
 
-        let push = PartyPushConstants {
+        let push = PushConstants {
             mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.85, 0.45, 0.1, 1.0),
@@ -116,7 +117,7 @@ impl FlamethrowerObject {
                     Vec4::new(0.88, 0.12, 0.04, 1.0) // Rouge Braise
                 };
 
-                let push_particle = PartyPushConstants {
+                let push_particle = PushConstants {
                     mvp_matrix: vp * p_model,
                     model_matrix: p_model,
                     color_tint: p_color,

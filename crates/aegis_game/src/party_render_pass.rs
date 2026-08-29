@@ -1,11 +1,12 @@
 use ash::vk;
 use aegis_engine::math::{Mat4, Vec2, Vec3, Vec4};
-use aegis_engine::bytes::{as_bytes, cast_slice};
+use aegis_engine::bytes::as_bytes;
 use aegis_engine::GpuContext;
 use aegis_engine::core::memory::MemoryManager;
 use aegis_engine::geometry::primitives::Primitives;
-use aegis_engine::geometry::vertex::Vertex;
 use aegis_engine::render::pipeline::PipelineFactory;
+use aegis_engine::geometry::gpu_mesh::GpuMesh;
+use aegis_engine::render::push_constants::PushConstants;
 use crate::party_game::PartyGame;
 use crate::grid::TileType;
 use crate::objects::{
@@ -28,75 +29,9 @@ fn tile_hash(x: i32, y: i32, seed: u32) -> u32 {
     h ^ (h >> 16)
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct PartyPushConstants {
-    pub mvp_matrix: Mat4,
-    pub model_matrix: Mat4,
-    pub color_tint: Vec4,
-    pub params: Vec4,
-}
 
-pub struct GpuMesh {
-    pub vertex_buffer: vk::Buffer,
-    pub vertex_memory: vk::DeviceMemory,
-    pub index_buffer: vk::Buffer,
-    pub index_memory: vk::DeviceMemory,
-    pub index_count: u32,
-}
 
-impl GpuMesh {
-    pub fn upload(
-        gpu: &GpuContext,
-        memory_props: &vk::PhysicalDeviceMemoryProperties,
-        vertices: &[Vertex],
-        indices: &[u32],
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let vertex_bytes = cast_slice(vertices);
-        let (vertex_buffer, vertex_memory) = MemoryManager::create_buffer(
-            &gpu.device,
-            memory_props,
-            vertex_bytes.len() as vk::DeviceSize,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )?;
-        unsafe {
-            let data_ptr = gpu.device.map_memory(vertex_memory, 0, vertex_bytes.len() as vk::DeviceSize, vk::MemoryMapFlags::empty())?;
-            std::ptr::copy_nonoverlapping(vertex_bytes.as_ptr(), data_ptr as *mut u8, vertex_bytes.len());
-            gpu.device.unmap_memory(vertex_memory);
-        }
 
-        let index_bytes = cast_slice(indices);
-        let (index_buffer, index_memory) = MemoryManager::create_buffer(
-            &gpu.device,
-            memory_props,
-            index_bytes.len() as vk::DeviceSize,
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )?;
-        unsafe {
-            let data_ptr = gpu.device.map_memory(index_memory, 0, index_bytes.len() as vk::DeviceSize, vk::MemoryMapFlags::empty())?;
-            std::ptr::copy_nonoverlapping(index_bytes.as_ptr(), data_ptr as *mut u8, index_bytes.len());
-            gpu.device.unmap_memory(index_memory);
-        }
-
-        Ok(Self {
-            vertex_buffer,
-            vertex_memory,
-            index_buffer,
-            index_memory,
-            index_count: indices.len() as u32,
-        })
-    }
-
-    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer) {
-        unsafe {
-            device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
-            device.cmd_bind_index_buffer(cmd, self.index_buffer, 0, vk::IndexType::UINT32);
-            device.cmd_draw_indexed(cmd, self.index_count, 1, 0, 0, 0);
-        }
-    }
-}
 
 /// Ce que le monde **extérieur** apporte au rendu, en plus du jeu lui-même.
 ///
@@ -231,7 +166,7 @@ impl PartyRenderPass {
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .offset(0)
-            .size(std::mem::size_of::<PartyPushConstants>() as u32);
+            .size(std::mem::size_of::<PushConstants>() as u32);
 
         let pipeline_layout = PipelineFactory::create_pipeline_layout(&gpu.device, &[], &[push_constant_range])?;
 
@@ -418,7 +353,7 @@ impl PartyRenderPass {
                             _ => tile.color(),
                         };
 
-                        let push = PartyPushConstants {
+                        let push = PushConstants {
                             mvp_matrix: vp * model,
                             model_matrix: model,
                             color_tint: col,
@@ -438,7 +373,7 @@ impl PartyRenderPass {
 
                                 let sub_m = Mat4::from_translation(Vec3::new(x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y, 0.05))
                                     * Mat4::from_scale(Vec3::new(sz, sz, 0.92));
-                                let sub_push = PartyPushConstants {
+                                let sub_push = PushConstants {
                                     mvp_matrix: vp * sub_m,
                                     model_matrix: sub_m,
                                     color_tint: Vec4::new(0.40, 0.43, 0.48, 1.0), // Gris Roche Plus Sombre
@@ -459,7 +394,7 @@ impl PartyRenderPass {
 
                                 let sub_m = Mat4::from_translation(Vec3::new(x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y, 0.05))
                                     * Mat4::from_scale(Vec3::new(sz, sz, 0.92));
-                                let sub_push = PartyPushConstants {
+                                let sub_push = PushConstants {
                                     mvp_matrix: vp * sub_m,
                                     model_matrix: sub_m,
                                     color_tint: Vec4::new(0.42, 0.27, 0.16, 1.0), // Très légèrement plus sombre, ultra-subtil
@@ -489,7 +424,7 @@ impl PartyRenderPass {
                                     let blade_m = Mat4::from_translation(Vec3::new(blade_x, y as f32 + 1.0 + blade_h * 0.45, 0.02))
                                         * Mat4::from_rotation_z(((h % 20) as f32 - 10.0) * 0.02)
                                         * Mat4::from_scale(Vec3::new(blade_w, blade_h, 0.18));
-                                    let blade_push = PartyPushConstants {
+                                    let blade_push = PushConstants {
                                         mvp_matrix: vp * blade_m,
                                         model_matrix: blade_m,
                                         color_tint: green_color,
@@ -508,7 +443,7 @@ impl PartyRenderPass {
             let void_model = Mat4::from_translation(Vec3::new(game.grid.width as f32 / 2.0, void_y + 0.5, -0.1))
                 * Mat4::from_scale(Vec3::new(500.0, 1.0, 2.0)); // Bande noire infinie sur les côtés X, 1 bloc de hauteur Y
 
-            let push_void = PartyPushConstants {
+            let push_void = PushConstants {
                 mvp_matrix: vp * void_model,
                 model_matrix: void_model,
                 color_tint: Vec4::new(0.02, 0.02, 0.05, 1.0), // Noir Abyssal Profond
@@ -551,7 +486,7 @@ impl PartyRenderPass {
                 // 1. Tête de Balle Cinétique Compacte et Brillante (Or Incandescent)
                 let bullet_m = Mat4::from_translation(Vec3::new(proj.position.x, proj.position.y, 0.2))
                     * Mat4::from_scale(Vec3::splat(0.22)); // Compacte et légère !
-                let push_bullet = PartyPushConstants {
+                let push_bullet = PushConstants {
                     mvp_matrix: vp * bullet_m,
                     model_matrix: bullet_m,
                     color_tint: Vec4::new(1.00, 0.85, 0.20, 1.0), // Or Incandescent Vif
@@ -579,7 +514,7 @@ impl PartyRenderPass {
                         Vec4::new(0.50, 0.50, 0.55, alpha * 0.5) // Fumée Grise
                     };
 
-                    let push_trail = PartyPushConstants {
+                    let push_trail = PushConstants {
                         mvp_matrix: vp * trail_m,
                         model_matrix: trail_m,
                         color_tint: trail_color,
@@ -637,7 +572,7 @@ impl PartyRenderPass {
                                 };
 
                                 let item_m = Mat4::from_translation(item_pos) * Mat4::from_scale(Vec3::splat(0.70 * scale_mult));
-                                let push_item = PartyPushConstants {
+                                let push_item = PushConstants {
                                     mvp_matrix: vp * item_m,
                                     model_matrix: item_m,
                                     color_tint: block_color,
@@ -653,7 +588,7 @@ impl PartyRenderPass {
                             let gem_m = Mat4::from_translation(item_pos + Vec3::new(0.0, 0.65, 0.1))
                                 * Mat4::from_rotation_z(trap_t * 3.0)
                                 * Mat4::from_scale(Vec3::splat(0.18));
-                            let push_gem = PartyPushConstants {
+                            let push_gem = PushConstants {
                                 mvp_matrix: vp * gem_m,
                                 model_matrix: gem_m,
                                 color_tint: Vec4::new(0.98, 0.85, 0.15, 1.0),
@@ -689,7 +624,7 @@ impl PartyRenderPass {
                             _ => {
                                 let item_m = Mat4::from_translation(Vec3::new(gx as f32 + 0.5, gy as f32 + 0.5, 0.3))
                                     * Mat4::from_scale(Vec3::splat(0.90));
-                                let push_item = PartyPushConstants {
+                                let push_item = PushConstants {
                                     mvp_matrix: vp * item_m,
                                     model_matrix: item_m,
                                     color_tint: Vec4::new(0.35, 0.75, 0.95, 0.5), // Semi-transparence 50%
@@ -721,7 +656,7 @@ impl PartyRenderPass {
                             * Mat4::from_rotation_x(limb.rotation.x)
                             * Mat4::from_scale(limb.scale);
 
-                        let push = PartyPushConstants {
+                        let push = PushConstants {
                             mvp_matrix: vp * m,
                             model_matrix: m,
                             color_tint: limb.color,
@@ -779,7 +714,7 @@ impl PartyRenderPass {
                         let spark_x = p_pos.x + wall_dir_world * 0.42;
                         let spark_m = Mat4::from_translation(Vec3::new(spark_x, spark_y, 0.25))
                             * Mat4::from_scale(Vec3::new(0.08, 0.08, 0.08));
-                        let push_spark = PartyPushConstants {
+                        let push_spark = PushConstants {
                             mvp_matrix: vp * spark_m,
                             model_matrix: spark_m,
                             color_tint: Vec4::new(0.98, 0.75, 0.20, 1.0), // Étincelles Or
@@ -802,7 +737,7 @@ impl PartyRenderPass {
                     * Mat4::from_rotation_z(leg_angle_front)
                     * Mat4::from_translation(Vec3::new(0.0, -0.175, 0.0))
                     * Mat4::from_scale(Vec3::new(0.22, 0.35, 0.20));
-                let push_leg = PartyPushConstants {
+                let push_leg = PushConstants {
                     mvp_matrix: vp * left_leg_m,
                     model_matrix: left_leg_m,
                     color_tint: Vec4::new(0.12, 0.15, 0.28, 1.0), // Pantalon Indigo
@@ -817,7 +752,7 @@ impl PartyRenderPass {
                     * Mat4::from_rotation_z(leg_angle_back)
                     * Mat4::from_translation(Vec3::new(0.0, -0.175, 0.0))
                     * Mat4::from_scale(Vec3::new(0.22, 0.35, 0.20));
-                let push_leg_r = PartyPushConstants {
+                let push_leg_r = PushConstants {
                     mvp_matrix: vp * right_leg_m,
                     model_matrix: right_leg_m,
                     color_tint: Vec4::new(0.10, 0.12, 0.22, 1.0), // Jambe arrière plus sombre
@@ -830,7 +765,7 @@ impl PartyRenderPass {
                 let torso_m = body_base_matrix
                     * Mat4::from_translation(Vec3::new(0.0, 0.65, 0.0))
                     * Mat4::from_scale(Vec3::new(0.48, 0.65, 0.40));
-                let push_torso = PartyPushConstants {
+                let push_torso = PushConstants {
                     mvp_matrix: vp * torso_m,
                     model_matrix: torso_m,
                     color_tint: Vec4::new(0.20, 0.65, 0.95, 1.0), // Veste Cyan
@@ -846,7 +781,7 @@ impl PartyRenderPass {
                     * Mat4::from_rotation_z(arm_angle_front)
                     * Mat4::from_translation(Vec3::new(0.0, -0.18, 0.0))
                     * Mat4::from_scale(Vec3::new(0.20, 0.38, 0.18));
-                let push_arm_f = PartyPushConstants {
+                let push_arm_f = PushConstants {
                     mvp_matrix: vp * arm_front_m,
                     model_matrix: arm_front_m,
                     color_tint: Vec4::new(0.15, 0.18, 0.25, 1.0),
@@ -861,7 +796,7 @@ impl PartyRenderPass {
                     * Mat4::from_rotation_z(arm_angle_back)
                     * Mat4::from_translation(Vec3::new(0.0, -0.18, 0.0))
                     * Mat4::from_scale(Vec3::new(0.20, 0.38, 0.18));
-                let push_arm_b = PartyPushConstants {
+                let push_arm_b = PushConstants {
                     mvp_matrix: vp * arm_back_m,
                     model_matrix: arm_back_m,
                     color_tint: Vec4::new(0.12, 0.14, 0.20, 1.0),
@@ -887,7 +822,7 @@ impl PartyRenderPass {
                     * Mat4::from_translation(Vec3::new(0.0, head_y, 0.0))
                     * Mat4::from_rotation_z(head_choupi_tilt)
                     * Mat4::from_scale(Vec3::new(0.46 * (1.0 + bump_squash * 0.3), head_scale_y, 0.42));
-                let push_head = PartyPushConstants {
+                let push_head = PushConstants {
                     mvp_matrix: vp * head_m,
                     model_matrix: head_m,
                     color_tint: Vec4::new(0.96, 0.96, 0.98, 1.0), // Tête Blanche Pur
@@ -902,7 +837,7 @@ impl PartyRenderPass {
                     * Mat4::from_rotation_z(head_choupi_tilt)
                     * Mat4::from_scale(Vec3::new(0.16, 0.10 * (1.0 - bump_squash * 0.3), 0.32));
                 let visor_glow = 3.5 + 1.2 * (t * 4.0).sin();
-                let push_visor = PartyPushConstants {
+                let push_visor = PushConstants {
                     mvp_matrix: vp * visor_m,
                     model_matrix: visor_m,
                     color_tint: Vec4::new(0.98, 0.82, 0.10, 1.0), // Visière Or
@@ -922,7 +857,7 @@ impl PartyRenderPass {
                     * Mat4::from_translation(Vec3::new(-0.02, head_y + 0.23, 0.0))
                     * Mat4::from_rotation_z(trail_angle + head_choupi_tilt)
                     * Mat4::from_scale(Vec3::new(0.48 * (1.0 + bump_squash * 0.35), cap_scale_y, 0.44));
-                let push_cap = PartyPushConstants {
+                let push_cap = PushConstants {
                     mvp_matrix: vp * cap_m,
                     model_matrix: cap_m,
                     color_tint: Vec4::new(0.92, 0.20, 0.25, 1.0), // Bonnet Rouge Vif
@@ -940,7 +875,7 @@ impl PartyRenderPass {
                         let star_m = Mat4::from_translation(Vec3::new(star_x, star_y, 0.3))
                             * Mat4::from_rotation_z(t * 22.0 + i as f32)
                             * Mat4::from_scale(Vec3::new(0.09, 0.09, 0.09));
-                        let push_star = PartyPushConstants {
+                        let push_star = PushConstants {
                             mvp_matrix: vp * star_m,
                             model_matrix: star_m,
                             color_tint: Vec4::new(0.98, 0.90, 0.15, 1.0), // Étoile "BONK !" Or Brillant
@@ -955,7 +890,7 @@ impl PartyRenderPass {
                 for particle in &player.particles.particles {
                     let p_m = Mat4::from_translation(particle.pos)
                         * Mat4::from_scale(particle.size);
-                    let push_p = PartyPushConstants {
+                    let push_p = PushConstants {
                         mvp_matrix: vp * p_m,
                         model_matrix: p_m,
                         color_tint: particle.color,
@@ -982,7 +917,7 @@ impl PartyRenderPass {
                 ] {
                     let m = Mat4::from_translation(base + Vec3::new(0.0, hauteur, 0.0))
                         * Mat4::from_scale(taille);
-                    let push = PartyPushConstants {
+                    let push = PushConstants {
                         mvp_matrix: vp * m,
                         model_matrix: m,
                         color_tint: teinte,
@@ -1009,7 +944,7 @@ impl PartyRenderPass {
                 let corps = Mat4::from_translation(base + Vec3::new(0.0, 0.45, 0.0))
                     * Mat4::from_rotation_z(distant.yaw)
                     * Mat4::from_scale(Vec3::new(0.62, 0.90, 0.62));
-                let push_corps = PartyPushConstants {
+                let push_corps = PushConstants {
                     mvp_matrix: vp * corps,
                     model_matrix: corps,
                     color_tint: teinte,
@@ -1020,7 +955,7 @@ impl PartyRenderPass {
 
                 let tete = Mat4::from_translation(base + Vec3::new(0.0, 1.12, 0.0))
                     * Mat4::from_scale(Vec3::new(0.52, 0.46, 0.52));
-                let push_tete = PartyPushConstants {
+                let push_tete = PushConstants {
                     mvp_matrix: vp * tete,
                     model_matrix: tete,
                     // Un ton plus clair que le corps : la tête se détache sans changer la
@@ -1042,7 +977,7 @@ impl PartyRenderPass {
             // n'était affiché nulle part : tout ce qu'on y émettait disparaissait en silence.
             for particule in &game.particles.particles {
                 let m = Mat4::from_translation(particule.pos) * Mat4::from_scale(particule.size);
-                let push = PartyPushConstants {
+                let push = PushConstants {
                     mvp_matrix: vp * m,
                     model_matrix: m,
                     color_tint: particule.color,
@@ -1061,7 +996,7 @@ impl PartyRenderPass {
                 let preview_model = Mat4::from_translation(Vec3::new(cx as f32 + 0.5, cy as f32 + 0.5, 0.3))
                     * Mat4::from_scale(Vec3::new(1.08, 1.08, 1.08));
 
-                let push_preview = PartyPushConstants {
+                let push_preview = PushConstants {
                     mvp_matrix: vp * preview_model,
                     model_matrix: preview_model,
                     color_tint: preview_col,

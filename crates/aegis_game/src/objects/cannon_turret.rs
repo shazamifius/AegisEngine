@@ -3,7 +3,8 @@ use aegis_engine::math::{Mat4, Vec2, Vec3, Vec4};
 use aegis_engine::GpuContext;
 use aegis_engine::geometry::glb_loader::GlbLoader;
 use aegis_engine::bytes::as_bytes;
-use crate::party_render_pass::{GpuMesh, PartyPushConstants};
+use aegis_engine::geometry::gpu_mesh::GpuMesh;
+use aegis_engine::render::push_constants::PushConstants;
 use crate::traps::Direction;
 
 pub struct CannonTurretObject {
@@ -47,7 +48,7 @@ impl CannonTurretObject {
             * Mat4::from_rotation_z(rot_z)
             * Mat4::from_scale(Vec3::splat(scale));
 
-        let push = PartyPushConstants {
+        let push = PushConstants {
             mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.92, 0.92, 0.95, 1.0), // Blanc Coque Portal
@@ -71,7 +72,7 @@ impl CannonTurretObject {
 
             // 1. Œil Rouge Lumineux au centre de la tourelle
             let eye_m = Mat4::from_translation(pos + eye_offset) * Mat4::from_scale(Vec3::splat(0.12));
-            let push_eye = PartyPushConstants {
+            let push_eye = PushConstants {
                 mvp_matrix: vp * eye_m,
                 model_matrix: eye_m,
                 color_tint: Vec4::new(1.0, 0.0, 0.05, 1.0), // Œil Rouge Portal Émissif
@@ -90,7 +91,7 @@ impl CannonTurretObject {
                 Vec4::new(1.0, 0.35, 0.1, 0.5) // Discret en jeu
             };
 
-            let push_sight = PartyPushConstants {
+            let push_sight = PushConstants {
                 mvp_matrix: vp * line_m,
                 model_matrix: line_m,
                 color_tint: sight_color,

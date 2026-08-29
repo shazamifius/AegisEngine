@@ -3,7 +3,8 @@ use aegis_engine::math::{Mat4, Vec2, Vec3, Vec4};
 use aegis_engine::GpuContext;
 use aegis_engine::geometry::glb_loader::GlbLoader;
 use aegis_engine::bytes::as_bytes;
-use crate::party_render_pass::{GpuMesh, PartyPushConstants};
+use aegis_engine::geometry::gpu_mesh::GpuMesh;
+use aegis_engine::render::push_constants::PushConstants;
 use crate::traps::Direction;
 
 pub struct LaserEmitterObject {
@@ -49,7 +50,7 @@ impl LaserEmitterObject {
             * Mat4::from_rotation_z(rot_z)
             * Mat4::from_scale(Vec3::splat(scale));
 
-        let push = PartyPushConstants {
+        let push = PushConstants {
             mvp_matrix: vp * model,
             model_matrix: model,
             color_tint: Vec4::new(0.25, 0.75, 0.95, 1.0),
@@ -74,7 +75,7 @@ impl LaserEmitterObject {
             let beam_model = Mat4::from_translation(beam_center + Vec3::new(0.0, 0.0, 0.1))
                 * Mat4::from_scale(beam_scale);
 
-            let push_beam = PartyPushConstants {
+            let push_beam = PushConstants {
                 mvp_matrix: vp * beam_model,
                 model_matrix: beam_model,
                 color_tint: Vec4::new(0.0, 0.95, 1.0, 1.0), // Laser Néon Cyan
@@ -122,7 +123,7 @@ impl LaserEmitterObject {
                     Vec4::new(0.10, 0.85, 1.00, 1.0) // Cyan Bleu Brillant
                 };
 
-                let push_particle = PartyPushConstants {
+                let push_particle = PushConstants {
                     mvp_matrix: vp * p_model,
                     model_matrix: p_model,
                     color_tint: p_color,
