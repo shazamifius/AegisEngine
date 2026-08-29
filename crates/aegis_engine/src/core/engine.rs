@@ -172,53 +172,30 @@ impl Engine {
             }
         }
 
-        let temp_ppm = format!("{}.ppm", path);
-        let mut ppm_data = format!("P6\n{} {}\n255\n", extent.width, extent.height).into_bytes();
+        // ⚠⚠ ICI VIVAIT UN SCRIPT PYTHON, ÉCRIT SUR LE DISQUE PUIS EXÉCUTÉ (30 août 2026).
+        //
+        // Trois fautes en une : la règle la plus ferme du projet est « QUE du Rust, aucun autre
+        // langage » ; la capture échouait chez quiconque n'a pas `python3` ; et **cet échec était
+        // avalé** — le code ne journalisait que le succès, sans branche `else`. Le mécanisme
+        // serait donc mort chez quelqu'un d'autre, en silence.
+        //
+        // L'encodeur est maintenant dans le moteur, en Rust, et prouvé par aller-retour (il porte
+        // son propre décodeur de test : ce qu'il écrit doit se relire octet pour octet).
+        let mut rvb = Vec::with_capacity((extent.width * extent.height * 3) as usize);
         for pixel in raw_pixels.chunks_exact(4) {
-            ppm_data.push(pixel[0]);
-            ppm_data.push(pixel[1]);
-            ppm_data.push(pixel[2]);
+            rvb.extend_from_slice(&pixel[..3]);
         }
 
-        std::fs::write(&temp_ppm, ppm_data)?;
+        let png = crate::image::png::encoder(extent.width, extent.height, &rvb)
+            .map_err(|e| format!("encodage PNG impossible : {e}"))?;
+        std::fs::write(path, &png)?;
 
-        let py_script = format!(
-            "import zlib, struct, binascii, sys\n\
-            with open(sys.argv[1], 'rb') as f:\n\
-            \tline1 = f.readline()\n\
-            \tline2 = f.readline()\n\
-            \twhile line2.startswith(b'#'): line2 = f.readline()\n\
-            \tw, h = map(int, line2.split())\n\
-            \tf.readline()\n\
-            \trgb = f.read()\n\
-            raw = bytearray()\n\
-            for y in range(h):\n\
-            \traw.append(0)\n\
-            \traw.extend(rgb[y*w*3:(y+1)*w*3])\n\
-            def chunk(t, d):\n\
-            \treturn struct.pack('>I', len(d)) + t + d + struct.pack('>I', binascii.crc32(t + d) & 0xffffffff)\n\
-            png = bytearray(b'\\x89PNG\\r\\n\\x1a\\n')\n\
-            png += chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))\n\
-            png += chunk(b'IDAT', zlib.compress(bytes(raw)))\n\
-            png += chunk(b'IEND', b'')\n\
-            with open(sys.argv[2], 'wb') as f: f.write(png)\n"
+        log::info!(
+            "Capture ecrite : {path} ({}x{}, {} Ko)",
+            extent.width,
+            extent.height,
+            png.len() / 1024
         );
-
-        let temp_py = format!("{}.py", path);
-        let _ = std::fs::write(&temp_py, py_script);
-
-        let status = std::process::Command::new("python3")
-            .arg(&temp_py)
-            .arg(&temp_ppm)
-            .arg(path)
-            .status();
-
-        let _ = std::fs::remove_file(&temp_ppm);
-        let _ = std::fs::remove_file(&temp_py);
-
-        if status.as_ref().map(|s| s.success()).unwrap_or(false) {
-            log::info!("Screenshot PNG VRAM Vulkan 1.4 généré avec succès : {}", path);
-        }
 
         Ok(())
     }

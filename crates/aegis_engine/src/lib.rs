@@ -9,6 +9,7 @@
 pub mod chrono_gpu;
 pub mod core;
 pub mod geometry;
+pub mod image;
 pub mod mesure;
 pub mod render;
 pub mod scene;

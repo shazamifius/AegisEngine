@@ -587,7 +587,7 @@ impl AegisApp {
             avatars,
         };
 
-        match engine.gpu.begin_frame(window) {
+        match engine.gpu.begin_frame(Some(window)) {
             Ok((cmd, image_index)) => {
                 party_render_pass.render_party_scene(
                     &engine.gpu,
@@ -604,7 +604,7 @@ impl AegisApp {
                         lobby: &self.lobby,
                     },
                 );
-                if engine.gpu.end_frame(cmd, image_index, window).is_err() {
+                if engine.gpu.end_frame(cmd, image_index, Some(window)).is_err() {
                     let size = window.inner_size();
                     if size.width > 0 && size.height > 0 {
                         engine.gpu.resize(window);

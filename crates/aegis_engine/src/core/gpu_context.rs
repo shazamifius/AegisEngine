@@ -41,6 +41,9 @@ pub struct GpuContext {
     /// Le chronometre GPU. `None` quand la file ne sait pas horodater — un cas reel sur certains
     /// pilotes, et qu'il vaut mieux voir que masquer par des zeros.
     pub chrono: Option<ChronoGpu>,
+    /// Sans écran, c'est nous qui décidons quelle image sert : ce compteur tourne à la place de
+    /// `acquire_next_image`. Inutilisé dès qu'une chaîne de présentation existe.
+    image_suivante: usize,
 }
 
 impl GpuContext {
@@ -269,7 +272,259 @@ impl GpuContext {
             render_finished_semaphore,
             in_flight_fence,
             chrono,
+            image_suivante: 0,
         })
+    }
+
+    /// Ouvre un contexte **sans aucune fenêtre** : ni surface, ni chaîne de présentation.
+    ///
+    /// # ⭐⭐ Pourquoi ce chemin existe : une mesure prise à travers un compositeur ment
+    ///
+    /// Le chronomètre GPU est juste, mais **ce qu'il mesure dépend de qui regarde la fenêtre**.
+    /// Sous un compositeur qui met en veille ce qui n'est pas visible — niri en est un — une
+    /// fenêtre non regardée voit sa cadence s'effondrer, le GPU baisse ses fréquences, et *chaque
+    /// image mesurée devient alors plus lente qu'elle ne l'est réellement*. Le relevé n'est pas
+    /// bruité : il est **biaisé, et toujours dans le même sens**.
+    ///
+    /// Pire pour le travail quotidien : il fallait cliquer sur la bonne fenêtre au bon moment,
+    /// donc chaque mesure dépendait d'un geste humain qu'on ne peut ni répéter ni vérifier.
+    ///
+    /// *C'est le quatrième cas de la règle : quand l'instrument est modifié par ce qui l'entoure,
+    /// toutes les conclusions sont fausses, y compris les négatives.* Un banc ne se répare pas en
+    /// faisant plus attention ; il se répare en retirant ce qui le perturbe.
+    ///
+    /// # Ce que ce chemin change, et ce qu'il ne change PAS
+    ///
+    /// Il ne change **rien au rendu** : mêmes pipelines, mêmes shaders, mêmes cibles, même format.
+    /// Seule la destination change — des images que l'on s'alloue au lieu de celles que le système
+    /// de fenêtrage prête. Le reste du moteur ne voit que des images et un format : il ne sait
+    /// même pas qu'il n'y a pas d'écran.
+    ///
+    /// *C'est ce que la présentation aurait toujours dû être : une capacité, pas une fondation.*
+    ///
+    /// ⚠ Ce qu'il ne prouve pas : le comportement de la présentation elle-même (déchirure,
+    /// intervalle de rafraîchissement, `OUT_OF_DATE`). Un banc sans écran mesure le coût du
+    /// rendu, jamais le confort de l'affichage.
+    pub fn sans_ecran(
+        largeur: u32,
+        hauteur: u32,
+        combien_d_images: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        log::info!("Contexte Vulkan SANS ECRAN — aucune fenetre, aucun compositeur dans la mesure");
+
+        let entry = unsafe { ash::Entry::load()? };
+
+        let app_name = unsafe { CStr::from_bytes_with_nul_unchecked(b"AegisEngine Banc\0") };
+        let app_info = vk::ApplicationInfo::default()
+            .application_name(app_name)
+            .application_version(vk::make_api_version(0, 0, 1, 0))
+            .engine_name(app_name)
+            .engine_version(vk::make_api_version(0, 0, 1, 0))
+            .api_version(vk::make_api_version(0, 1, 4, 0));
+
+        // Aucune extension d'instance : c'est la différence de fond avec `new`. Rien ici ne sait
+        // ce qu'est un écran.
+        let instance = unsafe {
+            entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app_info), None)?
+        };
+
+        let physical_devices = unsafe { instance.enumerate_physical_devices()? };
+        if physical_devices.is_empty() {
+            return Err("Aucun GPU compatible Vulkan trouvé.".into());
+        }
+
+        let mut retenu = None;
+        for &gpu in physical_devices.iter() {
+            let props = unsafe { instance.get_physical_device_properties(gpu) };
+            let nom = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
+            log::info!("GPU Détecté : {} (Type: {:?})", nom, props.device_type);
+            if props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU || retenu.is_none() {
+                retenu = Some((gpu, props));
+            }
+        }
+        let (physical_device, gpu_props) = retenu.ok_or("Impossible de trouver un GPU approprié.")?;
+        log::info!(
+            "GPU Retenu : {}",
+            unsafe { CStr::from_ptr(gpu_props.device_name.as_ptr()) }.to_string_lossy()
+        );
+
+        // ⚠ On ne demande QUE `GRAPHICS`. Exiger en plus le support de présentation, comme le fait
+        // `new`, demanderait une surface — donc une fenêtre, donc le problème qu'on retire.
+        let familles = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let famille = familles
+            .iter()
+            .position(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .ok_or("Aucune famille de queue Graphics trouvée.")? as u32;
+
+        let periode_horodatage = gpu_props.limits.timestamp_period;
+        let bits_horodatage = familles[famille as usize].timestamp_valid_bits;
+
+        let priorites = [1.0f32];
+        let file = vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(famille)
+            .queue_priorities(&priorites);
+
+        let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
+            .dynamic_rendering(true)
+            .synchronization2(true);
+        let mut f12 = vk::PhysicalDeviceVulkan12Features::default()
+            .buffer_device_address(true)
+            .descriptor_indexing(true);
+        let mut fcore = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut f13)
+            .push_next(&mut f12);
+
+        // Aucune extension de device non plus : `VK_KHR_swapchain` ne sert qu'à présenter.
+        let device = unsafe {
+            instance.create_device(
+                physical_device,
+                &vk::DeviceCreateInfo::default()
+                    .queue_create_infos(std::slice::from_ref(&file))
+                    .push_next(&mut fcore),
+                None,
+            )?
+        };
+        let graphics_queue = unsafe { device.get_device_queue(famille, 0) };
+
+        let chrono = match ChronoGpu::nouveau(&device, periode_horodatage, bits_horodatage, 32) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::warn!("Chronometre GPU indisponible : {e}. Le rendu tourne, la mesure non.");
+                None
+            }
+        };
+
+        // Le format est celui qu'un écran nous donnerait : la chaîne de couleur doit être la même,
+        // sinon le banc mesurerait un autre rendu que celui qu'on regarde.
+        let format = vk::Format::B8G8R8A8_SRGB;
+        let extent = vk::Extent2D { width: largeur, height: hauteur };
+
+        let memory_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let mut swapchain_images = Vec::with_capacity(combien_d_images);
+        let mut swapchain_image_views = Vec::with_capacity(combien_d_images);
+        let mut memoires = Vec::with_capacity(combien_d_images);
+
+        for _ in 0..combien_d_images.max(1) {
+            let image = unsafe {
+                device.create_image(
+                    &vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(format)
+                        .extent(vk::Extent3D { width: largeur, height: hauteur, depth: 1 })
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        // `TRANSFER_SRC` : c'est ce qui permet de relire l'image pour l'écrire en
+                        // PNG. Un banc qui ne rend pas d'image ne prouverait que des durées.
+                        .usage(
+                            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                                | vk::ImageUsageFlags::TRANSFER_SRC,
+                        )
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                        .initial_layout(vk::ImageLayout::UNDEFINED),
+                    None,
+                )?
+            };
+            let besoins = unsafe { device.get_image_memory_requirements(image) };
+            let type_memoire = crate::core::memory::MemoryManager::find_memory_type(
+                &memory_props,
+                besoins.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .ok_or("aucune memoire pour une image de banc")?;
+            let memoire = unsafe {
+                device.allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(besoins.size)
+                        .memory_type_index(type_memoire),
+                    None,
+                )?
+            };
+            unsafe { device.bind_image_memory(image, memoire, 0)? };
+
+            let vue = unsafe {
+                device.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(format)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        }),
+                    None,
+                )?
+            };
+            swapchain_images.push(image);
+            swapchain_image_views.push(vue);
+            memoires.push(memoire);
+        }
+
+        let command_pool = unsafe {
+            device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .queue_family_index(famille)
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
+                None,
+            )?
+        };
+        let command_buffers = unsafe {
+            device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(swapchain_images.len() as u32),
+            )?
+        };
+
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+
+        log::info!("Banc : {largeur}x{hauteur}, {} image(s), format {format:?}", swapchain_images.len());
+
+        // ⚠ Ces deux chargeurs sont construits mais leurs pointeurs sont NULS : les extensions
+        // correspondantes ne sont pas activées. Rien ne doit les appeler — c'est ce que
+        // `presente()` garantit, et c'est pourquoi tout chemin de présentation passe par lui.
+        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+        let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
+
+        Ok(Self {
+            entry,
+            surface_loader,
+            surface: vk::SurfaceKHR::null(),
+            swapchain_loader,
+            swapchain: vk::SwapchainKHR::null(),
+            instance,
+            physical_device,
+            proprietes: gpu_props,
+            graphics_queue: QueueInfo { queue: graphics_queue, family_index: famille },
+            swapchain_format: format,
+            swapchain_extent: extent,
+            swapchain_images,
+            swapchain_image_views,
+            image_available_semaphore: unsafe { device.create_semaphore(&semaphore_info, None)? },
+            render_finished_semaphore: unsafe { device.create_semaphore(&semaphore_info, None)? },
+            in_flight_fence: unsafe { device.create_fence(&fence_info, None)? },
+            command_pool,
+            command_buffers,
+            chrono,
+            image_suivante: 0,
+            device,
+        })
+    }
+
+    /// Ce contexte sait-il montrer ses images à quelqu'un ?
+    ///
+    /// ⚠ **Tout chemin de présentation doit passer par cette garde.** Sans écran, les chargeurs
+    /// d'extension existent mais leurs pointeurs sont nuls : les appeler planterait sans message
+    /// utile. *Une garde posée à l'endroit où le chemin se décide ferme la classe entière ; une
+    /// liste de « pense à vérifier » en oublie toujours un.*
+    pub fn presente(&self) -> bool {
+        self.swapchain != vk::SwapchainKHR::null()
     }
 
     /// Referme l'etape courante du chronometre et lui donne son nom.
@@ -282,26 +537,42 @@ impl GpuContext {
         }
     }
 
-    pub fn begin_frame(&mut self, window: &Window) -> Result<(vk::CommandBuffer, usize), Box<dyn std::error::Error>> {
+    /// Ouvre une image.
+    ///
+    /// ⚠ La fenêtre est **optionnelle**, et c'est ce qui rend le banc sans écran possible : sans
+    /// elle, il n'y a ni image à demander au système de fenêtrage, ni redimensionnement possible.
+    /// Le reste — la barrière, le carnet de commandes, le chronomètre — est identique, et ce n'est
+    /// pas une commodité : *un banc qui suivrait un autre chemin que le jeu mesurerait autre chose
+    /// que le jeu.*
+    pub fn begin_frame(&mut self, window: Option<&Window>) -> Result<(vk::CommandBuffer, usize), Box<dyn std::error::Error>> {
         unsafe {
             self.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX)?;
-            let result = self.swapchain_loader.acquire_next_image(
-                self.swapchain,
-                u64::MAX,
-                self.image_available_semaphore,
-                vk::Fence::null(),
-            );
 
-            let (image_index, _is_suboptimal) = match result {
-                Ok((idx, sub)) => (idx, sub),
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.resize(window);
-                    return Err("OUT_OF_DATE_KHR".into());
+            let image_index: u32 = if self.presente() {
+                let result = self.swapchain_loader.acquire_next_image(
+                    self.swapchain,
+                    u64::MAX,
+                    self.image_available_semaphore,
+                    vk::Fence::null(),
+                );
+
+                match result {
+                    Ok((idx, _sub)) => idx,
+                    Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                        if let Some(w) = window {
+                            self.resize(w);
+                        }
+                        return Err("OUT_OF_DATE_KHR".into());
+                    }
+                    Err(err) => return Err(err.into()),
                 }
-                Err(err) => return Err(err.into()),
+            } else {
+                // Sans écran, personne ne prête d'image : on tourne sur les nôtres, à la ronde.
+                // Le compteur vient du chronomètre pour rester juste après un redémarrage.
+                self.image_suivante = (self.image_suivante + 1) % self.swapchain_images.len();
+                self.image_suivante as u32
             };
 
-            self.device.reset_fences(&[self.in_flight_fence])?;
             let cmd = self.command_buffers[image_index as usize];
 
             self.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
@@ -321,14 +592,28 @@ impl GpuContext {
         }
     }
 
+    /// Ferme l'image, la soumet, et la présente **s'il y a quelqu'un pour la voir**.
     pub fn end_frame(
         &mut self,
         cmd: vk::CommandBuffer,
         image_index: usize,
-        window: &Window,
+        window: Option<&Window>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             self.device.end_command_buffer(cmd)?;
+            self.device.reset_fences(&[self.in_flight_fence])?;
+
+            if !self.presente() {
+                // ⚠ Aucun sémaphore : sans chaîne de présentation, personne ne signale l'arrivée
+                // d'une image et personne n'attend la fin du rendu. Les réclamer bloquerait le
+                // banc pour toujours, sur une attente que rien ne viendrait satisfaire.
+                self.device.queue_submit(
+                    self.graphics_queue.queue,
+                    &[vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd))],
+                    self.in_flight_fence,
+                )?;
+                return Ok(());
+            }
 
             let wait_semaphores = [self.image_available_semaphore];
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -356,7 +641,9 @@ impl GpuContext {
             let result = self.swapchain_loader.queue_present(self.graphics_queue.queue, &present_info);
 
             if result == Ok(true) || result == Err(vk::Result::ERROR_OUT_OF_DATE_KHR) || result == Err(vk::Result::SUBOPTIMAL_KHR) {
-                self.resize(window);
+                if let Some(w) = window {
+                    self.resize(w);
+                }
             }
         }
         Ok(())
