@@ -243,6 +243,23 @@ impl PartyRenderPass {
         })
     }
 
+    /// La caméra de la partie — **la seule**, lue par le rendu comme par la détection de clic.
+    ///
+    /// Ses réglages ne vivent qu'ici : un clic qui recalculerait les siens finirait par viser un
+    /// monde légèrement différent de celui qu'on voit, et ce décalage-là ne se remarque pas, il
+    /// s'endure.
+    pub fn camera(&self, aspect: f32) -> aegis_engine::scene::camera::Camera {
+        aegis_engine::scene::camera::Camera {
+            position: self.camera_pos,
+            target: self.camera_target,
+            up: Vec3::Y,
+            fov_y_radians: 38.0f32.to_radians(),
+            aspect_ratio: aspect,
+            z_near: 0.1,
+            z_far: 500.0,
+        }
+    }
+
     pub fn render_party_scene(&mut self, context: &GpuContext, cmd: vk::CommandBuffer, image_index: usize, game: &PartyGame, exterieur: &Exterieur) {
         let view = context.swapchain_image_views[image_index];
         let image = context.swapchain_images[image_index];
@@ -267,11 +284,14 @@ impl PartyRenderPass {
         self.camera_target = self.camera_target.lerp(Vec3::new(target_x, target_y, 0.0), 0.18);
         self.camera_pos = self.camera_target + Vec3::new(0.0, 0.5, target_dist);
 
-        let view_matrix = Mat4::look_at_rh(self.camera_pos, self.camera_target, Vec3::Y);
+        // ⚠ UNE SEULE CAMÉRA POUR LE RENDU ET POUR LES CLICS (29 août 2026).
+        // Ces quatre valeurs — 38°, l'aspect, 0,1 et 500 — étaient écrites TROIS fois : ici, et
+        // deux fois dans `main.rs` pour deviner ce qu'on venait de cliquer. Changer le champ de
+        // vision du rendu faisait donc viser les clics à côté, sans qu'aucun test ni aucun écran
+        // ne le signale. On construit la caméra du moteur, et les clics lisent LA MÊME.
         let aspect = context.swapchain_extent.width as f32 / context.swapchain_extent.height as f32;
-        let proj_matrix = Mat4::perspective_rh(38.0f32.to_radians(), aspect, 0.1, 500.0);
-
-        let vp = proj_matrix * view_matrix;
+        let camera = self.camera(aspect);
+        let vp = camera.compute_projection_matrix() * camera.compute_view_matrix();
 
         unsafe {
             let barrier_present = vk::ImageMemoryBarrier::default()

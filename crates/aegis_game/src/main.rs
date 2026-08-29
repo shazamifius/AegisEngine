@@ -160,16 +160,11 @@ impl AegisApp {
                     let total = self.party_game.mystery_box.available_items.len();
                     if total == 0 { return; }
 
-                    let aspect = w / h;
-                    let view = aegis_engine::math::Mat4::look_at_rh(
-                        render_pass.camera_pos,
-                        render_pass.camera_target,
-                        aegis_engine::math::Vec3::Y,
-                    );
-                    let proj = aegis_engine::math::Mat4::perspective_rh(
-                        38.0f32.to_radians(), aspect, 0.1, 500.0,
-                    );
-                    let vp = proj * view;
+                    // LA CAMÉRA DU RENDU, pas une copie de ses réglages. Ces quatre valeurs
+                    // (38°, l'aspect, 0,1 et 500) étaient recopiées ici : le jour où le rendu
+                    // aurait changé de champ de vision, on aurait cliqué à côté sans que rien
+                    // ne le dise, et cherché le défaut dans la détection plutôt que dans la copie.
+                    let camera = render_pass.camera(w / h);
 
                     let box_pos = aegis_engine::math::Vec3::new(
                         self.party_game.grid.width as f32 / 2.0,
@@ -178,21 +173,20 @@ impl AegisApp {
                     );
                     let t = self.party_game.round_timer;
 
+                    // ⚠ LE RAYON DE CLIC SUIT L'ÉCRAN, IL NE SE COMPTE PLUS EN PIXELS.
+                    // Il valait « 90 pixels » : généreux sur un écran de portable, deux fois plus
+                    // serré sur un 4K pour exactement la même image. La tolérance de visée d'un
+                    // humain se mesure en fraction d'écran, jamais en pixels — 7 % de la hauteur.
+                    let rayon = h * 0.07;
                     let mut best_idx = None;
-                    let mut min_dist_sq = 90.0 * 90.0; // Rayon de clic généreux de 90 pixels
+                    let mut min_dist_sq = rayon * rayon;
 
                     for i in 0..total {
                         let (offset_vec, _) = crate::mystery_box::compute_box_item_offset(i, total);
                         let item_world = box_pos + offset_vec;
 
-                        let clip = vp * aegis_engine::math::Vec4::new(item_world.x, item_world.y, item_world.z, 1.0);
-                        if clip.w > 0.0 {
-                            let ndc_x = clip.x / clip.w;
-                            let ndc_y = clip.y / clip.w;
-                            let sx = (ndc_x + 1.0) * 0.5 * w;
-                            let sy = (1.0 - ndc_y) * 0.5 * h;
-                            let dx = mx - sx;
-                            let dy = my - sy;
+                        if let Some((sx, sy)) = camera.projeter_vers_ecran(item_world, w, h) {
+                            let (dx, dy) = (mx - sx, my - sy);
                             let dist_sq = dx * dx + dy * dy;
                             if dist_sq < min_dist_sq {
                                 min_dist_sq = dist_sq;
@@ -219,41 +213,21 @@ impl AegisApp {
                     let (mx, my) = self.mouse_pos;
                     let w = engine.gpu.swapchain_extent.width as f32;
                     let h = engine.gpu.swapchain_extent.height as f32;
-                    // Coordonnées NDC [-1, 1]
-                    let ndc_x = (mx / w) * 2.0 - 1.0;
-                    let ndc_y = 1.0 - (my / h) * 2.0;
-                    // Matrice VP inverse pour retrouver la position monde
-                    let aspect = w / h;
-                    let view = aegis_engine::math::Mat4::look_at_rh(
-                        render_pass.camera_pos,
-                        render_pass.camera_target,
-                        aegis_engine::math::Vec3::Y,
-                    );
-                    let proj = aegis_engine::math::Mat4::perspective_rh(
-                        38.0f32.to_radians(), aspect, 0.1, 500.0,
-                    );
-                    let vp = proj * view;
-                    let inv_vp = vp.inverse();
-                    {
-                        // Ray depuis NDC (Z=0 = near plane)
-                        let near = inv_vp * aegis_engine::math::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
-                        let far  = inv_vp * aegis_engine::math::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
-                        let near_w = aegis_engine::math::Vec3::new(near.x / near.w, near.y / near.w, near.z / near.w);
-                        let far_w  = aegis_engine::math::Vec3::new(far.x  / far.w,  far.y  / far.w,  far.z  / far.w);
-                        // Intersection avec le plan Z=0 (la map)
-                        let dz = far_w.z - near_w.z;
-                        if dz.abs() > 1e-6 {
-                            let t = -near_w.z / dz;
-                            let world_x = near_w.x + t * (far_w.x - near_w.x);
-                            let world_y = near_w.y + t * (far_w.y - near_w.y);
-                            let gx = world_x.floor() as usize;
-                            let gy = world_y.floor() as usize;
+                    // Le rayon depuis le pixel jusqu'au plan du décor, calculé par la MÊME caméra
+                    // que le rendu. Ce bloc refaisait l'inversion de matrice à la main, avec sa
+                    // propre copie des réglages : deux vérités sur ce qu'on regarde, dont une
+                    // seule était affichée.
+                    if let Some(p) = render_pass.camera(w / h).point_sur_plan_z(mx, my, w, h, 0.0) {
+                        let (gx, gy) = (p.x.floor(), p.y.floor());
+                        // Négatif avant la conversion : un `-1.0 as usize` deviendrait un nombre
+                        // énorme et passerait la borne haute, donc tomberait sur une case valide.
+                        if gx >= 0.0 && gy >= 0.0 {
+                            let (gx, gy) = (gx as usize, gy as usize);
                             if gx < self.party_game.grid.width && gy < self.party_game.grid.height {
                                 self.party_game.editor.cursor = (gx as i32, gy as i32);
                                 self.party_game.placement_place_request = true;
                                 log::info!("🖱️ Clic Placement → case ({}, {})", gx, gy);
                             }
-
                         }
                     }
                 }
