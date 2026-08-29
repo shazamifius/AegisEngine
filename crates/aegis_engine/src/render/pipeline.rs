@@ -134,6 +134,19 @@ impl PipelineFactory {
             .viewport_count(1)
             .scissor_count(1);
 
+        // ⚠ UN FORMAT DE COULEUR `UNDEFINED` VEUT DIRE « PASSE DE PROFONDEUR PURE ».
+        //
+        // C'est le cas de la carte d'ombre : elle n'écrit aucune couleur. Deux conséquences, et
+        // les avoir manquées a coûté une chute de 165 images par seconde à UNE — un défaut qui ne
+        // produisait aucun message d'erreur, et que le chronomètre GPU ne voyait pas non plus
+        // (il mesurait 2 ms pendant que l'image en prenait 1000).
+        //
+        //  1. Déclarer un attachement de couleur au format `UNDEFINED` est un contrat que le
+        //     pilote honore comme il peut. Il ne faut en déclarer AUCUN.
+        //  2. Le décalage de profondeur doit être ACTIVÉ ici et rendu dynamique plus bas, sinon
+        //     `cmd_set_depth_bias` s'applique à un pipeline qui ne l'attend pas.
+        let passe_de_profondeur_seule = color_format == vk::Format::UNDEFINED;
+
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
             .depth_clamp_enable(false)
             .rasterizer_discard_enable(false)
@@ -141,7 +154,7 @@ impl PipelineFactory {
             .line_width(1.0)
             .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-            .depth_bias_enable(false);
+            .depth_bias_enable(passe_de_profondeur_seule);
 
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
             .sample_shading_enable(false)
@@ -174,11 +187,18 @@ impl PipelineFactory {
             .logic_op_enable(false)
             .attachments(std::slice::from_ref(&color_blend_attachment));
 
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        let dynamic_states: &[vk::DynamicState] = if passe_de_profondeur_seule {
+            &[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::DEPTH_BIAS]
+        } else {
+            &[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]
+        };
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(dynamic_states);
 
-        let mut rendering_create_info = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(std::slice::from_ref(&color_format));
+        let mut rendering_create_info = vk::PipelineRenderingCreateInfo::default();
+        if !passe_de_profondeur_seule {
+            rendering_create_info =
+                rendering_create_info.color_attachment_formats(std::slice::from_ref(&color_format));
+        }
         if let Some(df) = depth_format {
             rendering_create_info = rendering_create_info.depth_attachment_format(df);
         }

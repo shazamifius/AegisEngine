@@ -22,6 +22,7 @@ fn main() {
         ("background.wgsl", "background.vert.spv", "background.frag.spv"),
         ("glass_dispersive.wgsl", "glass_dispersive.vert.spv", "glass_dispersive.frag.spv"),
         ("party_2d5.wgsl", "party_2d5.vert.spv", "party_2d5.frag.spv"),
+        ("ombre.wgsl", "ombre.vert.spv", "ombre.frag.spv"),
     ];
 
     for (src_file, vert_out, frag_out) in shaders {

@@ -72,6 +72,8 @@ pub struct PartyRenderPass {
     /// calcule en rejouant la scène depuis la lumière, ce qui est impossible quand le dessin
     /// est impératif et entrelacé avec la logique de jeu.
     file: aegis_engine::render::file::File,
+    /// La carte d'ombre du soleil. ⚠ Une seule : la deuxieme lumiere eclaire sans ombrer.
+    ombre: aegis_engine::render::ombre::Ombre,
 
     pub cube_mesh: GpuMesh,
     pub char_mesh: GpuMesh,
@@ -187,6 +189,17 @@ impl PartyRenderPass {
             &[push_constant_range],
         )?;
 
+        // ⚠ L'ordre est FORCE par une dependance : l'ombre a besoin du layout de pipeline, qui a
+        // besoin du layout de descripteur du cadre. On DECLARE le descripteur a la creation du
+        // cadre, et on le REMPLIT seulement maintenant — c'est ce qui casse le cercle.
+        let ombre = aegis_engine::render::ombre::Ombre::nouvelle(
+            gpu,
+            memory_props,
+            pipeline_layout,
+            2048,
+        )?;
+        cadre.brancher_la_carte_d_ombre(&gpu.device, ombre.vue, ombre.echantillonneur);
+
         let bg_pipeline = PipelineFactory::create_graphics_pipeline(
             &gpu.device,
             bg_pipeline_layout,
@@ -238,6 +251,7 @@ impl PartyRenderPass {
             pipeline_layout,
             cadre,
             file: aegis_engine::render::file::File::nouvelle(),
+            ombre,
 
             cube_mesh,
             char_mesh,
@@ -351,86 +365,30 @@ impl PartyRenderPass {
         // direction artistique du jeu se règlera — un ciel froid, un sol chaud, une exposition.
         let ambiance = aegis_engine::render::cadre::Ambiance::default();
 
+        // La zone que la carte d'ombre couvre : centree sur la camera, assez large pour porter
+        // ce qu'on voit. ⚠ Ce qui sort de cette sphere ne projette rien — compromis de toute carte
+        // d'ombre unique, et il vaut mieux l'ecrire que le laisser decouvrir.
+        let centre_ombre = Vec3::new(self.camera_target.x, self.camera_target.y, 0.0);
+        let matrice_lumiere = aegis_engine::render::ombre::matrice_lumiere(
+            Vec3::new(0.4, 0.9, 0.7),
+            centre_ombre,
+            28.0,
+        );
+
         self.cadre.ecrire(&aegis_engine::render::cadre::DonneesImage::nouvelle(
             vp,
+            matrice_lumiere,
             [self.camera_pos.x, self.camera_pos.y, self.camera_pos.z],
             ambiance,
             &[soleil, lampe],
         ));
 
         unsafe {
-            let barrier_present = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::NONE)
-                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .image(image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-
-            let barrier_depth = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::NONE)
-                .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                .image(self.depth_image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::DEPTH,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-
-            context.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS, vk::DependencyFlags::empty(), &[], &[], &[barrier_present, barrier_depth]);
-
-            let color_attach = vk::RenderingAttachmentInfo::default()
-                .image_view(view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.92, 0.95, 0.98, 1.0] } });
-
-            let depth_attach = vk::RenderingAttachmentInfo::default()
-                .image_view(self.depth_image_view)
-                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } });
-
-            let rendering_info = vk::RenderingInfo::default()
-                .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent })
-                .layer_count(1)
-                .color_attachments(std::slice::from_ref(&color_attach))
-                .depth_attachment(&depth_attach);
-
-            context.device.cmd_begin_rendering(cmd, &rendering_info);
-
-            // 1. Fond Studio
-            context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.bg_pipeline);
-            let viewport = vk::Viewport { x: 0.0, y: 0.0, width: context.swapchain_extent.width as f32, height: context.swapchain_extent.height as f32, min_depth: 0.0, max_depth: 1.0 };
-            let scissor = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent };
-            context.device.cmd_set_viewport(cmd, 0, &[viewport]);
-            context.device.cmd_set_scissor(cmd, 0, &[scissor]);
-            // Le fond ne passe pas par un maillage (le shader fabrique ses trois sommets) :
-            // c'est le seul dessin du projet qui doit s'annoncer lui-même.
-            aegis_engine::mesure::noter_dessin(1);
-            context.device.cmd_draw(cmd, 3, 1, 0, 0);
-
-            context.jalon(cmd, "fond");
-
-            // 2. Pipeline Opaque : Rendu des Blocs de la Grille Posés par le Joueur
-            context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            // Le descripteur est lié une fois pour toute la passe : tous les dessins qui suivent
-            // partagent la même caméra et les mêmes lumières.
-            self.cadre.lier(&context.device, cmd, self.pipeline_layout);
-
-self.file.vider();
+            // ── LA DESCRIPTION D'ABORD, LE DESSIN ENSUITE ────────────────────────────────
+            // La file se remplit ici, AVANT toute passe de rendu, parce que la carte d'ombre a
+            // besoin de la connaitre pour rejouer la scene depuis la lumiere. Ce bloc ne fait
+            // aucun appel Vulkan : il decrit, il ne dessine pas.
+            self.file.vider();
                         for y in 0..game.grid.height {
                 for x in 0..game.grid.width {
                     let xi = x as i32;
@@ -527,6 +485,92 @@ self.file.vider();
                     }
                 }
             }
+
+            // ── LA CARTE D'OMBRE ─────────────────────────────────────────────────────────────
+            // Hors de toute passe de rendu, et avant la passe principale qui la lira.
+            if std::env::var("AEGIS_SANS_OMBRE").is_err() {
+                self.ombre.dessiner(
+                    &context.device,
+                    cmd,
+                    self.pipeline_layout,
+                    &self.file,
+                    &[&self.cube_mesh],
+                );
+            }
+            context.jalon(cmd, "ombre");
+
+            let barrier_present = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::NONE)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let barrier_depth = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::NONE)
+                .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .image(self.depth_image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::DEPTH,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            context.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS, vk::DependencyFlags::empty(), &[], &[], &[barrier_present, barrier_depth]);
+
+            let color_attach = vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.92, 0.95, 0.98, 1.0] } });
+
+            let depth_attach = vk::RenderingAttachmentInfo::default()
+                .image_view(self.depth_image_view)
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } });
+
+            let rendering_info = vk::RenderingInfo::default()
+                .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent })
+                .layer_count(1)
+                .color_attachments(std::slice::from_ref(&color_attach))
+                .depth_attachment(&depth_attach);
+
+            context.device.cmd_begin_rendering(cmd, &rendering_info);
+
+            // 1. Fond Studio
+            context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.bg_pipeline);
+            let viewport = vk::Viewport { x: 0.0, y: 0.0, width: context.swapchain_extent.width as f32, height: context.swapchain_extent.height as f32, min_depth: 0.0, max_depth: 1.0 };
+            let scissor = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent };
+            context.device.cmd_set_viewport(cmd, 0, &[viewport]);
+            context.device.cmd_set_scissor(cmd, 0, &[scissor]);
+            // Le fond ne passe pas par un maillage (le shader fabrique ses trois sommets) :
+            // c'est le seul dessin du projet qui doit s'annoncer lui-même.
+            aegis_engine::mesure::noter_dessin(1);
+            context.device.cmd_draw(cmd, 3, 1, 0, 0);
+
+            context.jalon(cmd, "fond");
+
+            // 2. Pipeline Opaque : Rendu des Blocs de la Grille Posés par le Joueur
+            context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            // Le descripteur est lié une fois pour toute la passe : tous les dessins qui suivent
+            // partagent la même caméra et les mêmes lumières.
+            self.cadre.lier(&context.device, cmd, self.pipeline_layout);
+
+
 
             // La file est jouee ICI, apres avoir ete remplie. Le meme contenu servira
             // a la passe d'ombre, sans que le jeu ait a redire ce qu'il y a a dessiner.

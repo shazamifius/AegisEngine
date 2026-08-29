@@ -122,6 +122,11 @@ impl Default for Ambiance {
 pub struct DonneesImage {
     /// Vue × projection, commune à toute l'image.
     pub view_proj: Mat4,
+    /// Vue × projection **depuis la lumière** : elle sert deux fois, à dessiner la carte d'ombre
+    /// et à savoir, pour chaque pixel, où le regarder dedans. ⚠ L'ordre des champs de cette
+    /// structure est copié dans DEUX shaders — les faire diverger décalerait les ombres sans
+    /// qu'aucune ligne ne paraisse fausse.
+    pub light_view_proj: Mat4,
     /// `xyz` = position de la caméra dans le monde (le spéculaire en a besoin),
     /// `w` = nombre de lumières réellement allumées.
     pub camera_et_compte: Vec4,
@@ -142,6 +147,7 @@ impl DonneesImage {
     /// dépassement muet ferait chercher un défaut d'éclairage là où il n'y a qu'un débordement.
     pub fn nouvelle(
         view_proj: Mat4,
+        light_view_proj: Mat4,
         camera_monde: [f32; 3],
         ambiance: Ambiance,
         lumieres: &[GpuLight],
@@ -151,6 +157,7 @@ impl DonneesImage {
         tableau[..retenues].copy_from_slice(&lumieres[..retenues]);
         Self {
             view_proj,
+            light_view_proj,
             camera_et_compte: Vec4::new(
                 camera_monde[0],
                 camera_monde[1],
@@ -213,24 +220,46 @@ impl Cadre {
                 as *mut DonneesImage
         };
 
-        let liaison = vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            // Le sommet en a besoin pour `view_proj`, le fragment pour les lumières.
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT);
+        let liaisons = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                // Le sommet en a besoin pour `view_proj`, le fragment pour les lumières.
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT),
+            // La carte d'ombre, et l'échantillonneur qui sait la comparer. Deux liaisons plutôt
+            // qu'une combinée : c'est ce que WGSL produit, et aligner le code sur ce que le shader
+            // déclare vraiment évite un décalage silencieux entre les deux.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
 
         let layout_descripteur = unsafe {
             gpu.device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default()
-                    .bindings(std::slice::from_ref(&liaison)),
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&liaisons),
                 None,
             )?
         };
 
-        let tailles = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)];
+        let tailles = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1),
+        ];
         let pool = unsafe {
             gpu.device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -271,6 +300,44 @@ impl Cadre {
             pool,
             ensemble,
         })
+    }
+
+    /// Branche la carte d'ombre sur ce descripteur.
+    ///
+    /// ⚠ **Appelée APRÈS la création de l'ombre, et c'est forcé par une dépendance circulaire** :
+    /// l'ombre a besoin du layout de pipeline, qui a besoin du layout de ce descripteur, qui est
+    /// créé ici. Séparer la *déclaration* du descripteur de son *remplissage* est ce qui casse le
+    /// cercle — et c'est plus honnête qu'un ordre d'appel à respecter de mémoire.
+    ///
+    /// ⚠⚠ Sans cet appel, le descripteur porte des liaisons déclarées mais vides : le pilote
+    /// l'accepte souvent en silence et rend des ombres absentes ou aléatoires. C'est exactement la
+    /// forme « mécanisme branché d'un seul côté » — d'où la journalisation, pour que le geste
+    /// laisse une trace au lieu d'être supposé.
+    pub fn brancher_la_carte_d_ombre(
+        &self,
+        device: &ash::Device,
+        vue: vk::ImageView,
+        echantillonneur: vk::Sampler,
+    ) {
+        let image = vk::DescriptorImageInfo::default()
+            .image_view(vue)
+            .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        let sampler = vk::DescriptorImageInfo::default().sampler(echantillonneur);
+
+        let ecritures = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.ensemble)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(std::slice::from_ref(&image)),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.ensemble)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(std::slice::from_ref(&sampler)),
+        ];
+        unsafe { device.update_descriptor_sets(&ecritures, &[]) };
+        log::info!("Cadre : carte d'ombre branchee sur les liaisons 1 et 2");
     }
 
     /// Écrit les données de l'image à venir.
@@ -392,7 +459,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<Vec4>(), 16);
         assert_eq!(
             std::mem::size_of::<DonneesImage>(),
-            64 + 16 + 16 * 3 + 48 * MAX_LUMIERES,
+            64 * 2 + 16 + 16 * 3 + 48 * MAX_LUMIERES,
             "aucun remplissage ne doit s'etre glisse entre les champs"
         );
         assert_eq!(std::mem::align_of::<DonneesImage>(), 4);
@@ -402,12 +469,12 @@ mod tests {
     #[test]
     fn le_compte_de_lumieres_suit_ce_qui_est_donne() {
         let soleil = GpuLight::new_directional(Vec3::new(0.4, 0.9, 0.7), Vec3::new(1.0, 1.0, 1.0), 3.0);
-        let d = DonneesImage::nouvelle(Mat4::IDENTITY, [0.0, 0.0, 0.0], Ambiance::default(), &[soleil, soleil, soleil]);
+        let d = DonneesImage::nouvelle(Mat4::IDENTITY, Mat4::IDENTITY, [0.0, 0.0, 0.0], Ambiance::default(), &[soleil, soleil, soleil]);
         assert_eq!(d.lumieres_actives(), 3);
         // Les emplacements non utilises sont neutres, pas des restes d'une image precedente.
         assert_eq!(d.lumieres[3], GpuLight::default());
 
-        let aucune = DonneesImage::nouvelle(Mat4::IDENTITY, [0.0, 0.0, 0.0], Ambiance::default(), &[]);
+        let aucune = DonneesImage::nouvelle(Mat4::IDENTITY, Mat4::IDENTITY, [0.0, 0.0, 0.0], Ambiance::default(), &[]);
         assert_eq!(aucune.lumieres_actives(), 0);
     }
 
@@ -416,7 +483,7 @@ mod tests {
     fn trop_de_lumieres_sont_bornees_et_le_compte_le_dit() {
         let l = GpuLight::new_point(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 0.5, 0.2), 100.0);
         let trop = vec![l; MAX_LUMIERES + 7];
-        let d = DonneesImage::nouvelle(Mat4::IDENTITY, [1.0, 2.0, 3.0], Ambiance::default(), &trop);
+        let d = DonneesImage::nouvelle(Mat4::IDENTITY, Mat4::IDENTITY, [1.0, 2.0, 3.0], Ambiance::default(), &trop);
         assert_eq!(
             d.lumieres_actives(),
             MAX_LUMIERES,

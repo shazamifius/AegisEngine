@@ -710,6 +710,40 @@ impl Mat4 {
         }
     }
 
+    /// Projection **orthographique** droitière, profondeur Vulkan dans `[0, 1]`.
+    ///
+    /// C'est la projection d'une lumière directionnelle : le soleil est si loin que ses rayons
+    /// arrivent parallèles, donc sans perspective. Une projection perspective donnerait des ombres
+    /// qui s'écartent en s'éloignant — un défaut classique et immédiatement visible.
+    ///
+    /// La même convention de profondeur que [`Mat4::perspective_rh`] : un point à `z = -near`
+    /// atterrit en 0, un point à `z = -far` en 1. Les mélanger produirait des ombres décalées sans
+    /// qu'aucune ligne ne paraisse fausse.
+    pub fn orthographic_rh(
+        gauche: f32,
+        droite: f32,
+        bas: f32,
+        haut: f32,
+        proche: f32,
+        loin: f32,
+    ) -> Self {
+        let m00 = 2.0 / (droite - gauche);
+        let m11 = 2.0 / (haut - bas);
+        let m22 = 1.0 / (proche - loin);
+        let m30 = -(droite + gauche) / (droite - gauche);
+        let m31 = -(haut + bas) / (haut - bas);
+        let m32 = proche / (proche - loin);
+
+        Self {
+            cols: [
+                Vec4::new(m00, 0.0, 0.0, 0.0),
+                Vec4::new(0.0, m11, 0.0, 0.0),
+                Vec4::new(0.0, 0.0, m22, 0.0),
+                Vec4::new(m30, m31, m32, 1.0),
+            ],
+        }
+    }
+
     /// Matrice de vue `look_at_rh` (Droitier).
     pub fn look_at_rh(eye: Vec3, center: Vec3, up: Vec3) -> Self {
         let f = (center - eye).normalize();

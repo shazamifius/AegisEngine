@@ -24,6 +24,9 @@ struct Lumiere {
 
 struct Cadre {
     view_proj: mat4x4<f32>,
+    // ⚠ MEME RANG que dans ombre.wgsl et dans DonneesImage : trois copies de la meme verite,
+    // et les faire diverger decalerait les ombres sans qu'aucune ligne ne paraisse fausse.
+    light_view_proj: mat4x4<f32>,
     camera_et_compte: vec4<f32>,  // xyz = position camera, w = nombre de lumieres allumees
     // ── CE QUE LE JEU DECIDE, ET QUE CE SHADER NE CHOISIT PAS ──────────────────────────────
     // Le moteur sait comment la lumiere se comporte ; il n'a pas a savoir de quelle couleur est
@@ -35,6 +38,49 @@ struct Cadre {
 };
 
 @group(0) @binding(0) var<uniform> cadre: Cadre;
+
+// La carte d'ombre : ce que la lumiere a vu de plus proche dans chaque direction.
+@group(0) @binding(1) var carte_ombre: texture_depth_2d;
+// ⚠ Un echantillonneur de COMPARAISON. Un echantillonneur ordinaire moyennerait des PROFONDEURS,
+// ce qui n'a aucun sens : la moyenne de "3 m" et "10 m" ne dit rien sur l'ombre. Celui-ci teste
+// d'abord, puis moyenne les RESULTATS (0 ou 1) -- c'est ce qui rend un bord adouci possible.
+@group(0) @binding(2) var comparateur: sampler_comparison;
+
+// Rend 1 en pleine lumiere, 0 dans l'ombre.
+fn part_de_lumiere(position_monde: vec3<f32>, n_dot_l: f32) -> f32 {
+    let dans_la_lumiere = cadre.light_view_proj * vec4<f32>(position_monde, 1.0);
+    let ndc = dans_la_lumiere.xyz / dans_la_lumiere.w;
+
+    // ⚠⚠ L'AXE Y EST RETOURNE, ET C'EST LE PIEGE LE PLUS COUTEUX DE CE MOTEUR.
+    // Les shaders d'Aegis sont compiles par naga avec ADJUST_COORDINATE_SPACE, qui inverse le Y
+    // de la position de clip EN SORTIE DE VERTEX. La carte d'ombre est donc ecrite avec un Y
+    // oppose a celui que rend ce calcul-ci, fait dans le fragment ou aucun ajustement n'a lieu.
+    // Oublier cette ligne donne des ombres qui existent mais tombent au mauvais endroit -- un
+    // defaut qu'on met des heures a attribuer, parce que tout le reste a l'air juste.
+    // (Meme famille que l'inversion de Y ajoutee A TORT dans la projection camera, le 29 aout.)
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+
+    // Hors de la carte : pleinement eclaire. Assombrir tout ce que la lumiere ne couvre pas serait
+    // bien plus visible qu'une ombre manquante.
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+
+    // Le decalage principal est applique en DESSINANT la carte (depth_bias), pas ici : il s'adapte
+    // a l'inclinaison de la surface, la ou l'erreur d'arrondi est la plus grande. Ce petit reste
+    // couvre les surfaces presque paralleles aux rayons, que la pente ne rattrape pas.
+    let marge = mix(0.0015, 0.0002, n_dot_l);
+    let profondeur = ndc.z - marge;
+
+    // Quatre echantillons en croix : un compromis entre un bord dur et le cout de la lecture.
+    let texel = 1.0 / f32(textureDimensions(carte_ombre).x);
+    var somme = 0.0;
+    somme = somme + textureSampleCompare(carte_ombre, comparateur, uv + vec2<f32>(-texel, -texel), profondeur);
+    somme = somme + textureSampleCompare(carte_ombre, comparateur, uv + vec2<f32>( texel, -texel), profondeur);
+    somme = somme + textureSampleCompare(carte_ombre, comparateur, uv + vec2<f32>(-texel,  texel), profondeur);
+    somme = somme + textureSampleCompare(carte_ombre, comparateur, uv + vec2<f32>( texel,  texel), profondeur);
+    return somme * 0.25;
+}
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -156,6 +202,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             continue;
         }
 
+        // ⚠ SEULE LA PREMIERE LUMIERE porte une ombre : il n'y a qu'une carte. Les suivantes
+        // eclairent sans ombrer, ce qui est ecrit plutot que subi -- une lampe qui traverse les
+        // murs se remarque, et il vaut mieux savoir que c'est une limite connue qu'un defaut.
+        var part_eclairee = 1.0;
+        if (i == 0) {
+            part_eclairee = part_de_lumiere(in.world_position, n_dot_l);
+        }
+        if (part_eclairee <= 0.0) {
+            continue;
+        }
+
         let H = normalize(V + L);
         let radiance = lum.couleur_intensite.rgb * lum.couleur_intensite.w * attenuation;
 
@@ -167,7 +224,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Ce qui part en reflet ne peut pas repartir en diffus : c'est la conservation d'energie.
         let part_diffuse = (vec3<f32>(1.0) - F);
 
-        total = total + (part_diffuse * in.color.rgb / PI + speculaire) * radiance * n_dot_l;
+        total = total + (part_diffuse * in.color.rgb / PI + speculaire) * radiance * n_dot_l * part_eclairee;
     }
 
     // ── L'AMBIANTE HEMISPHERIQUE ─────────────────────────────────────────────────────────────
