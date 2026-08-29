@@ -2,7 +2,6 @@ use ash::vk;
 use aegis_engine::math::{Mat4, Vec2, Vec3, Vec4};
 use aegis_engine::bytes::as_bytes;
 use aegis_engine::GpuContext;
-use aegis_engine::core::memory::MemoryManager;
 use aegis_engine::geometry::primitives::Primitives;
 use aegis_engine::render::pipeline::PipelineFactory;
 use aegis_engine::geometry::gpu_mesh::GpuMesh;
@@ -89,9 +88,9 @@ pub struct PartyRenderPass {
     pub flame_obj: FlamethrowerObject,
     pub box_obj: CardboardBoxObject,
 
-    depth_image: vk::Image,
-    depth_memory: vk::DeviceMemory,
-    depth_image_view: vk::ImageView,
+    /// Les images dans lesquelles l'image se fabrique : la profondeur, et — quand la carte sait
+    /// anti-creneler — une couleur multi-echantillonnee resolue vers l'ecran a la fin de la passe.
+    cibles: aegis_engine::render::cibles::Cibles,
 
     pub camera_pos: Vec3,
     pub camera_target: Vec3,
@@ -121,47 +120,12 @@ impl PartyRenderPass {
         let flame_obj = FlamethrowerObject::new(gpu, memory_props)?;
         let box_obj = CardboardBoxObject::new(gpu, memory_props)?;
 
-        let depth_format = vk::Format::D32_SFLOAT;
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(depth_format)
-            .extent(vk::Extent3D {
-                width: gpu.swapchain_extent.width,
-                height: gpu.swapchain_extent.height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-
-        let depth_image = unsafe { gpu.device.create_image(&image_info, None)? };
-        let mem_reqs = unsafe { gpu.device.get_image_memory_requirements(depth_image) };
-        let mem_type = MemoryManager::find_memory_type(memory_props, mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL).ok_or("Mémoire non trouvée pour la profondeur")?;
-
-        let alloc_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(mem_reqs.size)
-            .memory_type_index(mem_type);
-
-        let depth_memory = unsafe { gpu.device.allocate_memory(&alloc_info, None)? };
-        unsafe { gpu.device.bind_image_memory(depth_image, depth_memory, 0)? };
-
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(depth_image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(depth_format)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::DEPTH,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-
-        let depth_image_view = unsafe { gpu.device.create_image_view(&view_info, None)? };
+        // Les cibles de rendu appartiennent au moteur : ce fichier decrit ce qu'il y a a voir,
+        // pas comment on alloue une image Vulkan. Ces quarante lignes vivaient ici en DEUX
+        // exemplaires (ouverture et redimensionnement) — c'etait la duplication qui allait
+        // quadrupler en ajoutant l'anti-crenelage.
+        let cibles = aegis_engine::render::cibles::Cibles::nouvelles(gpu, memory_props)?;
+        let depth_format = cibles.format_profondeur;
 
         let bg_vert_spv = aegis_engine::shaders::BACKGROUND_VERT_SPV;
         let bg_frag_spv = aegis_engine::shaders::BACKGROUND_FRAG_SPV;
@@ -176,7 +140,15 @@ impl PartyRenderPass {
         // Le cadre naît avant les layouts : c'est lui qui fournit la description du descripteur.
         let cadre = aegis_engine::render::cadre::Cadre::nouveau(gpu, memory_props)?;
 
-        let bg_pipeline_layout = PipelineFactory::create_pipeline_layout(&gpu.device, &[], &[])?;
+        // ⚠ Le fond reçoit le MÊME descripteur que la scène, et c'est tout le correctif du
+        // 29 août : il ne recevait rien du tout, donc il peignait un blanc écrit en dur pendant
+        // que les objets étaient éclairés à 0,17. Il ne pousse en revanche aucune constante — un
+        // fond n'a pas d'objet.
+        let bg_pipeline_layout = PipelineFactory::create_pipeline_layout(
+            &gpu.device,
+            std::slice::from_ref(&cadre.layout_descripteur),
+            &[],
+        )?;
 
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
@@ -210,6 +182,7 @@ impl PartyRenderPass {
             false,
             false,
             false,
+           cibles.echantillons,
         )?;
 
         let pipeline = PipelineFactory::create_graphics_pipeline(
@@ -222,6 +195,7 @@ impl PartyRenderPass {
             true,
             false,
             true,
+           cibles.echantillons,
         )?;
 
         let particle_pipeline = PipelineFactory::create_graphics_pipeline(
@@ -234,6 +208,7 @@ impl PartyRenderPass {
             false,
             true,
             true,
+           cibles.echantillons,
         )?;
 
         unsafe {
@@ -266,9 +241,7 @@ impl PartyRenderPass {
             flame_obj,
             box_obj,
 
-            depth_image,
-            depth_memory,
-            depth_image_view,
+            cibles,
 
             camera_pos: Vec3::new(5.0, 3.0, 16.0),
             camera_target: Vec3::new(5.0, 3.0, 0.0),
@@ -518,7 +491,7 @@ impl PartyRenderPass {
                 .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .src_access_mask(vk::AccessFlags::NONE)
                 .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                .image(self.depth_image)
+                .image(self.cibles.image_profondeur())
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::DEPTH,
                     base_mip_level: 0,
@@ -527,17 +500,62 @@ impl PartyRenderPass {
                     layer_count: 1,
                 });
 
-            context.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS, vk::DependencyFlags::empty(), &[], &[], &[barrier_present, barrier_depth]);
+            // ⚠ L'image multi-echantillonnee a besoin de sa PROPRE barriere : elle est neuve a
+            // chaque image (`UNDEFINED`) et rien d'autre ne la fait entrer dans la disposition
+            // d'attachement. L'oublier ne produit aucune erreur — juste un rendu indefini, ce que
+            // le pilote a le droit de faire ressembler a n'importe quoi.
+            let mut barrieres = vec![barrier_present, barrier_depth];
+            if let Some(image_msaa) = self.cibles.image_couleur() {
+                barrieres.push(
+                    vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::NONE)
+                        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                        .image(image_msaa)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        }),
+                );
+            }
 
-            let color_attach = vk::RenderingAttachmentInfo::default()
-                .image_view(view)
+            context.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS, vk::DependencyFlags::empty(), &[], &[], &barrieres);
+
+            // ⭐ LA RESOLUTION DES ECHANTILLONS, et c'est elle qui rend l'anti-crenelage abordable.
+            //
+            // On dessine dans l'image multi-echantillonnee, et la carte fait la moyenne des
+            // echantillons vers l'image presentee A LA FIN de la passe, en une fois. Le
+            // `DONT_CARE` sur l'attachement multi-echantillonne n'est pas une negligence : il dit
+            // que les echantillons eux-memes ne servent a rien apres la moyenne. Un GPU a tuiles
+            // peut alors ne JAMAIS les ecrire en memoire centrale — c'est tout l'ecart entre un
+            // anti-crenelage gratuit et un anti-crenelage hors budget sur la machine de reference.
+            //
+            // Quand la carte ne sait pas anti-creneler, `vue_couleur` rend l'image presentee
+            // elle-meme et rien de tout cela n'existe : le meme code sert les deux chemins.
+            let mut color_attach = vk::RenderingAttachmentInfo::default()
+                .image_view(self.cibles.vue_couleur(view))
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
+                .store_op(if self.cibles.resout() {
+                    vk::AttachmentStoreOp::DONT_CARE
+                } else {
+                    vk::AttachmentStoreOp::STORE
+                })
                 .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.92, 0.95, 0.98, 1.0] } });
 
+            if self.cibles.resout() {
+                color_attach = color_attach
+                    .resolve_mode(vk::ResolveModeFlags::AVERAGE)
+                    .resolve_image_view(view)
+                    .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            }
+
             let depth_attach = vk::RenderingAttachmentInfo::default()
-                .image_view(self.depth_image_view)
+                .image_view(self.cibles.vue_profondeur())
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
@@ -557,6 +575,10 @@ impl PartyRenderPass {
             let scissor = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent };
             context.device.cmd_set_viewport(cmd, 0, &[viewport]);
             context.device.cmd_set_scissor(cmd, 0, &[scissor]);
+            // Sans cette ligne, le fond ne connaîtrait pas la lumière de la scène et retomberait
+            // dans le défaut qu'on vient de fermer. Il lit la même caméra et le même ciel que les
+            // objets — et c'est ce qui les met enfin dans la même image.
+            self.cadre.lier(&context.device, cmd, self.bg_pipeline_layout);
             // Le fond ne passe pas par un maillage (le shader fabrique ses trois sommets) :
             // c'est le seul dessin du projet qui doit s'annoncer lui-même.
             aegis_engine::mesure::noter_dessin(1);
@@ -1191,62 +1213,23 @@ impl PartyRenderPass {
         }
     }
 
+    /// Refait les cibles quand la fenetre change de taille.
+    ///
+    /// ⚠ Quarante lignes d'allocation Vulkan vivaient ici, copie conforme de celles de
+    /// l'ouverture. *Deux textes identiques a maintenir, c'est un texte qui finira par etre le
+    /// seul corrige.* Elles vivent maintenant dans le moteur, en un seul exemplaire.
     pub fn recreate_framebuffer_resources(
         &mut self,
         gpu: &GpuContext,
         memory_props: &vk::PhysicalDeviceMemoryProperties,
     ) {
+        // L'attente est ce qui rend la destruction sure : une image encore lue par une image en
+        // vol se detruit sans erreur immediate, et le defaut apparait ailleurs, plus tard.
         unsafe {
             let _ = gpu.device.device_wait_idle();
-            gpu.device.destroy_image_view(self.depth_image_view, None);
-            gpu.device.destroy_image(self.depth_image, None);
-            gpu.device.free_memory(self.depth_memory, None);
-
-            let depth_format = vk::Format::D32_SFLOAT;
-            let image_info = vk::ImageCreateInfo::default()
-                .image_type(vk::ImageType::TYPE_2D)
-                .format(depth_format)
-                .extent(vk::Extent3D {
-                    width: gpu.swapchain_extent.width,
-                    height: gpu.swapchain_extent.height,
-                    depth: 1,
-                })
-                .mip_levels(1)
-                .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .initial_layout(vk::ImageLayout::UNDEFINED);
-
-            let depth_image = gpu.device.create_image(&image_info, None).unwrap();
-            let mem_reqs = gpu.device.get_image_memory_requirements(depth_image);
-            let mem_type = MemoryManager::find_memory_type(memory_props, mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL).unwrap();
-
-            let alloc_info = vk::MemoryAllocateInfo::default()
-                .allocation_size(mem_reqs.size)
-                .memory_type_index(mem_type);
-
-            let depth_memory = gpu.device.allocate_memory(&alloc_info, None).unwrap();
-            gpu.device.bind_image_memory(depth_image, depth_memory, 0).unwrap();
-
-            let view_info = vk::ImageViewCreateInfo::default()
-                .image(depth_image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(depth_format)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::DEPTH,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
-
-            let depth_image_view = gpu.device.create_image_view(&view_info, None).unwrap();
-
-            self.depth_image = depth_image;
-            self.depth_memory = depth_memory;
-            self.depth_image_view = depth_image_view;
+        }
+        if let Err(e) = self.cibles.recreer(gpu, memory_props) {
+            log::error!("cibles de rendu non recreees apres redimensionnement : {e}");
         }
     }
 }

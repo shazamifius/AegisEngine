@@ -71,6 +71,10 @@ impl PipelineFactory {
         depth_write: bool,
         blend_enable: bool,
         use_vertex_input: bool,
+        // ⚠ Doit valoir EXACTEMENT l'échantillonnage des images attachées à la passe. Un pipeline
+        // qui rasterise à 4 échantillons dans une cible qui n'en a qu'un est un défaut que le
+        // pilote n'est pas tenu de signaler — il peut dessiner n'importe quoi, ou rien.
+        echantillons: vk::SampleCountFlags,
     ) -> Result<vk::Pipeline, Box<dyn std::error::Error>> {
         let vs_entry = std::ffi::CStr::from_bytes_with_nul(b"vs_main\0")?;
         let fs_entry = std::ffi::CStr::from_bytes_with_nul(b"fs_main\0")?;
@@ -157,8 +161,13 @@ impl PipelineFactory {
             .depth_bias_enable(passe_de_profondeur_seule);
 
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            // Le crénelage traité est celui des ARÊTES (la couverture géométrique), pas celui de
+            // l'intérieur des faces : le fragment n'est calculé qu'une fois par pixel, quel que
+            // soit le nombre d'échantillons. C'est ce qui rend le MSAA abordable — activer
+            // `sample_shading` multiplierait le coût de l'éclairage par quatre pour un gain
+            // invisible sur des aplats de couleur.
             .sample_shading_enable(false)
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(echantillons);
 
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(depth_format.is_some())

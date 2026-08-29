@@ -1,43 +1,11 @@
-// ── CE QUI CHANGE A CHAQUE OBJET ────────────────────────────────────────────────────────────
-// 96 octets, et le chiffre compte : Vulkan ne garantit que 128 octets de constantes poussees.
-// Ce shader en poussait 160 (une matrice vue-projection redondante par objet) et n'aurait donc
-// tres probablement pas pu creer son pipeline sur un GPU mobile — la machine de reference du
-// projet est un Meta Quest 2.
-struct PushConstants {
-    // ⚠ En couleur plate cette matrice est deja une matrice d'ECRAN : aucune camera ne lui est
-    // appliquee. C'est ce qui tient le HUD en place pendant que la camera bouge.
-    model_matrix: mat4x4<f32>,
-    color_tint: vec4<f32>,
-    params: vec4<f32>,
-};
+// ── LE SHADER D'ECLAIRAGE ───────────────────────────────────────────────────────────────────
+//
+// Ce qu'il declare lui-meme tient en deux lignes : le reste (les constantes poussees, le cadre,
+// le ciel, la courbe de tonalite) vit dans des preambules PARTAGES avec la passe d'ombre et le
+// fond. C'est ce qui garantit que les trois parlent du meme monde.
 
-var<push_constant> pc: PushConstants;
-
-// ── CE QUI EST VRAI POUR TOUTE L'IMAGE ──────────────────────────────────────────────────────
-// La vue-projection est la meme pour tous les objets : l'envoyer par objet, c'etait ~2000 fois
-// les memes 64 octets par image. Les lumieres arrivent par le meme chemin.
-struct Lumiere {
-    position_type: vec4<f32>,     // xyz = position monde, w = type (0 dir, 1 point, 2 projecteur)
-    couleur_intensite: vec4<f32>, // rgb = couleur, w = intensite
-    direction_cone: vec4<f32>,    // xyz = direction, w = cosinus du demi-angle du cone
-};
-
-struct Cadre {
-    view_proj: mat4x4<f32>,
-    // ⚠ MEME RANG que dans ombre.wgsl et dans DonneesImage : trois copies de la meme verite,
-    // et les faire diverger decalerait les ombres sans qu'aucune ligne ne paraisse fausse.
-    light_view_proj: mat4x4<f32>,
-    camera_et_compte: vec4<f32>,  // xyz = position camera, w = nombre de lumieres allumees
-    // ── CE QUE LE JEU DECIDE, ET QUE CE SHADER NE CHOISIT PAS ──────────────────────────────
-    // Le moteur sait comment la lumiere se comporte ; il n'a pas a savoir de quelle couleur est
-    // le ciel. Ces trois lignes sont la frontiere : au-dessus le moteur, au-dessous le jeu.
-    ciel_exposition: vec4<f32>,   // rgb = couleur du ciel, w = exposition
-    sol_point_blanc: vec4<f32>,   // rgb = couleur du sol,  w = point blanc
-    matiere: vec4<f32>,           // x = rugosite, y = reflectance
-    lumieres: array<Lumiere, 16>,
-};
-
-@group(0) @binding(0) var<uniform> cadre: Cadre;
+//!inclure commun
+//!inclure objet
 
 // La carte d'ombre : ce que la lumiere a vu de plus proche dans chaque direction.
 @group(0) @binding(1) var carte_ombre: texture_depth_2d;
@@ -227,32 +195,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         total = total + (part_diffuse * in.color.rgb / PI + speculaire) * radiance * n_dot_l * part_eclairee;
     }
 
-    // ── L'AMBIANTE HEMISPHERIQUE ─────────────────────────────────────────────────────────────
-    //
-    // Une ambiante GRISE unique donne des ombres eteintes : de l'ABSENCE de lumiere. Or une ombre
-    // reelle est la couleur de ce qui l'eclaire encore -- le ciel au-dessus, le sol qui renvoie en
-    // dessous. Deux couleurs interpolees selon l'orientation, et les ombres cessent d'etre grises.
-    //
-    // ⚠ Si le jeu pose la meme couleur des deux cotes, on retrouve EXACTEMENT l'ambiante plate
-    // d'avant : la capacite existe sans rien changer tant que personne ne s'en sert.
-    //
-    // ⚠⚠ Elle reste un PIS-ALLER de la vraie lumiere indirecte (etape 4 : les cascades de
-    // radiance). Le jour ou l'indirect existe, elle disparait -- elle ne se raffine pas.
-    let vers_le_ciel = N.y * 0.5 + 0.5;
-    let ambiante = mix(cadre.sol_point_blanc.rgb, cadre.ciel_exposition.rgb, vers_le_ciel)
-                 * in.color.rgb;
+    // Ce qui eclaire encore une surface a l'ombre : le ciel au-dessus, le sol en dessous.
+    // La formule vit dans `commun.wgsl` -- c'est la MEME que celle qui peint le fond, appelee ici
+    // avec la normale au lieu de la direction du regard. Rien ne les separe, donc rien ne peut
+    // les faire diverger.
+    let ambiante = ambiance_hemispherique(N) * in.color.rgb;
 
-    // Reinhard ETENDU, avec un point blanc. Le Reinhard simple (x / (x+1)) compresse aussi les
-    // tons moyens : tout le monde se retrouve vers 0,5, et l'image perd le contraste -- l'inverse
-    // exact de la clarte recherchee. Avec un point blanc a 2,0, ce qui est sous 1,0 reste presque
-    // lineaire et seules les hautes lumieres sont ramenees. Rien n'ecrete jamais, donc ajouter une
-    // lampe ne peut pas produire d'aplat blanc.
-    let point_blanc = cadre.sol_point_blanc.w;
-    // L'exposition est le diaphragme : elle multiplie ce qui arrive, avant la courbe.
-    let eclaire = (ambiante + total) * cadre.ciel_exposition.w;
-    let expose = eclaire * (vec3<f32>(1.0) + eclaire / (point_blanc * point_blanc))
-               / (vec3<f32>(1.0) + eclaire);
-    let gamma_corrected = pow(expose, vec3<f32>(1.0 / 2.2));
+    // Exposition, courbe de tonalite et gamma : `commun.wgsl` a nouveau, et pour la meme raison.
+    // Un second chemin vers le pixel serait une seconde courbe, donc deux mondes qui ne se
+    // repondent plus.
+    let gamma_corrected = presenter(ambiante + total);
 
     // `params.w` a 1.0 = couleur PLATE : celle qui a ete demandee, sans lampe et sans gamma.
     // C'est ce qu'exige une interface : un element de HUD ne vit pas dans la scene, il n'a donc

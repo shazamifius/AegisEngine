@@ -18,6 +18,13 @@ pub struct GpuContext {
     pub surface_loader: ash::khr::surface::Instance,
     pub surface: vk::SurfaceKHR,
     pub physical_device: vk::PhysicalDevice,
+    /// Ce que la carte annonce d'elle-meme : ses limites, ses formats, son nom.
+    ///
+    /// ⚠ **Lire ces limites plutot que supposer** est une regle du projet payee cher : le moteur
+    /// poussait 160 octets de constantes la ou Vulkan n'en garantit que 128, et fonctionnait ici
+    /// parce que cette machine en offre 256. Une limite qu'on ne lit pas est une limite qu'on
+    /// decouvre chez quelqu'un d'autre.
+    pub proprietes: vk::PhysicalDeviceProperties,
     pub device: ash::Device,
     pub graphics_queue: QueueInfo,
     pub swapchain_loader: ash::khr::swapchain::Device,
@@ -244,6 +251,7 @@ impl GpuContext {
             surface_loader,
             surface,
             physical_device,
+            proprietes: gpu_props,
             device,
             graphics_queue: QueueInfo {
                 queue: graphics_queue,

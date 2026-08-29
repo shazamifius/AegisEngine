@@ -123,10 +123,22 @@ pub struct DonneesImage {
     /// Vue × projection, commune à toute l'image.
     pub view_proj: Mat4,
     /// Vue × projection **depuis la lumière** : elle sert deux fois, à dessiner la carte d'ombre
-    /// et à savoir, pour chaque pixel, où le regarder dedans. ⚠ L'ordre des champs de cette
-    /// structure est copié dans DEUX shaders — les faire diverger décalerait les ombres sans
-    /// qu'aucune ligne ne paraisse fausse.
+    /// et à savoir, pour chaque pixel, où le regarder dedans.
+    ///
+    /// ⚠ L'ordre des champs de cette structure est celui de `commun.wgsl`, et d'un seul autre
+    /// endroit désormais. *Il était copié dans deux shaders jusqu'au 29 août 2026, sous un
+    /// commentaire qui disait lui-même que les faire diverger « décalerait les ombres sans
+    /// qu'aucune ligne ne paraisse fausse » — un commentaire qui demande de ne pas diverger note
+    /// la faute à venir, il ne l'empêche pas.*
     pub light_view_proj: Mat4,
+    /// L'inverse de `view_proj`, calculée une fois par image.
+    ///
+    /// Elle n'existe que pour le fond, et c'est ce qui la justifie : un fond est un triangle sans
+    /// géométrie, il n'a aucun sommet dont hériter une direction. Sans elle, il ne pourrait
+    /// qu'inventer un dégradé — c'est-à-dire choisir une couleur, donc franchir la frontière que
+    /// tout ce fichier existe pour tenir. *64 octets par image contre une décision d'artiste
+    /// gravée dans le moteur : le calcul est vite fait.*
+    pub inv_view_proj: Mat4,
     /// `xyz` = position de la caméra dans le monde (le spéculaire en a besoin),
     /// `w` = nombre de lumières réellement allumées.
     pub camera_et_compte: Vec4,
@@ -158,6 +170,10 @@ impl DonneesImage {
         Self {
             view_proj,
             light_view_proj,
+            // Calculée ici, une fois par image, et jamais dans le shader : une inversion de
+            // matrice par pixel serait ~60 opérations répétées deux millions de fois pour un
+            // résultat rigoureusement identique partout. *Jamais d'excédent.*
+            inv_view_proj: view_proj.inverse(),
             camera_et_compte: Vec4::new(
                 camera_monde[0],
                 camera_monde[1],
@@ -412,34 +428,51 @@ mod tests {
     ///
     /// *Écrire la règle est la moitié du travail ; la rendre inatteignable est l'autre.*
     ///
-    /// ⚠ Dette connue et non couverte : `background.wgsl` porte, lui, un vrai dégradé de couleurs
-    /// — le fond du jeu vit dans le moteur. C'est la même faute, à un autre endroit, et elle
-    /// demande son propre chantier plutôt qu'une exception discrète accordée ici.
+    /// ⚠ **La garde couvre TOUS les shaders du moteur, et pas seulement l'éclairage.** Elle n'en
+    /// couvrait qu'un seul jusqu'au 29 août 2026, et la dette laissée dehors — `background.wgsl`
+    /// et son « blanc pur studio » écrit en dur — est précisément ce qui rendait l'image
+    /// désagréable : des objets éclairés à `0,17` posés sur un fond peint à `0,97`, deux mondes
+    /// dans la même image qui ne se parlaient pas. *Une garde posée sur UN chemin n'est pas une
+    /// garde ; ici la preuve est venue de l'œil avant de venir du test.*
     #[test]
-    fn le_shader_d_eclairage_du_moteur_ne_choisit_aucune_couleur() {
-        let source = include_str!("../shaders/party_2d5.wgsl");
+    fn aucun_shader_du_moteur_ne_choisit_de_couleur() {
+        // ⚠ Tout shader ajouté à `build.rs` doit être ajouté ici. Une liste oublie toujours
+        // quelque chose — c'est pourquoi un second test compare cette liste à celle de `build.rs`.
+        let shaders: [(&str, &str); 5] = [
+            ("commun.wgsl", include_str!("../shaders/commun.wgsl")),
+            ("objet.wgsl", include_str!("../shaders/objet.wgsl")),
+            ("party_2d5.wgsl", include_str!("../shaders/party_2d5.wgsl")),
+            ("background.wgsl", include_str!("../shaders/background.wgsl")),
+            ("ombre.wgsl", include_str!("../shaders/ombre.wgsl")),
+        ];
+
         let mut coupables = Vec::new();
 
-        for (numero, ligne) in source.lines().enumerate() {
-            let sans_commentaire = ligne.split("//").next().unwrap_or("");
-            let mut reste = sans_commentaire;
-            while let Some(debut) = reste.find("vec3<f32>(") {
-                let apres = &reste[debut + "vec3<f32>(".len()..];
-                let Some(fin) = apres.find(')') else { break };
-                let arguments = &apres[..fin];
-                let valeurs: Vec<&str> = arguments.split(',').map(str::trim).collect();
-                if valeurs.len() == 3 {
-                    let nombres: Vec<Option<f32>> =
-                        valeurs.iter().map(|v| v.parse::<f32>().ok()).collect();
-                    // Trois littéraux qui ne sont pas tous égaux : c'est une teinte.
-                    if nombres.iter().all(Option::is_some) {
-                        let n: Vec<f32> = nombres.into_iter().flatten().collect();
-                        if n[0] != n[1] || n[1] != n[2] {
-                            coupables.push(format!("ligne {} : vec3<f32>({arguments})", numero + 1));
+        for (nom, source) in shaders {
+            for (numero, ligne) in source.lines().enumerate() {
+                let sans_commentaire = ligne.split("//").next().unwrap_or("");
+                let mut reste = sans_commentaire;
+                while let Some(debut) = reste.find("vec3<f32>(") {
+                    let apres = &reste[debut + "vec3<f32>(".len()..];
+                    let Some(fin) = apres.find(')') else { break };
+                    let arguments = &apres[..fin];
+                    let valeurs: Vec<&str> = arguments.split(',').map(str::trim).collect();
+                    if valeurs.len() == 3 {
+                        let nombres: Vec<Option<f32>> =
+                            valeurs.iter().map(|v| v.parse::<f32>().ok()).collect();
+                        // Trois littéraux qui ne sont pas tous égaux : c'est une teinte.
+                        if nombres.iter().all(Option::is_some) {
+                            let n: Vec<f32> = nombres.into_iter().flatten().collect();
+                            if n[0] != n[1] || n[1] != n[2] {
+                                coupables.push(format!(
+                                    "{nom} ligne {} : vec3<f32>({arguments})",
+                                    numero + 1
+                                ));
+                            }
                         }
                     }
+                    reste = &apres[fin..];
                 }
-                reste = &apres[fin..];
             }
         }
 
@@ -451,6 +484,43 @@ mod tests {
         );
     }
 
+    /// ⚠ La garde ci-dessus vaut ce que vaut sa liste — et une liste tenue à la main se périme.
+    ///
+    /// Ce test la compare à celle de `build.rs`, qui est la source de vérité (c'est elle qui décide
+    /// ce qui est réellement compilé dans le moteur). Ajouter un shader sans l'inscrire dans la
+    /// garde devient donc impossible sans qu'un test tombe. *Le seul remède qui tienne à
+    /// « une liste oublie toujours quelque chose » est une seconde liste qui la contredit.*
+    #[test]
+    fn la_garde_des_couleurs_couvre_tous_les_shaders_compiles() {
+        let build = include_str!("../../build.rs");
+        let garde = include_str!("cadre.rs");
+
+        let mut manquants = Vec::new();
+        for ligne in build.lines() {
+            // ⚠ Seules les lignes du TABLEAU comptent — celles qui nomment aussi un `.vert.spv`.
+            // Sans ce filtre la sonde ramassait `format!("{}.wgsl", …)`, du texte de `build.rs`
+            // qui *parle* de shaders sans en déclarer aucun, et accusait un fichier nommé
+            // `{}.wgsl`. *Une sonde qui compte son propre vocabulaire ne mesure rien ;* c'est le
+            // même piège que le `grep` qui trouve les formules qu'il cite lui-même.
+            if !ligne.contains(".vert.spv\"") {
+                continue;
+            }
+            let Some(debut) = ligne.find("(\"") else { continue };
+            let apres = &ligne[debut + 2..];
+            let Some(fin) = apres.find(".wgsl\"") else { continue };
+            let nom = format!("{}.wgsl", &apres[..fin]);
+            if !garde.contains(&format!("(\"{nom}\", include_str!")) {
+                manquants.push(nom);
+            }
+        }
+
+        assert!(
+            manquants.is_empty(),
+            "ces shaders sont compiles dans le moteur mais echappent a la garde des couleurs : \
+             {manquants:?}\nLes ajouter a la liste de `aucun_shader_du_moteur_ne_choisit_de_couleur`."
+        );
+    }
+
     /// L'agencement du tampon doit être celui que le shader attend, sans remplissage surprise.
     #[test]
     fn l_agencement_des_donnees_d_image_est_celui_annonce() {
@@ -459,7 +529,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<Vec4>(), 16);
         assert_eq!(
             std::mem::size_of::<DonneesImage>(),
-            64 * 2 + 16 + 16 * 3 + 48 * MAX_LUMIERES,
+            64 * 3 + 16 + 16 * 3 + 48 * MAX_LUMIERES,
             "aucun remplissage ne doit s'etre glisse entre les champs"
         );
         assert_eq!(std::mem::align_of::<DonneesImage>(), 4);

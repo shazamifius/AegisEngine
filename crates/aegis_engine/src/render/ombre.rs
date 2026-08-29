@@ -178,6 +178,11 @@ impl Ombre {
             true,
             false,
             true,
+            // ⚠ La carte d'ombre reste a UN echantillon, et ce n'est pas un oubli : elle ne
+            // s'affiche jamais, on y lit des profondeurs. Multi-echantillonner une profondeur
+            // quadruplerait une carte de 2048x2048 (16 Mo -> 64 Mo) pour un bord d'ombre que le
+            // filtrage PCF adoucit deja. *Jamais d'excedent.*
+            vk::SampleCountFlags::TYPE_1,
         )?;
 
         unsafe {
