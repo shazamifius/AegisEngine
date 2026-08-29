@@ -334,9 +334,18 @@ impl PartyRenderPass {
             // donc visible sans l'ecraser.
             8.0,
         );
+        // ── L'AMBIANCE : c'est LE JEU qui la décide, le moteur ne fait que l'appliquer ──────
+        //
+        // ⚠ Ces valeurs reproduisent exactement le rendu d'avant (ciel = sol = ambiante plate),
+        // et c'est délibéré : un changement d'architecture et un changement de rendu ne se
+        // prouvent pas dans le même commit. C'est ICI, et nulle part dans le moteur, que la
+        // direction artistique du jeu se règlera — un ciel froid, un sol chaud, une exposition.
+        let ambiance = aegis_engine::render::cadre::Ambiance::default();
+
         self.cadre.ecrire(&aegis_engine::render::cadre::DonneesImage::nouvelle(
             vp,
             [self.camera_pos.x, self.camera_pos.y, self.camera_pos.z],
+            ambiance,
             &[soleil, lampe],
         ));
 

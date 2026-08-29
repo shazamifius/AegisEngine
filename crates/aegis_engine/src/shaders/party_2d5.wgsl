@@ -25,6 +25,12 @@ struct Lumiere {
 struct Cadre {
     view_proj: mat4x4<f32>,
     camera_et_compte: vec4<f32>,  // xyz = position camera, w = nombre de lumieres allumees
+    // ── CE QUE LE JEU DECIDE, ET QUE CE SHADER NE CHOISIT PAS ──────────────────────────────
+    // Le moteur sait comment la lumiere se comporte ; il n'a pas a savoir de quelle couleur est
+    // le ciel. Ces trois lignes sont la frontiere : au-dessus le moteur, au-dessous le jeu.
+    ciel_exposition: vec4<f32>,   // rgb = couleur du ciel, w = exposition
+    sol_point_blanc: vec4<f32>,   // rgb = couleur du sol,  w = point blanc
+    matiere: vec4<f32>,           // x = rugosite, y = reflectance
     lumieres: array<Lumiere, 16>,
 };
 
@@ -107,11 +113,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let V = normalize(cadre.camera_et_compte.xyz - in.world_position);
     let n_dot_v = max(dot(N, V), 1e-4);
 
-    // ⚠ Rugosite constante pour l'instant, et c'est ECRIT plutot que subi : il n'y a pas encore
-    // de materiaux dans ce moteur. 0,55 donne un mat legerement satine, qui convient aux blocs
-    // du jeu. Le jour ou les materiaux arrivent, cette ligne est le seul endroit a changer.
-    let rugosite = 0.55;
-    let f0 = vec3<f32>(0.04);
+    // ⚠ Ces deux valeurs ETAIENT ecrites en dur ici, et c'etait la faute : une rugosite et une
+    // reflectance sont des decisions de MATIERE, donc du jeu. Elles viennent maintenant du cadre.
+    let rugosite = cadre.matiere.x;
+    let f0 = vec3<f32>(cadre.matiere.y);
 
     var total = vec3<f32>(0.0);
     let combien = i32(cadre.camera_et_compte.w);
@@ -165,24 +170,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         total = total + (part_diffuse * in.color.rgb / PI + speculaire) * radiance * n_dot_l;
     }
 
-    // Une ambiante plate, en attendant la vraie lumiere indirecte (etape 4 du plan : les cascades
-    // de radiance). ⚠ Elle est un PIS-ALLER, pas un choix esthetique : c'est elle qui aplatit les
-    // creux et donne l'impression de decor en carton. Le jour ou l'indirect existe, elle disparait.
+    // ── L'AMBIANTE HEMISPHERIQUE ─────────────────────────────────────────────────────────────
     //
-    // ⚠⚠ Elle a ete BAISSEE de 0,40 a 0,17 en meme temps que le tone mapping est arrive, et les
-    // deux vont ensemble : l'ancienne valeur avait ete reglee pour un pipeline qui ECRETAIT a 1,0.
-    // Elle saturait donc en permanence, ce qui masquait le manque de contraste au lieu de le
-    // corriger. Garder l'ancienne valeur sous une courbe qui ne sature plus donnait une image
-    // delavee -- constate, puis corrige.
-    let ambiante = vec3<f32>(0.15, 0.17, 0.20) * in.color.rgb;
+    // Une ambiante GRISE unique donne des ombres eteintes : de l'ABSENCE de lumiere. Or une ombre
+    // reelle est la couleur de ce qui l'eclaire encore -- le ciel au-dessus, le sol qui renvoie en
+    // dessous. Deux couleurs interpolees selon l'orientation, et les ombres cessent d'etre grises.
+    //
+    // ⚠ Si le jeu pose la meme couleur des deux cotes, on retrouve EXACTEMENT l'ambiante plate
+    // d'avant : la capacite existe sans rien changer tant que personne ne s'en sert.
+    //
+    // ⚠⚠ Elle reste un PIS-ALLER de la vraie lumiere indirecte (etape 4 : les cascades de
+    // radiance). Le jour ou l'indirect existe, elle disparait -- elle ne se raffine pas.
+    let vers_le_ciel = N.y * 0.5 + 0.5;
+    let ambiante = mix(cadre.sol_point_blanc.rgb, cadre.ciel_exposition.rgb, vers_le_ciel)
+                 * in.color.rgb;
 
     // Reinhard ETENDU, avec un point blanc. Le Reinhard simple (x / (x+1)) compresse aussi les
     // tons moyens : tout le monde se retrouve vers 0,5, et l'image perd le contraste -- l'inverse
     // exact de la clarte recherchee. Avec un point blanc a 2,0, ce qui est sous 1,0 reste presque
     // lineaire et seules les hautes lumieres sont ramenees. Rien n'ecrete jamais, donc ajouter une
     // lampe ne peut pas produire d'aplat blanc.
-    let point_blanc = 2.0;
-    let eclaire = ambiante + total;
+    let point_blanc = cadre.sol_point_blanc.w;
+    // L'exposition est le diaphragme : elle multiplie ce qui arrive, avant la courbe.
+    let eclaire = (ambiante + total) * cadre.ciel_exposition.w;
     let expose = eclaire * (vec3<f32>(1.0) + eclaire / (point_blanc * point_blanc))
                / (vec3<f32>(1.0) + eclaire);
     let gamma_corrected = pow(expose, vec3<f32>(1.0 / 2.2));
