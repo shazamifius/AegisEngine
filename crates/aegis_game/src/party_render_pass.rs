@@ -303,19 +303,41 @@ impl PartyRenderPass {
         let camera = self.camera(aspect);
         let vp = camera.compute_projection_matrix() * camera.compute_view_matrix();
 
-        // Ce que TOUTE l'image partage, écrit une fois. ⚠ Une seule lumière pour l'instant, et
-        // c'est délibéré : elle reproduit exactement celle qui était codée en dur dans le shader,
-        // pour que ce changement de plomberie se prouve par une image IDENTIQUE au sha256 près.
-        // Les lumières multiples viennent ensuite, une fois cette moitié-là hors de doute.
+        // ── LES LUMIÈRES DE LA SCÈNE ────────────────────────────────────────────────────────
+        //
+        // ⚠ **DEUX lumières, et la seconde n'est pas décorative : elle EXERCE le mécanisme.**
+        // Un éclairage multi-lumières qui ne porte qu'une lumière est un mécanisme jamais exercé,
+        // donc mort sans que rien ne le dise — la famille de défauts n° 1 de ce projet. La
+        // ponctuelle prouve en conditions réelles le second type, l'atténuation en carré inverse,
+        // et le fait que la boucle du shader parcourt bien ce qu'on lui annonce.
+        //
+        // ⚠⚠ Les valeurs ci-dessous sont un POINT DE DÉPART TECHNIQUE, pas une direction
+        // artistique : le juge du rendu perçu est son œil, et lui seul. Elles sont ici pour être
+        // corrigées, pas pour être défendues.
         let soleil = aegis_engine::scene::light::GpuLight::new_directional(
+            // Pointe VERS la lumière — c'est la convention que le shader attend.
             Vec3::new(0.4, 0.9, 0.7),
             Vec3::new(1.0, 0.96, 0.88),
-            0.65,
+            // Calculee, pas tatonnee : le diffus vaut albedo x (1-F) x I x NdotL / π, donc pour
+            // qu'une face en plein soleil rende ~0,75 avant l'ambiante il faut I ≈ 0,75 x π / 0,96,
+            // soit 2,45. Le calcul PBR divise par π ; reprendre l'ancien 0,65 tel quel aurait
+            // assombri l'image d'un facteur trois.
+            2.45,
+        );
+        // Une lampe chaude au-dessus du joueur. Sa portée n'est bornée par aucune constante : le
+        // carré inverse l'éteint tout seul, ce qui évite un rayon arbitraire à justifier.
+        let ici = game.human_player().position;
+        let lampe = aegis_engine::scene::light::GpuLight::new_point(
+            Vec3::new(ici.x, ici.y + 2.5, 2.0),
+            Vec3::new(1.0, 0.75, 0.45),
+            // A 2,5 unites, le carre inverse rend 8 / 6,25 ≈ 1,3 — du meme ordre que le soleil,
+            // donc visible sans l'ecraser.
+            8.0,
         );
         self.cadre.ecrire(&aegis_engine::render::cadre::DonneesImage::nouvelle(
             vp,
             [self.camera_pos.x, self.camera_pos.y, self.camera_pos.z],
-            &[soleil],
+            &[soleil, lampe],
         ));
 
         unsafe {
