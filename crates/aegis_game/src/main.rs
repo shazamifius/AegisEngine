@@ -261,6 +261,7 @@ fn publier_etat_console(
     vote: Option<&vote::Vote>,
     demonstration: bool,
     lobby: &lobby::Lobby,
+    chrono: Option<&aegis_engine::chrono_gpu::ChronoGpu>,
 ) {
     {
         let moi = g.players.iter().find(|p| p.is_human);
@@ -295,6 +296,24 @@ fn publier_etat_console(
                 .into_iter()
                 .map(|((x, y, w, h), a)| (format!("{a:?}"), x, y, w, h))
                 .collect(),
+            // Le releve de la derniere image FINIE. Vide au demarrage et sur une file sans
+            // horodatage — deux cas ou rendre des zeros serait mentir.
+            gpu: chrono
+                .map(|c| {
+                    c.cumuls()
+                        .iter()
+                        .map(|c| (c.nom.to_string(), c.moyenne_ms, c.pic_ms, c.images))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            gpu_image: chrono
+                .map(|c| {
+                    c.etapes()
+                        .iter()
+                        .map(|e| (e.nom.to_string(), e.millisecondes))
+                        .collect()
+                })
+                .unwrap_or_default(),
         });
     }
 }
@@ -360,6 +379,11 @@ impl AegisApp {
                     }
                 }
                 console::Ordre::Effacer => self.lobby.effacer(),
+                console::Ordre::GpuZero => {
+                    if let Some(chrono) = self.engine.as_mut().and_then(|e| e.gpu.chrono.as_mut()) {
+                        chrono.remettre_a_zero();
+                    }
+                }
             }
         }
 
@@ -383,6 +407,7 @@ impl AegisApp {
             self.vote.as_ref(),
             self.demonstration.is_some(),
             &self.lobby,
+            engine.gpu.chrono.as_ref(),
         );
 
         // On pousse NOTRE position au cœur, et rien d'autre : lui seul décide ce que les autres

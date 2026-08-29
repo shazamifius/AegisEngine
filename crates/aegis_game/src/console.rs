@@ -77,6 +77,8 @@ pub enum Ordre {
     Texte { texte: String },
     /// Retour arrière dans le champ de saisie.
     Effacer,
+    /// Repartir de zero pour l'agregation du temps GPU.
+    GpuZero,
 }
 
 /// L'instantané que la boucle publie pour la console. Volontairement plat et textuel : ce qui se
@@ -105,6 +107,17 @@ pub struct Etat {
     /// CONSTATER, quand la liste ne contient pas ce qu'on attend, qu'un bouton dessiné n'est pas
     /// atteignable.
     pub zones: Vec<(String, f32, f32, f32, f32)>,
+    /// Le temps GPU par etape : nom, moyenne, pire cas, nombre d'images agregees.
+    ///
+    /// ⚠ Contrairement a `travail`, ce releve ne VOYAGE PAS : il decrit ce GPU, ce pilote, ce
+    /// jour. Il se lit contre le budget du Quest 2 (13,9 ms), jamais comme une propriete du moteur.
+    /// Vide tant qu'aucune image n'est finie, ou si la file ne sait pas horodater.
+    ///
+    /// La MOYENNE sert a comparer deux versions ; le PIRE CAS dit si le rendu saccade. Sur un
+    /// casque, une seule image ratee se ressent — les deux se lisent ensemble.
+    pub gpu: Vec<(String, f32, f32, u32)>,
+    /// Le releve de la derniere image seule, pour voir ce qui se passe a l'instant present.
+    pub gpu_image: Vec<(String, f32)>,
 }
 
 /// Le point de rencontre entre la console et la boucle de jeu.
@@ -221,6 +234,9 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
             "arret               — arrete le JEU proprement",
             "travail             — le banc : dessins et triangles par image",
             "travail zero        — repart de zero pour mesurer une phase",
+            "gpu                 — le temps GPU par etape : moyenne/pire, contre le budget Quest 2",
+            "gpu image           — le temps GPU de la derniere image seule",
+            "gpu zero            — repart de zero pour l agregation GPU",
             "— le lobby —",
             "echap               — ouvre ou referme le lobby",
             "zones               — les boutons atteignables sur l'ecran courant",
@@ -292,6 +308,52 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
                 t.images, t.dessins, t.triangles,
                 t.dessins_par_image(), t.triangles_par_image()
             )
+        }
+
+        // Le second banc : le temps EXECUTE, la ou `travail` compte le travail SOUMIS. Les deux
+        // sont necessaires et ne se remplacent pas — l'eclairage ne se voit pas du tout dans le
+        // nombre d'appels de dessin.
+        ["gpu"] => {
+            let e = pupitre.lire_etat();
+            if e.gpu.is_empty() {
+                return "(aucune mesure — pas encore d'image finie, ou file sans horodatage)".to_string();
+            }
+            let budget = aegis_engine::chrono_gpu::ChronoGpu::BUDGET_QUEST2_MS;
+            let moyenne: f32 = e.gpu.iter().map(|(_, m, _, _)| m).sum();
+            let pire: f32 = e.gpu.iter().map(|(_, _, p, _)| p).sum();
+            let images = e.gpu.iter().map(|(_, _, _, i)| *i).max().unwrap_or(0);
+            let detail = e
+                .gpu
+                .iter()
+                .map(|(n, m, p, _)| format!("{n}={m:.3}/{p:.3}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            // Le compte d'images est affiche EXPRES : une moyenne sur trois images n'est pas une
+            // mesure, et c'est invisible si on ne le montre pas.
+            format!(
+                "moy/pire par etape : {detail} | total moy={moyenne:.3} ms ({:.1}% du budget Quest 2 de {budget:.1} ms), pire={pire:.3} ms | sur {images} images",
+                moyenne / budget * 100.0
+            )
+        }
+
+        ["gpu", "image"] => {
+            let e = pupitre.lire_etat();
+            if e.gpu_image.is_empty() {
+                return "(aucune image finie)".to_string();
+            }
+            let total: f32 = e.gpu_image.iter().map(|(_, ms)| ms).sum();
+            let detail = e
+                .gpu_image
+                .iter()
+                .map(|(n, ms)| format!("{n}={ms:.3}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("derniere image : {detail} | total={total:.3} ms")
+        }
+
+        ["gpu", "zero"] => {
+            pupitre.deposer(Ordre::GpuZero);
+            "ok gpu zero".to_string()
         }
 
         ["travail", "zero"] => {

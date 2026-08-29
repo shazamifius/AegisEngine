@@ -357,6 +357,8 @@ impl PartyRenderPass {
             aegis_engine::mesure::noter_dessin(1);
             context.device.cmd_draw(cmd, 3, 1, 0, 0);
 
+            context.jalon(cmd, "fond");
+
             // 2. Pipeline Opaque : Rendu des Blocs de la Grille Posés par le Joueur
             context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
 
@@ -1010,6 +1012,8 @@ impl PartyRenderPass {
                 self.cube_mesh.draw(&context.device, cmd);
             }
 
+            context.jalon(cmd, "monde");
+
             // 3. Pipeline Particules / Transparence : Bloc Preview Wireframe en Mode Éditeur uniquement
             if !game.is_play_mode {
                 context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.particle_pipeline);
@@ -1032,6 +1036,8 @@ impl PartyRenderPass {
 
             // ─── 4. LE HUD : ce qui se dessine sur l'ÉCRAN, et non dans le monde ─────────
             //
+            context.jalon(cmd, "apercu");
+
             // Tout ce qui suit ignore la caméra. C'est le point entier : le tableau des scores
             // était jusqu'ici posé au centre de la CARTE, pendant que la caméra restait sur le
             // joueur qui venait de mourir — il ne s'affichait donc pour personne.
@@ -1066,6 +1072,8 @@ impl PartyRenderPass {
                 });
             }
 
+            context.jalon(cmd, "interface");
+
             context.device.cmd_end_rendering(cmd);
 
             // Transition Swapchain -> PRESENT_SRC
@@ -1084,6 +1092,8 @@ impl PartyRenderPass {
                 });
 
             context.device.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &[barrier_present_back]);
+
+            context.jalon(cmd, "presentation");
         }
     }
 

@@ -1,3 +1,4 @@
+use crate::chrono_gpu::ChronoGpu;
 use ash::vk;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::ffi::CStr;
@@ -30,6 +31,9 @@ pub struct GpuContext {
     pub image_available_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub in_flight_fence: vk::Fence,
+    /// Le chronometre GPU. `None` quand la file ne sait pas horodater — un cas reel sur certains
+    /// pilotes, et qu'il vaut mieux voir que masquer par des zeros.
+    pub chrono: Option<ChronoGpu>,
 }
 
 impl GpuContext {
@@ -108,6 +112,12 @@ impl GpuContext {
 
         let graphics_family_idx = graphics_family_idx.ok_or("Aucune famille de queue Graphics + Present trouvée.")?;
 
+        // Les deux nombres dont depend toute mesure de temps GPU. Ils se lisent ICI, une fois :
+        // la periode est une propriete du GPU, les bits utiles une propriete de la FAMILLE de file
+        // — et les confondre donne des durees fausses sans que rien ne le signale.
+        let periode_horodatage = gpu_props.limits.timestamp_period;
+        let bits_horodatage = queue_families[graphics_family_idx as usize].timestamp_valid_bits;
+
         // 6. Device Virtuel & Extensions de Device
         let device_extension_names = [ash::khr::swapchain::NAME.as_ptr()];
         let queue_priorities = [1.0f32];
@@ -137,6 +147,16 @@ impl GpuContext {
         log::info!("Création du Logical Device Vulkan 1.4...");
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
         let graphics_queue = unsafe { device.get_device_queue(graphics_family_idx, 0) };
+
+        // 32 jalons : largement au-dela du decoupage actuel, et le pool est minuscule. Un
+        // depassement est journalise une fois plutot que d'etre ignore en silence.
+        let chrono = match ChronoGpu::nouveau(&device, periode_horodatage, bits_horodatage, 32) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::warn!("Chronometre GPU indisponible : {e}. Le rendu tourne, la mesure non.");
+                None
+            }
+        };
 
         // 7. Initialisation du Swapchain
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
@@ -240,7 +260,18 @@ impl GpuContext {
             image_available_semaphore,
             render_finished_semaphore,
             in_flight_fence,
+            chrono,
         })
+    }
+
+    /// Referme l'etape courante du chronometre et lui donne son nom.
+    ///
+    /// Ne fait rien si le GPU ne sait pas horodater — l'appelant n'a donc jamais a s'en soucier,
+    /// et le rendu ne depend en aucune facon de la presence de l'instrument.
+    pub fn jalon(&self, cmd: vk::CommandBuffer, nom: &'static str) {
+        if let Some(chrono) = self.chrono.as_ref() {
+            chrono.jalon(&self.device, cmd, nom);
+        }
     }
 
     pub fn begin_frame(&mut self, window: &Window) -> Result<(vk::CommandBuffer, usize), Box<dyn std::error::Error>> {
@@ -270,6 +301,13 @@ impl GpuContext {
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
             self.device.begin_command_buffer(cmd, &begin_info)?;
+
+            // Le releve de l'image PRECEDENTE se fait ici, et l'endroit n'est pas un detail : la
+            // barriere vient d'etre attendue (`wait_for_fences` ci-dessus), donc cette image-la est
+            // terminee et ses compteurs sont lisibles sans attendre une seule microseconde.
+            if let Some(chrono) = self.chrono.as_mut() {
+                chrono.ouvrir_image(&self.device, cmd);
+            }
 
             Ok((cmd, image_index as usize))
         }
@@ -416,6 +454,9 @@ impl Drop for GpuContext {
             self.device.destroy_semaphore(self.image_available_semaphore, None);
             self.device.destroy_semaphore(self.render_finished_semaphore, None);
             self.device.destroy_fence(self.in_flight_fence, None);
+            if let Some(chrono) = self.chrono.as_mut() {
+                chrono.detruire(&self.device);
+            }
             self.device.destroy_command_pool(self.command_pool, None);
             self.swapchain_loader.destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
