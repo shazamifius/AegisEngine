@@ -56,8 +56,7 @@ impl MapObject {
         false
     }
 
-    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer, pipeline_layout: vk::PipelineLayout,
-        instances: &aegis_engine::render::instances::Instances, vp: Mat4) {
+    pub fn draw(&self, pose: &aegis_engine::render::instances::Pose, vp: Mat4) {
         let model = self.get_model_matrix();
 
         let push = PushConstants {
@@ -66,6 +65,6 @@ impl MapObject {
             params: Vec4::new(0.2, 1.0, 0.0, 0.0),
         };
 
-        instances.dessiner_avec(device, cmd, &self.mesh, &push);
+        pose.objet(&self.mesh, &push);
     }
 }

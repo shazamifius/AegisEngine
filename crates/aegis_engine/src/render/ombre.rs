@@ -172,17 +172,19 @@ impl Ombre {
             layout,
             vert,
             frag,
-            // Aucune cible de couleur : cette passe n'écrit que de la profondeur.
-            vk::Format::UNDEFINED,
-            Some(format),
-            true,
-            false,
-            true,
-            // ⚠ La carte d'ombre reste a UN echantillon, et ce n'est pas un oubli : elle ne
-            // s'affiche jamais, on y lit des profondeurs. Multi-echantillonner une profondeur
-            // quadruplerait une carte de 2048x2048 (16 Mo -> 64 Mo) pour un bord d'ombre que le
-            // filtrage PCF adoucit deja. *Jamais d'excedent.*
-            vk::SampleCountFlags::TYPE_1,
+            crate::render::pipeline::Reglages {
+                // Aucune cible de couleur : cette passe n'écrit que de la profondeur.
+                color_format: vk::Format::UNDEFINED,
+                depth_format: Some(format),
+                depth_write: true,
+                blend_enable: false,
+                use_vertex_input: true,
+                // ⚠ La carte d'ombre reste a UN echantillon, et ce n'est pas un oubli : elle ne
+                // s'affiche jamais, on y lit des profondeurs. Multi-echantillonner une profondeur
+                // quadruplerait une carte de 2048x2048 (16 Mo -> 64 Mo) pour un bord d'ombre que
+                // le filtrage PCF adoucit deja. *Jamais d'excedent.*
+                echantillons: vk::SampleCountFlags::TYPE_1,
+            },
         )?;
 
         unsafe {

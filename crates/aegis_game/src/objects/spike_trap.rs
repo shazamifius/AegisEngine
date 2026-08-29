@@ -18,17 +18,13 @@ impl SpikeTrapObject {
         Ok(Self { mesh })
     }
 
-    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer, pipeline_layout: vk::PipelineLayout,
-        instances: &aegis_engine::render::instances::Instances, vp: Mat4, pos: Vec2) {
-        self.draw_at_3d(device, cmd, pipeline_layout, instances, vp, Vec3::new(pos.x, pos.y, 0.1), 1.0);
+    pub fn draw(&self, pose: &aegis_engine::render::instances::Pose, vp: Mat4, pos: Vec2) {
+        self.draw_at_3d(pose, vp, Vec3::new(pos.x, pos.y, 0.1), 1.0);
     }
 
     pub fn draw_at_3d(
         &self,
-        device: &ash::Device,
-        cmd: vk::CommandBuffer,
-        pipeline_layout: vk::PipelineLayout,
-        instances: &aegis_engine::render::instances::Instances,
+        pose: &aegis_engine::render::instances::Pose,
         vp: Mat4,
         pos: Vec3,
         scale: f32,
@@ -43,6 +39,6 @@ impl SpikeTrapObject {
             params: Vec4::new(0.2, 1.5, 0.0, 0.0),
         };
 
-        instances.dessiner_avec(device, cmd, &self.mesh, &push);
+        pose.objet(&self.mesh, &push);
     }
 }

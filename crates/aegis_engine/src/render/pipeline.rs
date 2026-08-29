@@ -4,6 +4,29 @@ use ash::Device;
 /// Usine de création de Pipelines Graphiques et Compute Native Vulkan 1.4.
 pub struct PipelineFactory;
 
+/// Comment un pipeline doit dessiner.
+///
+/// ## Pourquoi ce type plutôt que six arguments
+///
+/// La fabrique s'appelait avec `..., true, false, true, TYPE_4)`. Trois booléens nus, dans un
+/// ordre qu'il fallait retenir : intervertir « écrit la profondeur » et « mélange les couleurs »
+/// produit un pipeline parfaitement valide qui dessine mal, et **rien ne le signale**. Nommer
+/// chaque réglage au point d'appel rend cette faute visible en la lisant.
+pub struct Reglages {
+    /// Format de la cible couleur. `UNDEFINED` veut dire « passe de profondeur pure ».
+    pub color_format: vk::Format,
+    pub depth_format: Option<vk::Format>,
+    /// Ce dessin met-il à jour la profondeur, ou se contente-t-il de la tester ?
+    pub depth_write: bool,
+    pub blend_enable: bool,
+    /// Faux pour un shader qui fabrique ses propres sommets, comme le fond.
+    pub use_vertex_input: bool,
+    /// ⚠ Doit valoir EXACTEMENT l'échantillonnage des images attachées à la passe. Un pipeline qui
+    /// rasterise à 4 échantillons dans une cible qui n'en a qu'un est un défaut que le pilote
+    /// n'est pas tenu de signaler — il peut dessiner n'importe quoi, ou rien.
+    pub echantillons: vk::SampleCountFlags,
+}
+
 impl PipelineFactory {
     /// Crée un Shader Module Vulkan à partir d'un tranche d'octets SPIR-V précompilée (ex: via include_bytes!).
     pub fn create_shader_module_from_bytes(
@@ -66,16 +89,16 @@ impl PipelineFactory {
         layout: vk::PipelineLayout,
         vert_shader: vk::ShaderModule,
         frag_shader: vk::ShaderModule,
-        color_format: vk::Format,
-        depth_format: Option<vk::Format>,
-        depth_write: bool,
-        blend_enable: bool,
-        use_vertex_input: bool,
-        // ⚠ Doit valoir EXACTEMENT l'échantillonnage des images attachées à la passe. Un pipeline
-        // qui rasterise à 4 échantillons dans une cible qui n'en a qu'un est un défaut que le
-        // pilote n'est pas tenu de signaler — il peut dessiner n'importe quoi, ou rien.
-        echantillons: vk::SampleCountFlags,
+        reglages: Reglages,
     ) -> Result<vk::Pipeline, Box<dyn std::error::Error>> {
+        let Reglages {
+            color_format,
+            depth_format,
+            depth_write,
+            blend_enable,
+            use_vertex_input,
+            echantillons,
+        } = reglages;
         let vs_entry = std::ffi::CStr::from_bytes_with_nul(b"vs_main\0")?;
         let fs_entry = std::ffi::CStr::from_bytes_with_nul(b"fs_main\0")?;
         let shader_stages = [

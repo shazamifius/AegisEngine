@@ -19,17 +19,13 @@ impl CannonTurretObject {
         Ok(Self { mesh })
     }
 
-    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer, pipeline_layout: vk::PipelineLayout,
-        instances: &aegis_engine::render::instances::Instances, cube_mesh: Option<&GpuMesh>, vp: Mat4, pos: Vec2, dir: Direction, is_placement: bool) {
-        self.draw_at_3d(device, cmd, pipeline_layout, instances, cube_mesh, vp, Vec3::new(pos.x, pos.y, 0.1), dir, 1.0, is_placement);
+    pub fn draw(&self, pose: &aegis_engine::render::instances::Pose, cube_mesh: Option<&GpuMesh>, vp: Mat4, pos: Vec2, dir: Direction, is_placement: bool) {
+        self.draw_at_3d(pose, cube_mesh, vp, Vec3::new(pos.x, pos.y, 0.1), dir, 1.0, is_placement);
     }
 
     pub fn draw_at_3d(
         &self,
-        device: &ash::Device,
-        cmd: vk::CommandBuffer,
-        pipeline_layout: vk::PipelineLayout,
-        instances: &aegis_engine::render::instances::Instances,
+        pose: &aegis_engine::render::instances::Pose,
         cube_mesh: Option<&GpuMesh>,
         vp: Mat4,
         pos: Vec3,
@@ -55,7 +51,7 @@ impl CannonTurretObject {
             params: Vec4::new(0.1, 1.5, 0.0, 0.0),
         };
 
-        instances.dessiner_avec(device, cmd, &self.mesh, &push);
+        pose.objet(&self.mesh, &push);
 
         // Viseur Laser Rouge sortant directement de l'Œil Central de la tourelle Portal !
         if let Some(cube) = cube_mesh {
@@ -75,7 +71,7 @@ impl CannonTurretObject {
                 params: Vec4::new(0.0, 16.0, 0.0, 0.0),
             };
 
-            instances.dessiner_avec(device, cmd, &cube, &push_eye);
+            pose.objet(cube, &push_eye);
 
             // 2. Rayon Viseur Laser Rouge sortant de l'œil
             let sight_color = if is_placement {
@@ -90,7 +86,7 @@ impl CannonTurretObject {
                 params: Vec4::new(0.0, 12.0, 0.0, 0.0),
             };
 
-            instances.dessiner_avec(device, cmd, &cube, &push_sight);
+            pose.objet(cube, &push_sight);
         }
     }
 }

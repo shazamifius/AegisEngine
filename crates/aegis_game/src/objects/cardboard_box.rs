@@ -96,10 +96,7 @@ impl CardboardBoxObject {
 
     pub fn draw(
         &self,
-        device: &ash::Device,
-        cmd: vk::CommandBuffer,
-        pipeline_layout: vk::PipelineLayout,
-        instances: &aegis_engine::render::instances::Instances,
+        pose: &aegis_engine::render::instances::Pose,
         vp: Mat4,
         pos: Vec3,
         avancement: f32,
@@ -142,6 +139,6 @@ impl CardboardBoxObject {
             params: Vec4::new(0.3, 0.0, 0.0, 0.0),
         };
 
-        instances.dessiner_avec(device, cmd, mesh_to_draw, &push);
+        pose.objet(mesh_to_draw, &push);
     }
 }

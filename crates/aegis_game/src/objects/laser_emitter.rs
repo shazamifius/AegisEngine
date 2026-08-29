@@ -19,17 +19,13 @@ impl LaserEmitterObject {
         Ok(Self { mesh })
     }
 
-    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer, pipeline_layout: vk::PipelineLayout,
-        instances: &aegis_engine::render::instances::Instances, cube_mesh: &GpuMesh, vp: Mat4, pos: Vec2, dir: Direction, active: bool, beam_length: f32, time: f32) {
-        self.draw_at_3d(device, cmd, pipeline_layout, instances, cube_mesh, vp, Vec3::new(pos.x, pos.y, 0.1), dir, 1.0, active, beam_length, time);
+    pub fn draw(&self, pose: &aegis_engine::render::instances::Pose, cube_mesh: &GpuMesh, vp: Mat4, pos: Vec2, dir: Direction, active: bool, beam_length: f32, time: f32) {
+        self.draw_at_3d(pose, cube_mesh, vp, Vec3::new(pos.x, pos.y, 0.1), dir, 1.0, active, beam_length, time);
     }
 
     pub fn draw_at_3d(
         &self,
-        device: &ash::Device,
-        cmd: vk::CommandBuffer,
-        pipeline_layout: vk::PipelineLayout,
-        instances: &aegis_engine::render::instances::Instances,
+        pose: &aegis_engine::render::instances::Pose,
         cube_mesh: &GpuMesh,
         vp: Mat4,
         pos: Vec3,
@@ -57,7 +53,7 @@ impl LaserEmitterObject {
             params: Vec4::new(0.1, 2.0, 0.0, 0.0),
         };
 
-        instances.dessiner_avec(device, cmd, &self.mesh, &push);
+        pose.objet(&self.mesh, &push);
 
         // Faisceau Laser Cyan Continu Raycasté & Particules en Spirale
         if active {
@@ -78,7 +74,7 @@ impl LaserEmitterObject {
                 params: Vec4::new(0.0, 10.0, 0.0, 0.0),     // Émission maximale !
             };
 
-            instances.dessiner_avec(device, cmd, &cube_mesh, &push_beam);
+            pose.objet(cube_mesh, &push_beam);
 
             // Essaim d'Énergie Dense & Organique (9x plus de particules en vortex cyan/blanc)
             let particle_count = (beam_length * 18.0).clamp(60.0, 220.0) as usize;
@@ -122,7 +118,7 @@ impl LaserEmitterObject {
                     params: Vec4::new(0.0, 14.0, 0.0, 0.0), // Émission maximale !
                 };
 
-                instances.dessiner_avec(device, cmd, &cube_mesh, &push_particle);
+                pose.objet(cube_mesh, &push_particle);
             }
         }
     }

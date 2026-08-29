@@ -20,10 +20,7 @@ impl RockObject {
 
     pub fn draw(
         &self,
-        device: &ash::Device,
-        cmd: vk::CommandBuffer,
-        pipeline_layout: vk::PipelineLayout,
-        instances: &aegis_engine::render::instances::Instances,
+        pose: &aegis_engine::render::instances::Pose,
         vp: Mat4,
         pos: Vec3,
     ) {
@@ -36,6 +33,6 @@ impl RockObject {
             params: Vec4::new(0.3, 1.0, 0.0, 0.0),
         };
 
-        instances.dessiner_avec(device, cmd, &self.mesh, &push);
+        pose.objet(&self.mesh, &push);
     }
 }

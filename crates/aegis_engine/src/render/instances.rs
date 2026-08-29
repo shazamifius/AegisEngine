@@ -272,3 +272,33 @@ mod tests {
         assert_eq!(liaison().input_rate, vk::VertexInputRate::INSTANCE);
     }
 }
+
+/// Tout ce qu'il faut pour poser un objet à l'écran, en un seul argument.
+///
+/// ## Pourquoi ce type existe
+///
+/// `device`, `cmd`, le layout et le tampon d'instances voyagent **toujours ensemble** : ce sont
+/// les quatre faces d'une seule idée — *où je dessine*. Les passer séparément allongeait la liste
+/// d'arguments de chaque objet du jeu d'un cran, et trois d'entre elles ont franchi le seuil au
+/// delà duquel plus personne ne lit une signature.
+///
+/// C'est le même remède que `Exterieur` côté jeu, pour la même raison : quand une liste
+/// d'arguments s'allonge à chaque fonctionnalité, ce n'est pas la liste qu'il faut rallonger,
+/// c'est qu'un concept manque.
+pub struct Pose<'a> {
+    pub device: &'a ash::Device,
+    pub cmd: vk::CommandBuffer,
+    pub layout: vk::PipelineLayout,
+    pub instances: &'a Instances,
+}
+
+impl Pose<'_> {
+    /// Dessine un maillage unique décrit par ses constantes.
+    pub fn objet(
+        &self,
+        maillage: &crate::geometry::gpu_mesh::GpuMesh,
+        push: &crate::render::push_constants::PushConstants,
+    ) {
+        self.instances.dessiner_avec(self.device, self.cmd, maillage, push);
+    }
+}

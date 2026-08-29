@@ -194,12 +194,15 @@ impl PartyRenderPass {
             bg_pipeline_layout,
             bg_vert_mod,
             bg_frag_mod,
-            gpu.swapchain_format,
-            None,
-            false,
-            false,
-            false,
-           cibles.echantillons,
+            aegis_engine::render::pipeline::Reglages {
+                color_format: gpu.swapchain_format,
+                // Le fond n'a ni profondeur ni sommets : son shader fabrique ses trois points.
+                depth_format: None,
+                depth_write: false,
+                blend_enable: false,
+                use_vertex_input: false,
+                echantillons: cibles.echantillons,
+            },
         )?;
 
         let pipeline = PipelineFactory::create_graphics_pipeline(
@@ -207,12 +210,14 @@ impl PartyRenderPass {
             pipeline_layout,
             p_vert_mod,
             p_frag_mod,
-            gpu.swapchain_format,
-            Some(depth_format),
-            true,
-            false,
-            true,
-           cibles.echantillons,
+            aegis_engine::render::pipeline::Reglages {
+                color_format: gpu.swapchain_format,
+                depth_format: Some(depth_format),
+                depth_write: true,
+                blend_enable: false,
+                use_vertex_input: true,
+                echantillons: cibles.echantillons,
+            },
         )?;
 
         let particle_pipeline = PipelineFactory::create_graphics_pipeline(
@@ -220,12 +225,16 @@ impl PartyRenderPass {
             pipeline_layout,
             p_vert_mod,
             p_frag_mod,
-            gpu.swapchain_format,
-            Some(depth_format),
-            false,
-            true,
-            true,
-           cibles.echantillons,
+            aegis_engine::render::pipeline::Reglages {
+                color_format: gpu.swapchain_format,
+                // Les particules se melangent et n'ecrivent pas la profondeur : sinon la premiere
+                // dessinee masquerait toutes celles qui sont derriere elle.
+                depth_format: Some(depth_format),
+                depth_write: false,
+                blend_enable: true,
+                use_vertex_input: true,
+                echantillons: cibles.echantillons,
+            },
         )?;
 
         unsafe {
@@ -637,6 +646,15 @@ impl PartyRenderPass {
             // ⚠ Le tampon d'instances est lie ICI, une fois pour toute la passe : tous les
             // dessins qui suivent y puisent, la grille comme les objets uniques comme le HUD.
             self.instances.lier(&context.device, cmd);
+            // Les quatre valeurs qui accompagnent chaque objet, reunies une fois : c'est le
+            // « ou je dessine » que chaque piege, chaque decor et chaque particule recevait
+            // jusqu'ici en quatre morceaux.
+            let pose = aegis_engine::render::instances::Pose {
+                device: &context.device,
+                cmd,
+                layout: self.pipeline_layout,
+                instances: &self.instances,
+            };
             let bilan =
                 self.file.dessiner(&context.device, cmd, &self.instances, &[&self.cube_mesh]);
             if bilan.ignores > 0 {
@@ -663,22 +681,22 @@ impl PartyRenderPass {
             for trap in &game.traps.traps {
                 match &trap.kind {
                     crate::traps::TrapKind::SawBlade { rotation, .. } => {
-                        self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, trap.position, *rotation);
+                        self.saw_obj.draw(&pose, vp, trap.position, *rotation);
                     }
                     crate::traps::TrapKind::CannonTurret { dir, .. } => {
-                        self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, Some(&self.cube_mesh), vp, trap.position, *dir, false);
+                        self.cannon_obj.draw(&pose, Some(&self.cube_mesh), vp, trap.position, *dir, false);
                     }
                     crate::traps::TrapKind::SpikeTrap => {
-                        self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, trap.position);
+                        self.spike_obj.draw(&pose, vp, trap.position);
                     }
                     crate::traps::TrapKind::LaserEmitter { dir, active, .. } => {
                         let beam_len = crate::traps::compute_laser_beam_length(trap.position, *dir, &game.grid);
                         let is_active = *active && game.phase == crate::party_game::GamePhase::Running;
-                        self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, trap.position, *dir, is_active, beam_len, trap_t);
+                        self.laser_obj.draw(&pose, &self.cube_mesh, vp, trap.position, *dir, is_active, beam_len, trap_t);
                     }
                     crate::traps::TrapKind::Flamethrower { dir, active, .. } => {
                         let is_active = *active && game.phase == crate::party_game::GamePhase::Running;
-                        self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, trap.position, *dir, is_active, trap_t);
+                        self.flame_obj.draw(&pose, &self.cube_mesh, vp, trap.position, *dir, is_active, trap_t);
                     }
                     _ => {}
                 }
@@ -741,7 +759,7 @@ impl PartyRenderPass {
                     game.grid.width as f32,
                     game.grid.height as f32,
                 );
-                self.box_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, box_pos, avancement);
+                self.box_obj.draw(&pose, vp, box_pos, avancement);
 
                 // Objets 3D Disponibles éparpillés DANS l'intérieur du carton ouvert sans piédestaux
                 if CardboardBoxObject::est_ouvert(avancement) {
@@ -757,11 +775,11 @@ impl PartyRenderPass {
                         let scale_mult = if is_selected { scale_factor * 1.25 } else { scale_factor };
 
                         match item {
-                            crate::mystery_box::ItemType::SawBlade => self.saw_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, vp, item_pos, scale_mult, 0.0),
-                            crate::mystery_box::ItemType::CannonTurret => self.cannon_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, None, vp, item_pos, crate::traps::Direction::Right, scale_mult, false),
-                            crate::mystery_box::ItemType::SpikeTrap => self.spike_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, vp, item_pos, scale_mult),
-                            crate::mystery_box::ItemType::LaserEmitter => self.laser_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Up, scale_mult, false, 0.0, 0.0),
-                            crate::mystery_box::ItemType::Flamethrower => self.flame_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Right, scale_mult, false, 0.0),
+                            crate::mystery_box::ItemType::SawBlade => self.saw_obj.draw_at_3d(&pose, vp, item_pos, scale_mult, 0.0),
+                            crate::mystery_box::ItemType::CannonTurret => self.cannon_obj.draw_at_3d(&pose, None, vp, item_pos, crate::traps::Direction::Right, scale_mult, false),
+                            crate::mystery_box::ItemType::SpikeTrap => self.spike_obj.draw_at_3d(&pose, vp, item_pos, scale_mult),
+                            crate::mystery_box::ItemType::LaserEmitter => self.laser_obj.draw_at_3d(&pose, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Up, scale_mult, false, 0.0, 0.0),
+                            crate::mystery_box::ItemType::Flamethrower => self.flame_obj.draw_at_3d(&pose, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Right, scale_mult, false, 0.0),
                             _ => {
                                 let block_color = match item {
                                     crate::mystery_box::ItemType::SolidBlock => Vec4::new(0.55, 0.35, 0.20, 1.0), // Terre / Marron
@@ -809,15 +827,15 @@ impl PartyRenderPass {
                     if let Some(item) = game.mystery_box.available_items.get(idx) {
                         match item {
                             crate::mystery_box::ItemType::SawBlade =>
-                                self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, item_pos_2d, t * 8.0),
+                                self.saw_obj.draw(&pose, vp, item_pos_2d, t * 8.0),
                             crate::mystery_box::ItemType::CannonTurret =>
-                                self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, Some(&self.cube_mesh), vp, item_pos_2d, dir, true),
+                                self.cannon_obj.draw(&pose, Some(&self.cube_mesh), vp, item_pos_2d, dir, true),
                             crate::mystery_box::ItemType::SpikeTrap =>
-                                self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, item_pos_2d),
+                                self.spike_obj.draw(&pose, vp, item_pos_2d),
                             crate::mystery_box::ItemType::LaserEmitter =>
-                                self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0, 0.0),
+                                self.laser_obj.draw(&pose, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0, 0.0),
                             crate::mystery_box::ItemType::Flamethrower =>
-                                self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0),
+                                self.flame_obj.draw(&pose, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0),
                             _ => {
                                 let item_m = Mat4::from_translation(Vec3::new(gx as f32 + 0.5, gy as f32 + 0.5, 0.3))
                                     * Mat4::from_scale(Vec3::splat(0.90));
