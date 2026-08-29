@@ -95,6 +95,27 @@ pub struct Ambiance {
     pub rugosite: f32,
     /// Réflectance à incidence normale. 0,04 pour les diélectriques (bois, pierre, plastique).
     pub reflectance: f32,
+    /// Combien la lumière DIRECTE est forte, par rapport à l'ambiante.
+    ///
+    /// ## ⭐ Le réglage qui décide si une image a du relief
+    ///
+    /// Ciel et sol ne font pas que peindre le fond : ce sont eux qui éclairent les faces qu'aucune
+    /// lampe n'atteint. Les baisser pour assombrir le fond assombrit donc **aussi les objets**, et
+    /// l'image reste aussi plate — plus sombre, mais plate.
+    ///
+    /// Ce qui donne du relief est le RAPPORT entre les deux. Une scène ensoleillée a une ambiante
+    /// faible et un soleil dur : les faces éclairées sont franches, les autres tombent dans une
+    /// ombre colorée. Une scène par temps couvert a l'inverse — beaucoup d'ambiante, pas de
+    /// direct — et **rien ne s'y détache de rien**.
+    ///
+    /// *Mesuré sur la scène du jeu : étendue tonale 20 points sur 100, 92 % de l'image perçue
+    /// comme grise. C'est exactement le portrait d'un temps couvert, et c'est ce qu'on décrivait
+    /// comme « tout triste » sans pouvoir le nommer.*
+    ///
+    /// ⚠ Comme `rugosite` et `reflectance`, ce champ est ici **faute d'un système de lumières que
+    /// le jeu puisse régler**. Le jour où les lumières se posent comme des objets de la scène, il
+    /// déménage avec elles et cette ligne disparaît.
+    pub intensite_soleil: f32,
 }
 
 impl Ambiance {
@@ -104,13 +125,14 @@ impl Ambiance {
     /// Ajouter un champ à `Ambiance` sans l'inscrire ici le rendrait invisible au laboratoire —
     /// donc un test compare cette liste au texte de la structure, plutôt que de compter sur la
     /// mémoire de qui ajoutera le prochain.
-    pub const CHAMPS: [(&'static str, usize); 6] = [
+    pub const CHAMPS: [(&'static str, usize); 7] = [
         ("ciel", 3),
         ("sol", 3),
         ("exposition", 1),
         ("point_blanc", 1),
         ("rugosite", 1),
         ("reflectance", 1),
+        ("intensite_soleil", 1),
     ];
 
     /// Change un réglage désigné par son nom.
@@ -157,6 +179,7 @@ impl Ambiance {
             }
             "rugosite" => self.rugosite = valeurs[0],
             "reflectance" => self.reflectance = valeurs[0],
+            "intensite_soleil" => self.intensite_soleil = valeurs[0],
             _ => unreachable!("la liste des champs a deja tranche"),
         }
         Ok(())
@@ -175,7 +198,8 @@ impl Ambiance {
              exposition: {:.3},\n    \
              point_blanc: {:.3},\n    \
              rugosite: {:.3},\n    \
-             reflectance: {:.3},\n}}",
+             reflectance: {:.3},\n    \
+             intensite_soleil: {:.3},\n}}",
             self.ciel[0],
             self.ciel[1],
             self.ciel[2],
@@ -186,6 +210,7 @@ impl Ambiance {
             self.point_blanc,
             self.rugosite,
             self.reflectance,
+            self.intensite_soleil,
         )
     }
 }
@@ -201,6 +226,9 @@ impl Default for Ambiance {
             point_blanc: 2.0,
             rugosite: 0.55,
             reflectance: 0.04,
+            // 2,45 = l'eclairement d'un soleil a 0,75, ramene par la conservation d'energie
+            // (0,75 x pi / 0,96). C'est la valeur qui etait ecrite en dur dans le jeu.
+            intensite_soleil: 2.45,
         }
     }
 }

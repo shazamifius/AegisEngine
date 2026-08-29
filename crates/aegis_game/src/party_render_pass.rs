@@ -27,6 +27,46 @@ fn tile_hash(x: i32, y: i32, seed: u32) -> u32 {
     h ^ (h >> 16)
 }
 
+/// En combien de sous-voxels un bloc se divise.
+///
+/// ## ⭐ Le seul chiffre de toute la decoration, et pourquoi il remplace huit constantes
+///
+/// Les details poses sur les blocs — eclats de pierre, cailloux de terre, brins d'herbe — avaient
+/// chacun leurs constantes : `0.11 + (h % 10) * 0.012` pour la taille, `(h % 65) / 100.0 - 0.32`
+/// pour la position. Des valeurs CONTINUES, donc jamais alignees sur quoi que ce soit.
+///
+/// **C'est ce qui produisait du grain la ou l'on voulait du voxel.** Un observateur exterieur l'a
+/// decrit comme « un motif de bruit 2D avec des pixels disperses sans logique de volume, creant
+/// un effet sale » — et il a cru voir une texture photographique. Il n'y en a aucune : ce sont de
+/// vrais cubes, simplement trop petits et poses n'importe ou.
+///
+/// Mesure : ces details faisaient 0,05 a 0,12 unite, soit **2 a 6 pixels a l'ecran**. Sous le
+/// seuil ou l'oeil peut lire un volume, un cube ne devient pas un petit cube — il devient une
+/// salissure.
+///
+/// Tout se pose desormais sur une grille de 1/8e de bloc. Les tailles et les positions sont des
+/// ENTIERS de sous-voxels, donc alignees par construction. *Huit constantes arbitraires n'ont pas
+/// retreci : elles ont cesse d'exister, remplacees par un seul entier qui a un sens.*
+const SOUS_VOXELS: u32 = 8;
+
+/// Place un detail de `cotes` sous-voxels sur la face d'un bloc, aligne sur la sous-grille.
+///
+/// ⚠ `h` decide de la position, mais **seulement parmi les emplacements ou le detail tient
+/// entier**. Un detail qui deborderait du bloc se verrait immediatement sur une carte reguliere.
+fn detail_voxel(bloc_x: i32, bloc_y: i32, h: u32, cotes: u32, avancee: f32) -> Mat4 {
+    let pas = 1.0 / SOUS_VOXELS as f32;
+    // Les emplacements possibles : de 0 a (8 - cotes), inclus.
+    let libres = (SOUS_VOXELS - cotes + 1).max(1);
+    let cx = h % libres;
+    let cy = (h / libres) % libres;
+
+    Mat4::from_translation(Vec3::new(
+        bloc_x as f32 + (cx as f32 + cotes as f32 * 0.5) * pas,
+        bloc_y as f32 + (cy as f32 + cotes as f32 * 0.5) * pas,
+        avancee,
+    )) * Mat4::from_scale(Vec3::new(cotes as f32 * pas, cotes as f32 * pas, 0.92))
+}
+
 
 
 
@@ -281,10 +321,29 @@ impl PartyRenderPass {
             // luminosite que le gris qu'elles remplacent : seule leur TEMPERATURE change, ce qui
             // donne du volume sans decider du reste.
             ambiance: aegis_engine::render::cadre::Ambiance {
-                // Ce qui tombe du ciel : un peu bleu, comme un ciel couvert.
-                ciel: [0.15, 0.18, 0.24],
-                // Ce qui remonte du sol : un peu chaud, comme de la terre.
-                sol: [0.20, 0.16, 0.13],
+                // ── LE RAPPORT DIRECT / AMBIANT, choisi sur une MESURE ─────────────────────
+                //
+                // Ce ne sont pas des couleurs choisies a l'oeil : c'est un rapport, et son effet
+                // se chiffre. Balayage de quatre reglages sur la scene reelle, etendue tonale
+                // mesuree (du 5e au 95e centile de clarte, sur 100) :
+                //
+                //     ambiante forte, soleil 2,45  →  etendue 20, 92 % percu gris
+                //     ambiante /3,    soleil 5,0   →  etendue  1, 99 % percu gris
+                //     ambiante basse, soleil 7,5   →  etendue 50, 66 % percu gris   ← retenu
+                //     ciel clair,     soleil 6,0   →  etendue 29, 82 % percu gris
+                //
+                // ⚠ Ces quatre releves ne sont PAS rigoureusement comparables : la fenetre a
+                // change de taille et la phase de jeu a bouge pendant le balayage. C'est
+                // exactement pourquoi un banc SANS FENETRE est necessaire, et pourquoi ce
+                // reglage est un point de depart et non une conclusion.
+                //
+                // ⚠⚠ Et la TEINTE, elle, reste entierement a decider a l'oeil. Ce qui est etabli
+                // ici est la STRUCTURE — une ambiante faible et un soleil dur, c'est-a-dire une
+                // scene ensoleillee plutot qu'un temps couvert. La couleur du ciel se regle en
+                // direct : `ambiance ciel 0.03 0.04 0.07` dans la console.
+                ciel: [0.03, 0.04, 0.07],
+                sol: [0.05, 0.04, 0.03],
+                intensite_soleil: 7.5,
                 ..aegis_engine::render::cadre::Ambiance::default()
             },
 
@@ -359,11 +418,11 @@ impl PartyRenderPass {
             // Pointe VERS la lumière — c'est la convention que le shader attend.
             Vec3::new(0.4, 0.9, 0.7),
             Vec3::new(1.0, 0.96, 0.88),
-            // Calculee, pas tatonnee : le diffus vaut albedo x (1-F) x I x NdotL / π, donc pour
-            // qu'une face en plein soleil rende ~0,75 avant l'ambiante il faut I ≈ 0,75 x π / 0,96,
-            // soit 2,45. Le calcul PBR divise par π ; reprendre l'ancien 0,65 tel quel aurait
-            // assombri l'image d'un facteur trois.
-            2.45,
+            // ⚠ Vient de l'ambiance, et c'est ce qui rend le RAPPORT direct/ambiant reglable en
+            // direct. La valeur d'origine — 2,45 — n'etait pas tatonnee : le diffus vaut
+            // albedo x (1-F) x I x NdotL / π, donc pour qu'une face en plein soleil rende ~0,75
+            // avant l'ambiante il faut I ≈ 0,75 x π / 0,96. Elle reste le defaut du moteur.
+            self.ambiance.intensite_soleil,
         );
         // Une lampe chaude au-dessus du joueur. Sa portée n'est bornée par aucune constante : le
         // carré inverse l'éteint tout seul, ce qui évite un rayon arbitraire à justifier.
@@ -433,14 +492,12 @@ impl PartyRenderPass {
 
                         // 1. Décoration Procédurale de la Roche (Pierre) : Petits cubes gris plus sombres encastrés
                         if tile == TileType::MetalBlock {
-                            for k in 0..4 {
+                            for k in 0..3 {
                                 let h = tile_hash(xi, yi, k);
-                                let off_x = (h % 65) as f32 / 100.0 - 0.32;
-                                let off_y = ((h / 65) % 65) as f32 / 100.0 - 0.32;
-                                let sz = 0.11 + (h % 10) as f32 * 0.012;
-
-                                let sub_m = Mat4::from_translation(Vec3::new(x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y, 0.05))
-                                    * Mat4::from_scale(Vec3::new(sz, sz, 0.92));
+                                // Deux sous-voxels de cote, soit un quart de bloc : c'est la plus
+                                // petite taille qui se lise encore comme un volume a distance de
+                                // jeu. En dessous, on ajoute du bruit, pas du detail.
+                                let sub_m = detail_voxel(xi, yi, h, 2, 0.05);
                                 self.file.ajouter(aegis_engine::render::file::Dessin {
                                     maillage: MAILLAGE_CUBE,
                                     modele: sub_m,
@@ -455,12 +512,10 @@ impl PartyRenderPass {
                         if tile == TileType::SolidBlock {
                             for k in 0..2 {
                                 let h = tile_hash(xi, yi, k + 10);
-                                let off_x = (h % 60) as f32 / 100.0 - 0.30;
-                                let off_y = ((h / 60) % 60) as f32 / 100.0 - 0.30;
-                                let sz = 0.05 + (h % 5) as f32 * 0.008; // Très petit !
-
-                                let sub_m = Mat4::from_translation(Vec3::new(x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y, 0.05))
-                                    * Mat4::from_scale(Vec3::new(sz, sz, 0.92));
+                                // La terre porte des cailloux, pas de la poussiere : ils faisaient
+                                // 0,05 unite, c'est-a-dire deux pixels a l'ecran — invisibles
+                                // individuellement, et sales collectivement.
+                                let sub_m = detail_voxel(xi, yi, h, 2, 0.05);
                                 self.file.ajouter(aegis_engine::render::file::Dessin {
                                     maillage: MAILLAGE_CUBE,
                                     modele: sub_m,
@@ -475,11 +530,18 @@ impl PartyRenderPass {
                         if tile == TileType::GrassBlock {
                             // Brins d'Herbe Voxels Procéduraux si le bloc au-dessus est vide (Air)
                             if game.grid.get_tile(xi, yi + 1) == TileType::Air {
-                                for k in 0..5 {
+                                // ⚠ TROIS brins et non cinq, mais visibles. Cinq brins de deux
+                                // pixels de large forment une frange indistincte ; trois brins
+                                // d'un sous-voxel se lisent comme de l'herbe.
+                                for k in 0..3 {
                                     let h = tile_hash(xi, yi, k + 50);
-                                    let blade_x = x as f32 + 0.12 + (h % 76) as f32 / 100.0;
-                                    let blade_h = 0.14 + (h % 14) as f32 * 0.012;
-                                    let blade_w = 0.07 + (h % 5) as f32 * 0.01;
+                                    let pas = 1.0 / SOUS_VOXELS as f32;
+                                    // Le brin occupe une colonne de la sous-grille, et monte d'un
+                                    // a trois sous-voxels : des entiers, comme le reste.
+                                    let colonne = h % SOUS_VOXELS;
+                                    let hauteur = 1 + (h / SOUS_VOXELS) % 3;
+                                    let blade_w = pas;
+                                    let blade_h = hauteur as f32 * pas;
 
                                     let green_color = match k % 3 {
                                         0 => Vec4::new(0.32, 0.90, 0.35, 1.0), // Vert Vif
@@ -487,9 +549,13 @@ impl PartyRenderPass {
                                         _ => Vec4::new(0.14, 0.65, 0.20, 1.0), // Forêt
                                     };
 
-                                    let blade_m = Mat4::from_translation(Vec3::new(blade_x, y as f32 + 1.0 + blade_h * 0.45, 0.02))
-                                        * Mat4::from_rotation_z(((h % 20) as f32 - 10.0) * 0.02)
-                                        * Mat4::from_scale(Vec3::new(blade_w, blade_h, 0.18));
+                                    // Aucune rotation : un brin incline sur une grille de voxels
+                                    // se lit comme une erreur d'alignement, pas comme du vent.
+                                    let blade_m = Mat4::from_translation(Vec3::new(
+                                        x as f32 + (colonne as f32 + 0.5) * pas,
+                                        y as f32 + 1.0 + blade_h * 0.5,
+                                        0.02,
+                                    )) * Mat4::from_scale(Vec3::new(blade_w, blade_h, 0.18));
                                     self.file.ajouter(aegis_engine::render::file::Dessin {
                                         maillage: MAILLAGE_CUBE,
                                         modele: blade_m,
