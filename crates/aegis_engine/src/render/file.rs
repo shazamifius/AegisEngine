@@ -123,37 +123,74 @@ impl File {
     /// # Safety
     /// Le tampon de commandes doit être en cours d'enregistrement, dans une passe de rendu
     /// compatible avec `layout`, et les maillages doivent être vivants.
+    /// Joue la file : **un appel de dessin par MAILLAGE**, pas par objet.
+    ///
+    /// ⭐ C'est ici que 3 458 appels par image sont devenus quelques dizaines. La file etait deja
+    /// triee par maillage (`regrouper`) ; il ne restait qu'a s'en servir — chaque suite d'objets
+    /// partageant la meme geometrie devient une seule instruction a la carte.
+    ///
+    /// ⚠ La file doit avoir ete `regrouper()`ee, sinon les groupes sont fragmentes et le gain
+    /// s'evapore sans que rien ne paraisse faux. Le nombre de groupes reellement emis est rendu,
+    /// pour qu'on puisse le VOIR plutot que l'esperer.
     pub unsafe fn dessiner(
         &self,
         device: &ash::Device,
         cmd: ash::vk::CommandBuffer,
-        layout: ash::vk::PipelineLayout,
+        instances: &crate::render::instances::Instances,
         maillages: &[&crate::geometry::gpu_mesh::GpuMesh],
-    ) -> usize {
-        let mut ignores = 0;
-        for d in &self.dessins {
-            let Some(maillage) = maillages.get(d.maillage as usize) else {
-                ignores += 1;
-                continue;
+    ) -> Bilan {
+        let mut bilan = Bilan::default();
+        let mut lot: Vec<crate::render::instances::Instance> = Vec::new();
+        let mut maillage_courant: Option<u16> = None;
+
+        // Emet le lot accumule, s'il y en a un.
+        let vider = |lot: &mut Vec<crate::render::instances::Instance>,
+                         courant: Option<u16>,
+                         bilan: &mut Bilan| {
+            let (Some(id), false) = (courant, lot.is_empty()) else {
+                lot.clear();
+                return;
             };
-            let push = crate::render::push_constants::PushConstants {
-                model_matrix: d.modele,
-                color_tint: d.teinte,
-                params: d.params,
+            let Some(maillage) = maillages.get(id as usize) else {
+                bilan.ignores += lot.len();
+                lot.clear();
+                return;
             };
-            unsafe {
-                device.cmd_push_constants(
-                    cmd,
-                    layout,
-                    ash::vk::ShaderStageFlags::VERTEX | ash::vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    crate::bytes::as_bytes(&push),
-                );
+            if let Some(premiere) = instances.poser(lot) {
+                maillage.dessiner_instances(device, cmd, premiere, lot.len() as u32);
+                bilan.groupes += 1;
+            } else {
+                bilan.ignores += lot.len();
             }
-            maillage.draw(device, cmd);
+            lot.clear();
+        };
+
+        for d in &self.dessins {
+            if maillage_courant != Some(d.maillage) {
+                vider(&mut lot, maillage_courant, &mut bilan);
+                maillage_courant = Some(d.maillage);
+            }
+            lot.push(crate::render::instances::Instance {
+                modele: d.modele,
+                teinte: d.teinte,
+                params: d.params,
+            });
         }
-        ignores
+        vider(&mut lot, maillage_courant, &mut bilan);
+        bilan
     }
+}
+
+/// Ce qu'une lecture de la file a reellement produit.
+///
+/// ⚠ Rendu plutot que journalise : *un compte qu'on ne peut pas lire est un compte auquel on
+/// finit par croire.* C'est ce chiffre, et lui seul, qui dit si le regroupement a servi.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Bilan {
+    /// Combien d'appels de dessin ont ete emis.
+    pub groupes: usize,
+    /// Combien d'objets n'ont pas ete dessines — maillage inconnu, ou tampon plein.
+    pub ignores: usize,
 }
 
 #[cfg(test)]

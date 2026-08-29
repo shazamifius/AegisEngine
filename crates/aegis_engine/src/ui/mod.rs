@@ -16,7 +16,6 @@
 //! à s'en occuper.
 
 use ash::vk;
-use crate::bytes::as_bytes;
 use crate::geometry::gpu_mesh::GpuMesh;
 use crate::math::{Mat4, Vec3, Vec4};
 use crate::render::push_constants::PushConstants;
@@ -250,6 +249,12 @@ pub struct Pinceau<'a> {
     pub cube: &'a GpuMesh,
     /// Largeur de la fenêtre divisée par sa hauteur.
     pub aspect: f32,
+    /// Tout ce qui a été dessiné, en attente d'un unique appel.
+    ///
+    /// ⚠ En `RefCell` parce que les méthodes de dessin prennent `&self` : les rendre `&mut self`
+    /// obligerait chaque écran du HUD à porter une référence mutable, et l'on ne pourrait plus
+    /// lire l'état du jeu en même temps qu'on le dessine. Même arbitrage que le chronomètre GPU.
+    pub lot: std::cell::RefCell<Vec<crate::render::instances::Instance>>,
 }
 
 impl Pinceau<'_> {
@@ -267,15 +272,29 @@ impl Pinceau<'_> {
             color_tint: couleur,
             params: Vec4::new(0.0, 0.0, 0.0, COULEUR_PLATE),
         };
-        unsafe {
-            self.device.cmd_push_constants(
-                self.cmd,
-                self.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                as_bytes(&push),
-            );
-            self.cube.draw(self.device, self.cmd);
+        // ⚠ On ACCUMULE au lieu de dessiner : chaque lettre du HUD est un quad, et une ligne
+        // de texte en compte des dizaines. Les emettre un par un, c'etait des centaines d'appels
+        // de dessin pour afficher un score. Tout part en un seul appel dans `terminer`.
+        self.lot.borrow_mut().push(crate::render::instances::Instance {
+            modele: push.model_matrix,
+            teinte: push.color_tint,
+            params: push.params,
+        });
+    }
+
+    /// Emet tout ce qui a ete dessine depuis le debut, en **un seul appel**.
+    ///
+    /// ⚠ A appeler une fois, apres le dernier trait du HUD. L'oublier ne produit aucune erreur :
+    /// l'interface disparait simplement, ce qui est le genre de defaut qu'on met du temps a
+    /// attribuer. L'ordre d'emission n'a pas d'importance ici — c'est la COUCHE, portee par la
+    /// profondeur de chaque quad, qui decide de ce qui passe devant.
+    pub fn terminer(&self, instances: &crate::render::instances::Instances) {
+        let lot = self.lot.borrow();
+        if lot.is_empty() {
+            return;
+        }
+        if let Some(premiere) = instances.poser(&lot) {
+            self.cube.dessiner_instances(self.device, self.cmd, premiere, lot.len() as u32);
         }
     }
 

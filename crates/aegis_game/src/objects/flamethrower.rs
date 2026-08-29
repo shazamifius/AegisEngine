@@ -2,7 +2,6 @@ use ash::vk;
 use aegis_engine::math::{Mat4, Vec2, Vec3, Vec4};
 use aegis_engine::GpuContext;
 use aegis_engine::geometry::glb_loader::GlbLoader;
-use aegis_engine::bytes::as_bytes;
 use aegis_engine::geometry::gpu_mesh::GpuMesh;
 use aegis_engine::render::push_constants::PushConstants;
 use crate::traps::Direction;
@@ -20,8 +19,9 @@ impl FlamethrowerObject {
         Ok(Self { mesh })
     }
 
-    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer, pipeline_layout: vk::PipelineLayout, cube_mesh: &GpuMesh, vp: Mat4, pos: Vec2, dir: Direction, active: bool, time: f32) {
-        self.draw_at_3d(device, cmd, pipeline_layout, cube_mesh, vp, Vec3::new(pos.x, pos.y, 0.1), dir, 1.0, active, time);
+    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer, pipeline_layout: vk::PipelineLayout,
+        instances: &aegis_engine::render::instances::Instances, cube_mesh: &GpuMesh, vp: Mat4, pos: Vec2, dir: Direction, active: bool, time: f32) {
+        self.draw_at_3d(device, cmd, pipeline_layout, instances, cube_mesh, vp, Vec3::new(pos.x, pos.y, 0.1), dir, 1.0, active, time);
     }
 
     pub fn draw_at_3d(
@@ -29,6 +29,7 @@ impl FlamethrowerObject {
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         pipeline_layout: vk::PipelineLayout,
+        instances: &aegis_engine::render::instances::Instances,
         cube_mesh: &GpuMesh,
         vp: Mat4,
         pos: Vec3,
@@ -58,10 +59,7 @@ impl FlamethrowerObject {
             params: Vec4::new(0.1, 1.5, 0.0, 0.0),
         };
 
-        unsafe {
-            device.cmd_push_constants(cmd, pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
-        }
-        self.mesh.draw(device, cmd);
+        instances.dessiner_avec(device, cmd, &self.mesh, &push);
 
         // Particules Carrées Voxel Rétro-Style (Strictement max 5 blocs long, 1 bloc haut)
         if active {
@@ -122,10 +120,7 @@ impl FlamethrowerObject {
                     params: Vec4::new(0.0, 10.0, 0.0, 0.0),
                 };
 
-                unsafe {
-                    device.cmd_push_constants(cmd, pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_particle));
-                }
-                cube_mesh.draw(device, cmd);
+                instances.dessiner_avec(device, cmd, &cube_mesh, &push_particle);
             }
         }
     }

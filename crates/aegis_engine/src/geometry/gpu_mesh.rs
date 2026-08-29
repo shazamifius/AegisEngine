@@ -67,15 +67,30 @@ impl GpuMesh {
         })
     }
 
-    pub fn draw(&self, device: &ash::Device, cmd: vk::CommandBuffer) {
+    /// Dessine ce maillage en `combien` exemplaires, à partir de l'instance `premiere`.
+    ///
+    /// ⭐ C'est LE geste qui a fait tomber les appels de dessin de 3 458 à quelques dizaines : les
+    /// mille cubes d'une carte partagent la même géométrie et ne different que par leur instance.
+    /// Les demander un par un, c'était payer mille fois le prix d'une conversation avec la carte
+    /// pour lui redire la même chose.
+    pub fn dessiner_instances(
+        &self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        premiere: u32,
+        combien: u32,
+    ) {
+        if combien == 0 {
+            return;
+        }
         // Le passage obligé de tout maillage : compter ICI, c'est compter tout ce qui est dessiné,
         // sans demander à personne d'y penser. Un compteur qu'on appelle à la main finit toujours
         // par manquer le dessin ajouté un soir de correction.
-        crate::mesure::noter_dessin(self.index_count / 3);
+        crate::mesure::noter_dessin(self.index_count / 3 * combien);
         unsafe {
             device.cmd_bind_vertex_buffers(cmd, 0, &[self.vertex_buffer], &[0]);
             device.cmd_bind_index_buffer(cmd, self.index_buffer, 0, vk::IndexType::UINT32);
-            device.cmd_draw_indexed(cmd, self.index_count, 1, 0, 0, 0);
+            device.cmd_draw_indexed(cmd, self.index_count, combien, 0, 0, premiere);
         }
     }
 }

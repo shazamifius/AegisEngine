@@ -2,7 +2,6 @@ use ash::vk;
 use aegis_engine::math::{Mat4, Vec3, Vec4};
 use aegis_engine::GpuContext;
 use aegis_engine::geometry::glb_loader::GlbLoader;
-use aegis_engine::bytes::as_bytes;
 use aegis_engine::geometry::gpu_mesh::GpuMesh;
 use aegis_engine::render::push_constants::PushConstants;
 
@@ -24,6 +23,7 @@ impl RockObject {
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         pipeline_layout: vk::PipelineLayout,
+        instances: &aegis_engine::render::instances::Instances,
         vp: Mat4,
         pos: Vec3,
     ) {
@@ -36,9 +36,6 @@ impl RockObject {
             params: Vec4::new(0.3, 1.0, 0.0, 0.0),
         };
 
-        unsafe {
-            device.cmd_push_constants(cmd, pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
-        }
-        self.mesh.draw(device, cmd);
+        instances.dessiner_avec(device, cmd, &self.mesh, &push);
     }
 }

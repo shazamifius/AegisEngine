@@ -89,10 +89,15 @@ impl PipelineFactory {
                 .name(fs_entry),
         ];
 
-        let vertex_binding_descriptions = [vk::VertexInputBindingDescription::default()
-            .binding(0)
-            .stride(std::mem::size_of::<crate::geometry::vertex::Vertex>() as u32)
-            .input_rate(vk::VertexInputRate::VERTEX)];
+        // Deux points de liaison : le maillage (lu par sommet) et les instances (lues par objet).
+        // ⚠ Les intervertir donne une geometrie explosee sans qu'aucune erreur ne soit levee.
+        let vertex_binding_descriptions = [
+            vk::VertexInputBindingDescription::default()
+                .binding(0)
+                .stride(std::mem::size_of::<crate::geometry::vertex::Vertex>() as u32)
+                .input_rate(vk::VertexInputRate::VERTEX),
+            crate::render::instances::liaison(),
+        ];
 
         let vertex_attribute_descriptions = [
             vk::VertexInputAttributeDescription::default()
@@ -121,6 +126,13 @@ impl PipelineFactory {
                 .format(vk::Format::R32G32_SFLOAT)
                 .offset(std::mem::offset_of!(crate::geometry::vertex::Vertex, uv1) as u32),
         ];
+        // Les six attributs d'instance viennent du moteur, pas d'ici : leur agencement doit
+        // suivre `Instance` a l'octet pres, et une seconde description a tenir divergerait.
+        let vertex_attribute_descriptions: Vec<vk::VertexInputAttributeDescription> =
+            vertex_attribute_descriptions
+                .into_iter()
+                .chain(crate::render::instances::attributs())
+                .collect();
 
         let vertex_input_info = if use_vertex_input {
             vk::PipelineVertexInputStateCreateInfo::default()

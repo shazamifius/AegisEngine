@@ -2,7 +2,6 @@ use ash::vk;
 use aegis_engine::math::{Mat4, Vec3, Vec4};
 use aegis_engine::GpuContext;
 use aegis_engine::geometry::glb_loader::GlbLoader;
-use aegis_engine::bytes::as_bytes;
 use aegis_engine::geometry::gpu_mesh::GpuMesh;
 use aegis_engine::render::push_constants::PushConstants;
 
@@ -100,6 +99,7 @@ impl CardboardBoxObject {
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         pipeline_layout: vk::PipelineLayout,
+        instances: &aegis_engine::render::instances::Instances,
         vp: Mat4,
         pos: Vec3,
         avancement: f32,
@@ -142,10 +142,6 @@ impl CardboardBoxObject {
             params: Vec4::new(0.3, 0.0, 0.0, 0.0),
         };
 
-        unsafe {
-            device.cmd_push_constants(cmd, pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
-        }
-
-        mesh_to_draw.draw(device, cmd);
+        instances.dessiner_avec(device, cmd, mesh_to_draw, &push);
     }
 }

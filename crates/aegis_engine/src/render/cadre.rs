@@ -509,6 +509,44 @@ mod tests {
         );
     }
 
+    /// ⚠⚠ LA GARDE QUI REMPLACE LA PRECEDENTE : plus rien ne DOIT pousser de constantes.
+    ///
+    /// Le test ci-dessus veillait a ce qu'elles tiennent sous 128 octets. Depuis
+    /// l'instanciation (30 aout 2026), il n'y en a plus une seule : la description d'un objet
+    /// voyage dans un tampon d'instances, qui n'a pas de plafond.
+    ///
+    /// *Un test qui garde une propriete devenue vide est un test mort* — il reste vert quoi qu'il
+    /// arrive et donne l'illusion d'une surveillance. Celui-ci garde ce qui est vrai maintenant :
+    /// qu'aucun chemin de rendu ne rouvre cette porte par commodite, et ne ramene avec elle la
+    /// limite qui a failli rendre le moteur incapable de demarrer sur un Quest 2.
+    #[test]
+    fn plus_aucun_chemin_de_rendu_ne_pousse_de_constantes() {
+        let fichiers: [(&str, &str); 4] = [
+            ("render/file.rs", include_str!("file.rs")),
+            ("render/ombre.rs", include_str!("ombre.rs")),
+            ("render/instances.rs", include_str!("instances.rs")),
+            ("ui/mod.rs", include_str!("../ui/mod.rs")),
+        ];
+
+        let mut coupables = Vec::new();
+        for (nom, source) in fichiers {
+            for (numero, ligne) in source.lines().enumerate() {
+                let code = ligne.split("//").next().unwrap_or("");
+                if code.contains("cmd_push_constants") {
+                    coupables.push(format!("{nom} ligne {}", numero + 1));
+                }
+            }
+        }
+
+        assert!(
+            coupables.is_empty(),
+            "ces chemins poussent encore des constantes, alors que tout passe par les \
+             instances :\n  {}\nUne seconde facon de decrire un objet, c'est un second format a \
+             tenir — et le retour du plafond de 128 octets.",
+            coupables.join("\n  ")
+        );
+    }
+
     /// ⚠⚠ LE TEST QUI REND LA FRONTIÈRE INATTEIGNABLE, pas seulement écrite.
     ///
     /// Le shader d'éclairage du moteur ne doit contenir **aucune couleur**. Une couleur y est une

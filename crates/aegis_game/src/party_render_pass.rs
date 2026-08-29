@@ -1,6 +1,5 @@
 use ash::vk;
 use aegis_engine::math::{Mat4, Vec2, Vec3, Vec4};
-use aegis_engine::bytes::as_bytes;
 use aegis_engine::GpuContext;
 use aegis_engine::geometry::primitives::Primitives;
 use aegis_engine::render::pipeline::PipelineFactory;
@@ -91,6 +90,13 @@ pub struct PartyRenderPass {
     /// Les images dans lesquelles l'image se fabrique : la profondeur, et — quand la carte sait
     /// anti-creneler — une couleur multi-echantillonnee resolue vers l'ecran a la fin de la passe.
     cibles: aegis_engine::render::cibles::Cibles,
+    /// Le tampon d'instances : tout ce qui se dessine y passe, la foule de cubes comme le HUD.
+    ///
+    /// ⚠ 65 536 emplacements, soit 6 Mo. La carte la plus dense mesuree en pose ~3 500 ; le reste
+    /// est de la marge pour les particules et l'interface. Un depassement ne casse rien — les
+    /// objets en trop ne sont pas dessines et le compte est JOURNALISE, plutot que de disparaitre
+    /// en silence.
+    instances: aegis_engine::render::instances::Instances,
     /// La direction artistique de CE jeu : couleur du ciel, du sol, exposition, courbe.
     ///
     /// ⚠ Elle vit ici, jamais dans le moteur, et elle est MUTABLE parce que son juge est un œil :
@@ -157,15 +163,19 @@ impl PartyRenderPass {
             &[],
         )?;
 
-        let push_constant_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-            .offset(0)
-            .size(std::mem::size_of::<PushConstants>() as u32);
-
+        // ⭐ PLUS AUCUNE CONSTANTE POUSSEE, et c'est le vrai denouement d'un chantier entier.
+        //
+        // Le moteur en poussait 160 octets la ou Vulkan n'en garantit que 128 : il fonctionnait
+        // ici (256 sur cette carte) et aurait tres probablement refuse de creer son pipeline sur
+        // un Quest 2. On les avait ramenees a 96 ; elles ont maintenant DISPARU, remplacees par
+        // un tampon d'instances qui n'a pas de plafond.
+        //
+        // *La constante arbitraire n'a pas retreci, elle a cesse d'exister* — et avec elle toute
+        // une classe de pannes qui ne se seraient manifestees que chez quelqu'un d'autre.
         let pipeline_layout = PipelineFactory::create_pipeline_layout(
             &gpu.device,
             std::slice::from_ref(&cadre.layout_descripteur),
-            &[push_constant_range],
+            &[],
         )?;
 
         // ⚠ L'ordre est FORCE par une dependance : l'ombre a besoin du layout de pipeline, qui a
@@ -249,6 +259,7 @@ impl PartyRenderPass {
             box_obj,
 
             cibles,
+            instances: aegis_engine::render::instances::Instances::nouveau(gpu, memory_props, 65_536)?,
             // ── LE POINT DE DEPART DE LA DIRECTION ARTISTIQUE — a regler a l'oeil ───────────
             //
             // ⚠ Ce n'est PAS un choix esthetique arrete : c'est un point de depart, et il attend
@@ -383,6 +394,9 @@ impl PartyRenderPass {
             // La file se remplit ici, AVANT toute passe de rendu, parce que la carte d'ombre a
             // besoin de la connaitre pour rejouer la scene depuis la lumiere. Ce bloc ne fait
             // aucun appel Vulkan : il decrit, il ne dessine pas.
+            // Une image neuve : le tampon d'instances repart de zero. ⚠ L'oublier ferait
+            // deborder au bout de quelques images, et les objets disparaitraient un par un.
+            self.instances.recommencer();
             self.file.vider();
                         for y in 0..game.grid.height {
                 for x in 0..game.grid.width {
@@ -489,6 +503,7 @@ impl PartyRenderPass {
                     cmd,
                     self.pipeline_layout,
                     &self.file,
+                    &self.instances,
                     &[&self.cube_mesh],
                 );
             }
@@ -619,10 +634,16 @@ impl PartyRenderPass {
             // La file est jouee ICI, apres avoir ete remplie. Le meme contenu servira
             // a la passe d'ombre, sans que le jeu ait a redire ce qu'il y a a dessiner.
             // Deja dans le bloc unsafe de la passe : pas de second niveau.
-            let ignores =
-                self.file.dessiner(&context.device, cmd, self.pipeline_layout, &[&self.cube_mesh]);
-            if ignores > 0 {
-                log::warn!("file de rendu : {ignores} dessins ignores (maillage inconnu)");
+            // ⚠ Le tampon d'instances est lie ICI, une fois pour toute la passe : tous les
+            // dessins qui suivent y puisent, la grille comme les objets uniques comme le HUD.
+            self.instances.lier(&context.device, cmd);
+            let bilan =
+                self.file.dessiner(&context.device, cmd, &self.instances, &[&self.cube_mesh]);
+            if bilan.ignores > 0 {
+                log::warn!(
+                    "file de rendu : {} dessins ignores (maillage inconnu ou tampon plein)",
+                    bilan.ignores
+                );
             }
             // Rendu de l'Immense Bande Noire du Vide (Void Kill Line - 5 blocs en dessous du bloc le plus bas)
             let void_y = game.grid.get_void_kill_y();
@@ -635,30 +656,29 @@ impl PartyRenderPass {
                 params: Vec4::new(0.8, 0.0, 0.0, 0.0),
             };
 
-            context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_void));
-            self.cube_mesh.draw(&context.device, cmd);
+            self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_void);
 
             // ─── Rendu des Pièges et Objets 3D Posés            // ─── Rendu des Pièges et Objets 3D Posés sur la Carte ─────────────────────
             let trap_t = game.round_timer;
             for trap in &game.traps.traps {
                 match &trap.kind {
                     crate::traps::TrapKind::SawBlade { rotation, .. } => {
-                        self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, vp, trap.position, *rotation);
+                        self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, trap.position, *rotation);
                     }
                     crate::traps::TrapKind::CannonTurret { dir, .. } => {
-                        self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, Some(&self.cube_mesh), vp, trap.position, *dir, false);
+                        self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, Some(&self.cube_mesh), vp, trap.position, *dir, false);
                     }
                     crate::traps::TrapKind::SpikeTrap => {
-                        self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, vp, trap.position);
+                        self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, trap.position);
                     }
                     crate::traps::TrapKind::LaserEmitter { dir, active, .. } => {
                         let beam_len = crate::traps::compute_laser_beam_length(trap.position, *dir, &game.grid);
                         let is_active = *active && game.phase == crate::party_game::GamePhase::Running;
-                        self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, trap.position, *dir, is_active, beam_len, trap_t);
+                        self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, trap.position, *dir, is_active, beam_len, trap_t);
                     }
                     crate::traps::TrapKind::Flamethrower { dir, active, .. } => {
                         let is_active = *active && game.phase == crate::party_game::GamePhase::Running;
-                        self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, trap.position, *dir, is_active, trap_t);
+                        self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, trap.position, *dir, is_active, trap_t);
                     }
                     _ => {}
                 }
@@ -676,8 +696,7 @@ impl PartyRenderPass {
                     color_tint: Vec4::new(1.00, 0.85, 0.20, 1.0), // Or Incandescent Vif
                     params: Vec4::new(0.0, 14.0, 0.0, 0.0),        // Lueur émissive
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_bullet));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_bullet);
 
                 // 2. Traînée de Balle Voxel Décroissante (Trail)
                 let trail_steps = 7;
@@ -703,8 +722,7 @@ impl PartyRenderPass {
                         color_tint: trail_color,
                         params: Vec4::new(0.0, 8.0, 0.0, 0.0),
                     };
-                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_trail));
-                    self.cube_mesh.draw(&context.device, cmd);
+                    self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_trail);
                 }
             }
 
@@ -723,7 +741,7 @@ impl PartyRenderPass {
                     game.grid.width as f32,
                     game.grid.height as f32,
                 );
-                self.box_obj.draw(&context.device, cmd, self.pipeline_layout, vp, box_pos, avancement);
+                self.box_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, box_pos, avancement);
 
                 // Objets 3D Disponibles éparpillés DANS l'intérieur du carton ouvert sans piédestaux
                 if CardboardBoxObject::est_ouvert(avancement) {
@@ -739,11 +757,11 @@ impl PartyRenderPass {
                         let scale_mult = if is_selected { scale_factor * 1.25 } else { scale_factor };
 
                         match item {
-                            crate::mystery_box::ItemType::SawBlade => self.saw_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, vp, item_pos, scale_mult, 0.0),
-                            crate::mystery_box::ItemType::CannonTurret => self.cannon_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, None, vp, item_pos, crate::traps::Direction::Right, scale_mult, false),
-                            crate::mystery_box::ItemType::SpikeTrap => self.spike_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, vp, item_pos, scale_mult),
-                            crate::mystery_box::ItemType::LaserEmitter => self.laser_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Up, scale_mult, false, 0.0, 0.0),
-                            crate::mystery_box::ItemType::Flamethrower => self.flame_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Right, scale_mult, false, 0.0),
+                            crate::mystery_box::ItemType::SawBlade => self.saw_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, vp, item_pos, scale_mult, 0.0),
+                            crate::mystery_box::ItemType::CannonTurret => self.cannon_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, None, vp, item_pos, crate::traps::Direction::Right, scale_mult, false),
+                            crate::mystery_box::ItemType::SpikeTrap => self.spike_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, vp, item_pos, scale_mult),
+                            crate::mystery_box::ItemType::LaserEmitter => self.laser_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Up, scale_mult, false, 0.0, 0.0),
+                            crate::mystery_box::ItemType::Flamethrower => self.flame_obj.draw_at_3d(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, item_pos, crate::traps::Direction::Right, scale_mult, false, 0.0),
                             _ => {
                                 let block_color = match item {
                                     crate::mystery_box::ItemType::SolidBlock => Vec4::new(0.55, 0.35, 0.20, 1.0), // Terre / Marron
@@ -760,8 +778,7 @@ impl PartyRenderPass {
                                     color_tint: block_color,
                                     params: Vec4::new(0.3, 1.0, 0.0, 0.0),
                                 };
-                                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_item));
-                                self.cube_mesh.draw(&context.device, cmd);
+                                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_item);
                             }
                         }
 
@@ -775,8 +792,7 @@ impl PartyRenderPass {
                                 color_tint: Vec4::new(0.98, 0.85, 0.15, 1.0),
                                 params: Vec4::new(0.0, 8.0, 0.0, 0.0),
                             };
-                            context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_gem));
-                            self.cube_mesh.draw(&context.device, cmd);
+                            self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_gem);
                         }
                     }
                 }
@@ -793,15 +809,15 @@ impl PartyRenderPass {
                     if let Some(item) = game.mystery_box.available_items.get(idx) {
                         match item {
                             crate::mystery_box::ItemType::SawBlade =>
-                                self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_pos_2d, t * 8.0),
+                                self.saw_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, item_pos_2d, t * 8.0),
                             crate::mystery_box::ItemType::CannonTurret =>
-                                self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, Some(&self.cube_mesh), vp, item_pos_2d, dir, true),
+                                self.cannon_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, Some(&self.cube_mesh), vp, item_pos_2d, dir, true),
                             crate::mystery_box::ItemType::SpikeTrap =>
-                                self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, vp, item_pos_2d),
+                                self.spike_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, vp, item_pos_2d),
                             crate::mystery_box::ItemType::LaserEmitter =>
-                                self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0, 0.0),
+                                self.laser_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0, 0.0),
                             crate::mystery_box::ItemType::Flamethrower =>
-                                self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0),
+                                self.flame_obj.draw(&context.device, cmd, self.pipeline_layout, &self.instances, &self.cube_mesh, vp, item_pos_2d, dir, false, 0.0),
                             _ => {
                                 let item_m = Mat4::from_translation(Vec3::new(gx as f32 + 0.5, gy as f32 + 0.5, 0.3))
                                     * Mat4::from_scale(Vec3::splat(0.90));
@@ -810,8 +826,7 @@ impl PartyRenderPass {
                                     color_tint: Vec4::new(0.35, 0.75, 0.95, 0.5), // Semi-transparence 50%
                                     params: Vec4::new(0.0, 2.0, 0.0, 0.0),
                                 };
-                                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_item));
-                                self.cube_mesh.draw(&context.device, cmd);
+                                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_item);
                             }
                         }
                     }
@@ -842,8 +857,7 @@ impl PartyRenderPass {
                             params: Vec4::new(0.4, 0.0, 0.0, 0.0),
                         };
 
-                        context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
-                        self.cube_mesh.draw(&context.device, cmd);
+                        self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push);
                     }
                     continue;
                 }
@@ -898,8 +912,7 @@ impl PartyRenderPass {
                             color_tint: Vec4::new(0.98, 0.75, 0.20, 1.0), // Étincelles Or
                             params: Vec4::new(0.0, 6.0, 0.0, 0.0), // Lueur intense
                         };
-                        context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_spark));
-                        self.cube_mesh.draw(&context.device, cmd);
+                        self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_spark);
                     }
                 }
 
@@ -920,8 +933,7 @@ impl PartyRenderPass {
                     color_tint: Vec4::new(0.12, 0.15, 0.28, 1.0), // Pantalon Indigo
                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_leg));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_leg);
 
                 // Jambe Arrière (Z = -0.12)
                 let right_leg_m = body_base_matrix
@@ -934,8 +946,7 @@ impl PartyRenderPass {
                     color_tint: Vec4::new(0.10, 0.12, 0.22, 1.0), // Jambe arrière plus sombre
                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_leg_r));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_leg_r);
 
                 // 4. Torso / Veste de Héros (Centré à y=0.65)
                 let torso_m = body_base_matrix
@@ -946,8 +957,7 @@ impl PartyRenderPass {
                     color_tint: Vec4::new(0.20, 0.65, 0.95, 1.0), // Veste Cyan
                     params: Vec4::new(0.2, 0.0, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_torso));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_torso);
 
                 // 5. Animation Dynamique des Bras
                 // Bras Avant (Devant la veste Z = +0.23)
@@ -961,8 +971,7 @@ impl PartyRenderPass {
                     color_tint: Vec4::new(0.15, 0.18, 0.25, 1.0),
                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_arm_f));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_arm_f);
 
                 // Bras Arrière (Derrière la veste Z = -0.23)
                 let arm_back_m = body_base_matrix
@@ -975,8 +984,7 @@ impl PartyRenderPass {
                     color_tint: Vec4::new(0.12, 0.14, 0.20, 1.0),
                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_arm_b));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_arm_b);
 
                 // 6. Tête du Héros Choupi & Animation "BONK !" au Choc de Plafond
                 let is_ceiling_bumping = player.ceiling_bump_timer > 0.0;
@@ -1000,8 +1008,7 @@ impl PartyRenderPass {
                     color_tint: Vec4::new(0.96, 0.96, 0.98, 1.0), // Tête Blanche Pur
                     params: Vec4::new(0.1, 0.0, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_head));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_head);
 
                 // 7. Yeux / Visière Luminescente Robot Choupi (Pulsation d'Énergie Respiratoire)
                 let visor_m = body_base_matrix
@@ -1014,8 +1021,7 @@ impl PartyRenderPass {
                     color_tint: Vec4::new(0.98, 0.82, 0.10, 1.0), // Visière Or
                     params: Vec4::new(0.0, visor_glow, 0.0, 0.0), // Lueur Émissive Respiratoire
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_visor));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_visor);
 
                 // 8. Bonnet Rouge Ajusté (Posé sur la tête à y=1.45, aplati au choc du plafond)
                 let trail_angle = if is_running {
@@ -1033,8 +1039,7 @@ impl PartyRenderPass {
                     color_tint: Vec4::new(0.92, 0.20, 0.25, 1.0), // Bonnet Rouge Vif
                     params: Vec4::new(0.2, 0.0, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_cap));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_cap);
 
                 // 9. Étoiles de Choc Pop-up "BONK !" au Plafond
                 if is_ceiling_bumping {
@@ -1050,8 +1055,7 @@ impl PartyRenderPass {
                             color_tint: Vec4::new(0.98, 0.90, 0.15, 1.0), // Étoile "BONK !" Or Brillant
                             params: Vec4::new(0.0, 8.0, 0.0, 0.0),
                         };
-                        context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_star));
-                        self.cube_mesh.draw(&context.device, cmd);
+                        self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_star);
                     }
                 }
 
@@ -1064,8 +1068,7 @@ impl PartyRenderPass {
                         color_tint: particle.color,
                         params: Vec4::new(0.0, particle.emissive, 0.0, 0.0),
                     };
-                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_p));
-                    self.cube_mesh.draw(&context.device, cmd);
+                    self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_p);
                 }
             }
 
@@ -1090,8 +1093,7 @@ impl PartyRenderPass {
                         color_tint: teinte,
                         params: Vec4::new(0.2, 0.0, 0.0, 0.0),
                     };
-                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
-                    self.cube_mesh.draw(&context.device, cmd);
+                    self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push);
                 }
             }
 
@@ -1116,8 +1118,7 @@ impl PartyRenderPass {
                     color_tint: teinte,
                     params: Vec4::new(0.2, 0.0, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_corps));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_corps);
 
                 let tete = Mat4::from_translation(base + Vec3::new(0.0, 1.12, 0.0))
                     * Mat4::from_scale(Vec3::new(0.52, 0.46, 0.52));
@@ -1133,8 +1134,7 @@ impl PartyRenderPass {
                     ),
                     params: Vec4::new(0.2, 0.0, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_tete));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_tete);
             }
 
             // Les particules du JEU (par opposition à celles de chaque joueur, dessinées plus
@@ -1147,8 +1147,7 @@ impl PartyRenderPass {
                     color_tint: particule.color,
                     params: Vec4::new(0.0, particule.emissive, 0.0, 0.0),
                 };
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push);
             }
 
             context.jalon(cmd, "monde");
@@ -1168,8 +1167,7 @@ impl PartyRenderPass {
                     params: Vec4::new(0.0, 5.0, 0.0, 0.0), // Lueur Émissive Wireframe Preview
                 };
 
-                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push_preview));
-                self.cube_mesh.draw(&context.device, cmd);
+                self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_preview);
             }
 
             // ─── 4. LE HUD : ce qui se dessine sur l'ÉCRAN, et non dans le monde ─────────
@@ -1181,14 +1179,19 @@ impl PartyRenderPass {
             // joueur qui venait de mourir — il ne s'affichait donc pour personne.
             if game.is_play_mode {
                 context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+                // ⚠ Le pinceau est NOMME pour pouvoir etre referme. Chaque lettre du HUD est un
+                // quad ; les emettre un par un, c'etait des centaines d'appels de dessin pour
+                // afficher un score. `terminer` les envoie tous en un seul.
+                let pinceau = crate::hud::Pinceau {
+                    lot: std::cell::RefCell::new(Vec::new()),
+                    device: &context.device,
+                    cmd,
+                    layout: self.pipeline_layout,
+                    cube: &self.cube_mesh,
+                    aspect,
+                };
                 crate::hud::dessiner(
-                    &crate::hud::Pinceau {
-                        device: &context.device,
-                        cmd,
-                        layout: self.pipeline_layout,
-                        cube: &self.cube_mesh,
-                        aspect,
-                    },
+                    &pinceau,
                     game,
                     exterieur.pont,
                     exterieur.carte,
@@ -1196,18 +1199,22 @@ impl PartyRenderPass {
                     exterieur.vote,
                     exterieur.demonstration.is_some(),
                 );
+                pinceau.terminer(&self.instances);
             }
             // LE LOBBY EN DERNIER, et hors du `is_play_mode` : on doit pouvoir choisir sa partie
             // même quand aucune n'a commencé — c'est justement le moment où l'on en a besoin.
             if exterieur.lobby.ouvert() {
                 context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-                exterieur.lobby.dessiner(&crate::hud::Pinceau {
+                let pinceau = crate::hud::Pinceau {
+                    lot: std::cell::RefCell::new(Vec::new()),
                     device: &context.device,
                     cmd,
                     layout: self.pipeline_layout,
                     cube: &self.cube_mesh,
                     aspect,
-                });
+                };
+                exterieur.lobby.dessiner(&pinceau);
+                pinceau.terminer(&self.instances);
             }
 
             context.jalon(cmd, "interface");

@@ -13,17 +13,9 @@
 //!inclure commun
 //!inclure objet
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) tangent: vec4<f32>,
-    @location(3) uv0: vec2<f32>,
-    @location(4) uv1: vec2<f32>,
-};
-
 @vertex
 fn vs_main(in: VertexInput) -> @builtin(position) vec4<f32> {
-    return cadre.light_view_proj * pc.model_matrix * vec4<f32>(in.position, 1.0);
+    return cadre.light_view_proj * matrice_modele(in) * vec4<f32>(in.position, 1.0);
 }
 
 // Vide, et il doit l'etre : ecrire une couleur ici serait du travail jete.

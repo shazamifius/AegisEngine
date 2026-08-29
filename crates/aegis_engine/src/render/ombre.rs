@@ -203,8 +203,12 @@ impl Ombre {
         &self,
         device: &ash::Device,
         cmd: vk::CommandBuffer,
-        layout: vk::PipelineLayout,
+        // ⚠ Inutilise depuis l'instanciation — plus rien ne pousse de constantes. Conserve parce
+        // que c'est par lui que le descripteur du cadre se lierait si cette passe en avait
+        // besoin ; le retirer obligerait a le remettre au premier reglage qui le demande.
+        _layout: vk::PipelineLayout,
         file: &File,
+        instances: &crate::render::instances::Instances,
         maillages: &[&crate::geometry::gpu_mesh::GpuMesh],
     ) {
         unsafe {
@@ -261,22 +265,39 @@ impl Ombre {
             // la constante : c'est sur les surfaces inclinées que l'erreur d'arrondi est la pire.
             device.cmd_set_depth_bias(cmd, 1.5, 0.0, 2.5);
 
-            for d in file.porteurs_d_ombre() {
-                let Some(maillage) = maillages.get(d.maillage as usize) else { continue };
-                let push = crate::render::push_constants::PushConstants {
-                    model_matrix: d.modele,
-                    color_tint: d.teinte,
-                    params: d.params,
+            // ⚠ La passe d'ombre instancie comme la passe principale, et pour la meme raison :
+            // elle rejoue la MEME scene. Un chemin qui dessinerait objet par objet ici aurait
+            // rendu tout le gain a la premiere ombre — et l'ombre coute deja une seconde passe.
+            instances.lier(device, cmd);
+            let mut lot: Vec<crate::render::instances::Instance> = Vec::new();
+            let mut courant: Option<u16> = None;
+
+            let vider = |lot: &mut Vec<crate::render::instances::Instance>,
+                             id: Option<u16>| {
+                let (Some(id), false) = (id, lot.is_empty()) else {
+                    lot.clear();
+                    return;
                 };
-                device.cmd_push_constants(
-                    cmd,
-                    layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    crate::bytes::as_bytes(&push),
-                );
-                maillage.draw(device, cmd);
+                if let Some(maillage) = maillages.get(id as usize) {
+                    if let Some(premiere) = instances.poser(lot) {
+                        maillage.dessiner_instances(device, cmd, premiere, lot.len() as u32);
+                    }
+                }
+                lot.clear();
+            };
+
+            for d in file.porteurs_d_ombre() {
+                if courant != Some(d.maillage) {
+                    vider(&mut lot, courant);
+                    courant = Some(d.maillage);
+                }
+                lot.push(crate::render::instances::Instance {
+                    modele: d.modele,
+                    teinte: d.teinte,
+                    params: d.params,
+                });
             }
+            vider(&mut lot, courant);
 
             device.cmd_end_rendering(cmd);
 

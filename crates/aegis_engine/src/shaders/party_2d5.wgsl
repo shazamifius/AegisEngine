@@ -50,43 +50,33 @@ fn part_de_lumiere(position_monde: vec3<f32>, n_dot_l: f32) -> f32 {
     return somme * 0.25;
 }
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) tangent: vec4<f32>,
-    @location(3) uv0: vec2<f32>,
-    @location(4) uv1: vec2<f32>,
-};
-
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) color: vec4<f32>,
-    @location(3) uv: vec2<f32>,
-    @location(4) params: vec4<f32>,
+    // ⚠ Les coordonnees de texture ne sont PAS transmises : le fragment ne les lit pas, et le
+    // moteur n'a aucune texture. Elles etaient interpolees a chaque pixel de chaque image pour
+    // rien. *Jamais d'excedent* — elles reviendront le jour ou quelque chose les lira.
+    @location(3) params: vec4<f32>,
 };
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let world_pos = pc.model_matrix * vec4<f32>(in.position, 1.0);
+    let modele = matrice_modele(in);
+    let world_pos = modele * vec4<f32>(in.position, 1.0);
     out.world_position = world_pos.xyz;
 
-    let normal_matrix = mat3x3<f32>(
-        pc.model_matrix[0].xyz,
-        pc.model_matrix[1].xyz,
-        pc.model_matrix[2].xyz
-    );
+    let normal_matrix = mat3x3<f32>(modele[0].xyz, modele[1].xyz, modele[2].xyz);
     out.world_normal = normalize(normal_matrix * in.normal);
 
-    out.color = pc.color_tint;
-    out.uv = in.uv0;
-    out.params = pc.params;
+    out.color = in.teinte;
+    out.params = in.params;
 
-    // Le shader compose lui-meme la vue-projection, sauf en couleur plate ou `model_matrix` est
-    // deja une matrice d'ecran (le HUD, le lobby). `select(faux, vrai, condition)`.
-    let en_espace_ecran = pc.params.w == 1.0;
+    // Le shader compose lui-meme la vue-projection, sauf en couleur plate ou la matrice de
+    // l'objet est deja une matrice d'ecran (le HUD, le lobby). `select(faux, vrai, condition)`.
+    let en_espace_ecran = in.params.w == 1.0;
     out.clip_position = select(cadre.view_proj * world_pos, world_pos, en_espace_ecran);
     return out;
 }
