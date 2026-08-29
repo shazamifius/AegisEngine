@@ -97,6 +97,99 @@ pub struct Ambiance {
     pub reflectance: f32,
 }
 
+impl Ambiance {
+    /// Les champs réglables, avec le nombre de valeurs que chacun attend.
+    ///
+    /// ⚠ **Une seule liste**, et c'est elle qui gouverne à la fois le réglage, l'aide et le test.
+    /// Ajouter un champ à `Ambiance` sans l'inscrire ici le rendrait invisible au laboratoire —
+    /// donc un test compare cette liste au texte de la structure, plutôt que de compter sur la
+    /// mémoire de qui ajoutera le prochain.
+    pub const CHAMPS: [(&'static str, usize); 6] = [
+        ("ciel", 3),
+        ("sol", 3),
+        ("exposition", 1),
+        ("point_blanc", 1),
+        ("rugosite", 1),
+        ("reflectance", 1),
+    ];
+
+    /// Change un réglage désigné par son nom.
+    ///
+    /// ## ⭐ Pourquoi cette fonction existe, et pourquoi elle est ICI
+    ///
+    /// Le juge du rendu perçu est son œil, jamais une métrique — et un œil ne peut trancher que ce
+    /// qu'il voit. Tant qu'un changement de couleur demandait une recompilation, l'aller-retour
+    /// était trop long pour comparer, donc le réglage se faisait de mémoire, donc mal.
+    ///
+    /// *Ce n'est pas « une commande de debug » : c'est l'instrument qui rend une décision
+    /// artistique décidable.* Il règle, et ce qui lui plaît devient le défaut du jeu.
+    ///
+    /// Elle vit dans le moteur parce que le moteur seul sait quels champs une ambiance possède ;
+    /// la console ne fait que transporter du texte. Et étant **pure**, elle se teste entièrement
+    /// sans fenêtre, sans GPU, et sans qu'aucune image ne soit dessinée.
+    pub fn regler(&mut self, champ: &str, valeurs: &[f32]) -> Result<(), String> {
+        let Some((_, attendues)) = Self::CHAMPS.iter().find(|(nom, _)| *nom == champ) else {
+            let connus: Vec<&str> = Self::CHAMPS.iter().map(|(n, _)| *n).collect();
+            return Err(format!("champ inconnu : {champ:?} — connus : {}", connus.join(", ")));
+        };
+        if valeurs.len() != *attendues {
+            return Err(format!(
+                "{champ} attend {attendues} valeur(s), {} recue(s)",
+                valeurs.len()
+            ));
+        }
+        // ⚠ Aucune borne haute : une exposition de 12 ou un ciel a 3,0 sont laids, pas invalides,
+        // et c'est SON oeil qui doit le constater. Brider un laboratoire, c'est lui interdire de
+        // trouver ce qu'on n'avait pas prevu. Seules les valeurs qui n'ont pas de SENS sont
+        // refusees — une couleur negative, un point blanc nul qui diviserait par zero.
+        if valeurs.iter().any(|v| !v.is_finite() || *v < 0.0) {
+            return Err("une valeur doit etre finie et positive".to_string());
+        }
+        match champ {
+            "ciel" => self.ciel = [valeurs[0], valeurs[1], valeurs[2]],
+            "sol" => self.sol = [valeurs[0], valeurs[1], valeurs[2]],
+            "exposition" => self.exposition = valeurs[0],
+            "point_blanc" => {
+                if valeurs[0] <= 0.0 {
+                    return Err("le point blanc divise la courbe : il doit etre > 0".to_string());
+                }
+                self.point_blanc = valeurs[0];
+            }
+            "rugosite" => self.rugosite = valeurs[0],
+            "reflectance" => self.reflectance = valeurs[0],
+            _ => unreachable!("la liste des champs a deja tranche"),
+        }
+        Ok(())
+    }
+
+    /// Le réglage courant, écrit **tel qu'il se recolle dans le code du jeu**.
+    ///
+    /// ⚠ La forme compte autant que le contenu : quand un réglage lui plaît, il doit devenir le
+    /// défaut du jeu **sans être retranscrit**. Une transcription à la main, c'est une virgule
+    /// perdue et un rendu qu'on ne retrouve plus — et on ne saurait même pas que c'est ça.
+    pub fn decrire(&self) -> String {
+        format!(
+            "Ambiance {{\n    \
+             ciel: [{:.3}, {:.3}, {:.3}],\n    \
+             sol: [{:.3}, {:.3}, {:.3}],\n    \
+             exposition: {:.3},\n    \
+             point_blanc: {:.3},\n    \
+             rugosite: {:.3},\n    \
+             reflectance: {:.3},\n}}",
+            self.ciel[0],
+            self.ciel[1],
+            self.ciel[2],
+            self.sol[0],
+            self.sol[1],
+            self.sol[2],
+            self.exposition,
+            self.point_blanc,
+            self.rugosite,
+            self.reflectance,
+        )
+    }
+}
+
 impl Default for Ambiance {
     /// Reproduit **exactement** le rendu d'avant l'existence de ce type — ciel et sol identiques,
     /// donc ambiante plate. Un défaut qui change l'image serait un piège pour qui l'adopte.
@@ -518,6 +611,161 @@ mod tests {
             manquants.is_empty(),
             "ces shaders sont compiles dans le moteur mais echappent a la garde des couleurs : \
              {manquants:?}\nLes ajouter a la liste de `aucun_shader_du_moteur_ne_choisit_de_couleur`."
+        );
+    }
+
+    /// Le laboratoire règle vraiment ce qu'il annonce régler.
+    #[test]
+    fn regler_une_ambiance_change_ce_qu_il_faut_et_rien_d_autre() {
+        let mut a = Ambiance::default();
+        let temoin = a.sol;
+
+        a.regler("ciel", &[0.1, 0.2, 0.4]).expect("le ciel doit se regler");
+        assert_eq!(a.ciel, [0.1, 0.2, 0.4]);
+        assert_eq!(a.sol, temoin, "regler le ciel ne doit pas toucher au sol");
+
+        a.regler("exposition", &[1.6]).expect("l'exposition doit se regler");
+        assert!((a.exposition - 1.6).abs() < 1e-6);
+    }
+
+    /// ⚠ Ce qui est refusé l'est parce que ça n'a pas de SENS, jamais parce que c'est laid.
+    #[test]
+    fn le_laboratoire_refuse_l_absurde_et_accepte_le_laid() {
+        let mut a = Ambiance::default();
+
+        assert!(a.regler("cieI", &[0.1, 0.2, 0.3]).is_err(), "un nom fautif doit se voir");
+        assert!(a.regler("ciel", &[0.1, 0.2]).is_err(), "une couleur a trois composantes");
+        assert!(a.regler("ciel", &[-0.1, 0.2, 0.3]).is_err(), "une couleur negative n'existe pas");
+        assert!(a.regler("exposition", &[f32::NAN]).is_err(), "un NaN contaminerait toute l'image");
+        assert!(a.regler("point_blanc", &[0.0]).is_err(), "il divise la courbe de tonalite");
+
+        // Laid, mais parfaitement valide : c'est son œil qui juge, pas ce code.
+        assert!(a.regler("exposition", &[14.0]).is_ok());
+        assert!(a.regler("ciel", &[3.0, 0.0, 3.0]).is_ok());
+    }
+
+    /// ⚠⚠ La garde qui rend le laboratoire complet : un champ ajouté à `Ambiance` sans être
+    /// inscrit dans `CHAMPS` serait **invisible au réglage**, sans que rien ne le signale — le
+    /// laboratoire aurait l'air de fonctionner en ne montrant qu'une partie des leviers.
+    #[test]
+    fn le_laboratoire_atteint_tous_les_champs_de_l_ambiance() {
+        let source = include_str!("cadre.rs");
+        // ⚠ On démarre APRÈS l'accolade : la ligne `pub struct Ambiance {` commence elle aussi par
+        // `pub `, et une sonde qui la ramasse accuse un champ nommé « struct Ambiance { ». *Une
+        // sonde qui lit le texte parlant de la chose au lieu de la chose ne mesure rien* — c'est
+        // le même piège que le `grep` qui trouve les formules qu'il cite lui-même.
+        const ENTETE: &str = "pub struct Ambiance {";
+        let debut = source.find(ENTETE).expect("la structure existe") + ENTETE.len();
+        let fin = debut + source[debut..].find("\n}").expect("elle se ferme");
+        let corps = &source[debut..fin];
+
+        let mut absents = Vec::new();
+        for ligne in corps.lines() {
+            let Some(reste) = ligne.trim().strip_prefix("pub ") else { continue };
+            let Some(nom) = reste.split(':').next() else { continue };
+            if !Ambiance::CHAMPS.iter().any(|(c, _)| *c == nom) {
+                absents.push(nom.to_string());
+            }
+        }
+
+        assert!(
+            absents.is_empty(),
+            "ces reglages existent dans Ambiance et sont hors d'atteinte du laboratoire : \
+             {absents:?}\nLes ajouter a Ambiance::CHAMPS."
+        );
+    }
+
+    /// Ce que le laboratoire affiche doit se recoller dans le code sans retouche.
+    #[test]
+    fn la_description_se_recolle_telle_quelle_dans_le_jeu() {
+        let mut a = Ambiance::default();
+        a.regler("ciel", &[0.12, 0.18, 0.31]).unwrap();
+        let texte = a.decrire();
+
+        assert!(texte.starts_with("Ambiance {"), "ce doit etre une valeur Rust, pas un rapport");
+        assert!(texte.ends_with('}'));
+        assert!(texte.contains("ciel: [0.120, 0.180, 0.310],"));
+        // Chaque champ réglable doit apparaître : un réglage qu'on ne peut pas relire est perdu.
+        for (nom, _) in Ambiance::CHAMPS {
+            assert!(texte.contains(&format!("{nom}: ")), "{nom} manque dans la description");
+        }
+    }
+
+    /// ⚠⚠ LA GARDE QUI FERME LA DOUBLE GAMMA — la faute qui rendait toute l'image terne.
+    ///
+    /// Elle ne fixe pas une valeur : elle vérifie une **cohérence entre deux endroits qui doivent
+    /// s'accorder** et qui ne se voient pas l'un l'autre. Si la surface de présentation est
+    /// demandée en `_SRGB`, elle encode déjà la gamma à l'écriture ; un shader qui en encode une
+    /// seconde délave tout, sans qu'aucune erreur ne soit levée nulle part.
+    ///
+    /// *C'était le cas, et c'est ce qui a été mesuré sur une capture : le fond des panneaux du
+    /// HUD, demandé à (13, 15, 20), sortait à (63, 69, 80).*
+    ///
+    /// Et la garde vaut dans les DEUX sens : si quelqu'un repasse un jour la surface en `UNORM`,
+    /// ce test tombera aussi — parce qu'il faudra alors réintroduire l'encodage dans les shaders.
+    #[test]
+    fn la_gamma_n_est_encodee_qu_une_seule_fois() {
+        let contexte = include_str!("../core/gpu_context.rs");
+        let surface_encode = contexte.contains("vk::Format::B8G8R8A8_SRGB");
+
+        let shaders: [(&str, &str); 4] = [
+            ("commun.wgsl", include_str!("../shaders/commun.wgsl")),
+            ("party_2d5.wgsl", include_str!("../shaders/party_2d5.wgsl")),
+            ("background.wgsl", include_str!("../shaders/background.wgsl")),
+            ("ombre.wgsl", include_str!("../shaders/ombre.wgsl")),
+        ];
+
+        let mut encodeurs = Vec::new();
+        for (nom, source) in shaders {
+            for (numero, ligne) in source.lines().enumerate() {
+                let code = ligne.split("//").next().unwrap_or("");
+                // La signature d'un encodage de gamma en sortie : élever à 1/2,2 ou à 1/2,4.
+                if code.contains("1.0 / 2.2") || code.contains("1.0/2.2") || code.contains("1.0 / 2.4")
+                {
+                    encodeurs.push(format!("{nom} ligne {}", numero + 1));
+                }
+            }
+        }
+
+        if surface_encode {
+            assert!(
+                encodeurs.is_empty(),
+                "la surface de presentation est en _SRGB, elle encode DEJA la gamma — ces shaders \
+                 en encodent une seconde et delavent toute l'image :\n  {}\n\
+                 Ecrire du lineaire, et laisser la surface encoder.",
+                encodeurs.join("\n  ")
+            );
+        } else {
+            assert!(
+                !encodeurs.is_empty(),
+                "la surface n'est plus demandee en _SRGB : elle n'encode donc plus rien, et les \
+                 shaders doivent reprendre cet encodage a leur charge — sinon toute l'image sort \
+                 beaucoup trop sombre."
+            );
+        }
+    }
+
+    /// La conversion sRGB → linéaire doit exister, sinon les couleurs du jeu sont mal interprétées.
+    ///
+    /// ⚠ Un albédo sRGB traité comme linéaire fausse **tout** le calcul d'énergie du PBR, et le
+    /// fausse *silencieusement* : l'image reste plausible, simplement délavée et fausse.
+    #[test]
+    fn les_couleurs_demandees_sont_converties_avant_le_calcul() {
+        let commun = include_str!("../shaders/commun.wgsl");
+        let eclairage = include_str!("../shaders/party_2d5.wgsl");
+
+        assert!(
+            commun.contains("fn vers_lineaire("),
+            "la conversion sRGB vers lineaire doit vivre dans le preambule partage"
+        );
+        assert!(
+            commun.contains("12.92") && commun.contains("0.04045"),
+            "la vraie courbe sRGB, avec son segment droit pres du noir — pas un simple 2,2, \
+             sans quoi les tons les plus sombres remontent visiblement"
+        );
+        assert!(
+            eclairage.contains("vers_lineaire(in.color.rgb)"),
+            "la couleur demandee par le jeu doit etre convertie avant d'entrer dans l'eclairage"
         );
     }
 

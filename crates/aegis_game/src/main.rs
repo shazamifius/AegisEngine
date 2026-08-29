@@ -262,6 +262,9 @@ fn publier_etat_console(
     demonstration: bool,
     lobby: &lobby::Lobby,
     chrono: Option<&aegis_engine::chrono_gpu::ChronoGpu>,
+    // Deja ecrite en texte : c'est le rendu de passe qui la porte, et le lui emprunter ici
+    // entrerait en conflit avec l'emprunt mutable du moteur de rendu.
+    ambiance: String,
 ) {
     {
         let moi = g.players.iter().find(|p| p.is_human);
@@ -282,6 +285,7 @@ fn publier_etat_console(
             vote: vote.map(|v| (v.bloc.0, v.bloc.1, v.pour(), v.seuil(), v.reste)),
             position: moi.map(|p| (p.player.position.x, p.player.position.y)).unwrap_or((0.0, 0.0)),
             demonstration,
+            ambiance,
             // Le nom de l'écran, et ses boutons tels qu'ils viennent d'être DESSINÉS. C'est la
             // seule façon pour un scénario de viser un bouton sans en coder la position — donc
             // sans qu'un ajustement de pixel ne le fasse cliquer dans le vide en silence.
@@ -385,6 +389,19 @@ impl AegisApp {
                         chrono.remettre_a_zero();
                     }
                 }
+                console::Ordre::Ambiance { champ, valeurs } => {
+                    // ⚠ Les TROIS issues sont journalisees : retenu / refuse / impossible. Un
+                    // reglage avale en silence ferait chercher le defaut dans le shader alors
+                    // qu'il est dans le mot tape — et c'est l'endroit exact ou un mecanisme meurt
+                    // sans temoin.
+                    match self.party_render_pass.as_mut() {
+                        None => log::warn!("[ambiance] rien a regler : le rendu n'est pas encore ne"),
+                        Some(rendu) => match rendu.regler_ambiance(&champ, &valeurs) {
+                            Ok(()) => log::info!("[ambiance] {champ} = {valeurs:?}"),
+                            Err(e) => log::warn!("[ambiance] refuse : {e}"),
+                        },
+                    }
+                }
             }
         }
 
@@ -409,6 +426,7 @@ impl AegisApp {
             self.demonstration.is_some(),
             &self.lobby,
             engine.gpu.chrono.as_ref(),
+            party_render_pass.ambiance_decrite(),
         );
 
         // On pousse NOTRE position au cœur, et rien d'autre : lui seul décide ce que les autres

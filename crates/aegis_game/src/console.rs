@@ -79,6 +79,15 @@ pub enum Ordre {
     Effacer,
     /// Repartir de zero pour l'agregation du temps GPU.
     GpuZero,
+
+    // ── LE LABORATOIRE D'AMBIANCE (29 août 2026) ────────────────────────────────────────────
+    /// Régler un champ de l'`Ambiance` sans recompiler.
+    ///
+    /// ⚠ Le nom du champ n'est PAS validé ici, et c'est délibéré : c'est le moteur qui sait quels
+    /// champs une ambiance possède (`Ambiance::CHAMPS`). Recopier cette liste dans la console en
+    /// ferait une seconde vérité, qui se périmerait au premier champ ajouté — le défaut même que
+    /// tout le travail du jour a consisté à fermer ailleurs.
+    Ambiance { champ: String, valeurs: Vec<f32> },
 }
 
 /// L'instantané que la boucle publie pour la console. Volontairement plat et textuel : ce qui se
@@ -107,6 +116,11 @@ pub struct Etat {
     /// CONSTATER, quand la liste ne contient pas ce qu'on attend, qu'un bouton dessiné n'est pas
     /// atteignable.
     pub zones: Vec<(String, f32, f32, f32, f32)>,
+    /// L'ambiance courante, ecrite telle qu'elle se recolle dans le code du jeu.
+    ///
+    /// Publiee en TEXTE et non en valeurs : ce qui se lit dans un terminal se compare aussi dans
+    /// un test, et surtout se recolle sans etre retranscrit.
+    pub ambiance: String,
     /// Le temps GPU par etape : nom, moyenne, pire cas, nombre d'images agregees.
     ///
     /// ⚠ Contrairement a `travail`, ce releve ne VOYAGE PAS : il decrit ce GPU, ce pilote, ce
@@ -241,6 +255,11 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
             "gpu                 — le temps GPU par etape : moyenne/pire, contre le budget Quest 2",
             "gpu image           — le temps GPU de la derniere image seule",
             "gpu zero            — repart de zero pour l agregation GPU",
+            "— le laboratoire d'ambiance : regle EN DIRECT, l'oeil tranche —",
+            "ambiance            — le reglage courant, pret a recoller dans le code du jeu",
+            "ambiance <champ> <valeurs...>",
+            "                      ciel <r> <v> <b> | sol <r> <v> <b> | exposition <x>",
+            "                      point_blanc <x>  | rugosite <x>    | reflectance <x>",
             "— le lobby —",
             "echap               — ouvre ou referme le lobby",
             "zones               — les boutons atteignables sur l'ecran courant",
@@ -362,6 +381,42 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
                 .collect::<Vec<_>>()
                 .join(" ");
             format!("derniere image : {detail} | total={total:.3} ms")
+        }
+
+        // ── LE LABORATOIRE D'AMBIANCE ───────────────────────────────────────────────────────
+        //
+        // Sans arguments il MONTRE, avec arguments il REGLE. Une seule porte pour tous les
+        // reglages : ajouter un champ a `Ambiance` ne demandera aucune commande de plus.
+        ["ambiance"] => {
+            let e = pupitre.lire_etat();
+            if e.ambiance.is_empty() {
+                return "(aucune image dessinee — l'ambiance n'est pas encore publiee)".to_string();
+            }
+            e.ambiance
+        }
+
+        ["ambiance", champ, valeurs @ ..] => {
+            let mut nombres = Vec::with_capacity(valeurs.len());
+            for v in valeurs {
+                match v.parse::<f32>() {
+                    Ok(n) => nombres.push(n),
+                    // ⚠ Dire QUEL mot est fautif, pas seulement qu'il y en a un. Une virgule
+                    // decimale tapee a la francaise ("0,2") est l'erreur la plus probable ici, et
+                    // un message vague la ferait chercher longtemps.
+                    Err(_) => return format!("« {v} » n'est pas un nombre (le separateur est le POINT)"),
+                }
+            }
+            if nombres.is_empty() {
+                return format!("ambiance {champ} <valeurs...> — aucune valeur donnee");
+            }
+            pupitre.deposer(Ordre::Ambiance {
+                champ: (*champ).to_string(),
+                valeurs: nombres,
+            });
+            // ⚠ On ne peut pas dire « ok » : l'ordre n'est joue qu'a l'image suivante, et le
+            // moteur peut le refuser (champ inconnu, valeur absurde). Annoncer un succes qu'on
+            // n'a pas constate serait une victoire prematuree de trois mots.
+            "ordre transmis — relire avec « ambiance » pour voir ce qui a ete retenu".to_string()
         }
 
         ["gpu", "zero"] => {

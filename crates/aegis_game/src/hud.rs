@@ -78,9 +78,19 @@ pub fn score_lisible(score: f32) -> String {
 /// Sobre, à fort contraste, sans néon : ce texte doit se lire au fond d'une salle, sur un
 /// vidéoprojecteur, par-dessus une scène colorée et en mouvement.
 ///
-/// Ces couleurs sortent **telles quelles** à l'écran — contrairement au reste de la scène, elles
-/// ne traversent ni lampe ni correction gamma. Inutile donc de les pré-compenser : ce qui est
-/// écrit ici est ce qui s'affiche.
+/// Ces couleurs sortent **telles quelles** à l'écran : elles ne traversent ni lampe, ni ombre, ni
+/// courbe de tonalité. Ce qui est écrit ici est ce qui s'affiche.
+///
+/// ⚠ **Cette phrase a été fausse jusqu'au 29 août 2026, et personne ne l'avait vérifiée.** Le
+/// shader écrivait ces valeurs brutes dans une surface `B8G8R8A8_SRGB`, qui les encodait au
+/// passage : mesuré sur une capture, `FOND` — demandé à (13, 15, 20) sur 255 — sortait à
+/// **(63, 69, 80)**, presque cinq fois trop clair. Le HUD était donc délavé exactement comme le
+/// reste, sous un commentaire qui promettait le contraire.
+///
+/// *Un commentaire qui décrit une intention non réalisée est pire qu'une absence : chaque
+/// relecture le confirme au lieu de le tester.* La promesse est désormais tenue par le code —
+/// `party_2d5.wgsl` convertit la couleur plate en linéaire avant de l'écrire, et la surface la
+/// ramène exactement à ce qui est demandé ici.
 pub mod couleurs {
     use aegis_engine::math::Vec4;
 

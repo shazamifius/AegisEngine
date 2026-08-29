@@ -91,6 +91,13 @@ pub struct PartyRenderPass {
     /// Les images dans lesquelles l'image se fabrique : la profondeur, et — quand la carte sait
     /// anti-creneler — une couleur multi-echantillonnee resolue vers l'ecran a la fin de la passe.
     cibles: aegis_engine::render::cibles::Cibles,
+    /// La direction artistique de CE jeu : couleur du ciel, du sol, exposition, courbe.
+    ///
+    /// ⚠ Elle vit ici, jamais dans le moteur, et elle est MUTABLE parce que son juge est un œil :
+    /// tant qu'un changement de couleur demandait une recompilation, l'aller-retour etait trop
+    /// long pour comparer deux reglages, donc le choix se faisait de memoire. La console la regle
+    /// en direct (« ambiance ciel 0.1 0.2 0.4 »), et ce qui plait devient le defaut ci-dessous.
+    ambiance: aegis_engine::render::cadre::Ambiance,
 
     pub camera_pos: Vec3,
     pub camera_target: Vec3,
@@ -242,6 +249,24 @@ impl PartyRenderPass {
             box_obj,
 
             cibles,
+            // ── LE POINT DE DEPART DE LA DIRECTION ARTISTIQUE — a regler a l'oeil ───────────
+            //
+            // ⚠ Ce n'est PAS un choix esthetique arrete : c'est un point de depart, et il attend
+            // d'etre remplace par ce que son oeil retiendra du laboratoire (`ambiance ...` dans
+            // la console). Le juge du rendu percu n'est ni une metrique ni ce commentaire.
+            //
+            // Il n'est pas neutre pour autant, et c'est deliberé : le defaut du MOTEUR pose
+            // ciel = sol, donc une ambiante plate — la capacite existe alors sans que personne
+            // s'en serve, et *un mecanisme jamais exerce est mort.* Ces deux teintes ont la meme
+            // luminosite que le gris qu'elles remplacent : seule leur TEMPERATURE change, ce qui
+            // donne du volume sans decider du reste.
+            ambiance: aegis_engine::render::cadre::Ambiance {
+                // Ce qui tombe du ciel : un peu bleu, comme un ciel couvert.
+                ciel: [0.15, 0.18, 0.24],
+                // Ce qui remonte du sol : un peu chaud, comme de la terre.
+                sol: [0.20, 0.16, 0.13],
+                ..aegis_engine::render::cadre::Ambiance::default()
+            },
 
             camera_pos: Vec3::new(5.0, 3.0, 16.0),
             camera_target: Vec3::new(5.0, 3.0, 0.0),
@@ -331,12 +356,9 @@ impl PartyRenderPass {
             8.0,
         );
         // ── L'AMBIANCE : c'est LE JEU qui la décide, le moteur ne fait que l'appliquer ──────
-        //
-        // ⚠ Ces valeurs reproduisent exactement le rendu d'avant (ciel = sol = ambiante plate),
-        // et c'est délibéré : un changement d'architecture et un changement de rendu ne se
-        // prouvent pas dans le même commit. C'est ICI, et nulle part dans le moteur, que la
-        // direction artistique du jeu se règlera — un ciel froid, un sol chaud, une exposition.
-        let ambiance = aegis_engine::render::cadre::Ambiance::default();
+        // Elle se règle en direct depuis la console (`ambiance ciel 0.1 0.2 0.4`) : voir le champ
+        // du même nom. Le moteur, lui, ne saura jamais de quelle couleur est ce ciel.
+        let ambiance = self.ambiance;
 
         // La zone que la carte d'ombre couvre : centree sur la camera, assez large pour porter
         // ce qu'on voit. ⚠ Ce qui sort de cette sphere ne projette rien — compromis de toute carte
@@ -1211,6 +1233,19 @@ impl PartyRenderPass {
 
             context.jalon(cmd, "presentation");
         }
+    }
+
+    /// Règle un champ de l'ambiance, en direct.
+    ///
+    /// ⚠ Rend l'erreur du moteur telle quelle plutôt que de la traduire : c'est lui qui connaît
+    /// les champs et leurs bornes, et une reformulation ici serait une seconde vérité à tenir.
+    pub fn regler_ambiance(&mut self, champ: &str, valeurs: &[f32]) -> Result<(), String> {
+        self.ambiance.regler(champ, valeurs)
+    }
+
+    /// L'ambiance courante, écrite telle qu'elle se recolle dans ce fichier.
+    pub fn ambiance_decrite(&self) -> String {
+        self.ambiance.decrire()
     }
 
     /// Refait les cibles quand la fenetre change de taille.

@@ -127,6 +127,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let V = normalize(cadre.camera_et_compte.xyz - in.world_position);
     let n_dot_v = max(dot(N, V), 1e-4);
 
+    // ⚠⚠ LA COULEUR DEMANDEE EST EN sRGB, LE CALCUL SE FAIT EN LINEAIRE.
+    // Un humain qui ecrit `0.32, 0.82, 0.36` pour de l'herbe pense a ce qu'un selecteur de
+    // couleur lui montre — c'est du sRGB. La traiter comme lineaire fausse tout le calcul
+    // d'energie, silencieusement, et delave le resultat. La conversion se fait ICI, une seule
+    // fois, et plus rien n'encode de gamma ensuite (la surface de presentation s'en charge).
+    let albedo = vers_lineaire(in.color.rgb);
+
     // ⚠ Ces deux valeurs ETAIENT ecrites en dur ici, et c'etait la faute : une rugosite et une
     // reflectance sont des decisions de MATIERE, donc du jeu. Elles viennent maintenant du cadre.
     let rugosite = cadre.matiere.x;
@@ -192,23 +199,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Ce qui part en reflet ne peut pas repartir en diffus : c'est la conservation d'energie.
         let part_diffuse = (vec3<f32>(1.0) - F);
 
-        total = total + (part_diffuse * in.color.rgb / PI + speculaire) * radiance * n_dot_l * part_eclairee;
+        total = total + (part_diffuse * albedo / PI + speculaire) * radiance * n_dot_l * part_eclairee;
     }
 
     // Ce qui eclaire encore une surface a l'ombre : le ciel au-dessus, le sol en dessous.
     // La formule vit dans `commun.wgsl` -- c'est la MEME que celle qui peint le fond, appelee ici
     // avec la normale au lieu de la direction du regard. Rien ne les separe, donc rien ne peut
     // les faire diverger.
-    let ambiante = ambiance_hemispherique(N) * in.color.rgb;
+    let ambiante = ambiance_hemispherique(N) * albedo;
 
-    // Exposition, courbe de tonalite et gamma : `commun.wgsl` a nouveau, et pour la meme raison.
-    // Un second chemin vers le pixel serait une seconde courbe, donc deux mondes qui ne se
-    // repondent plus.
-    let gamma_corrected = presenter(ambiante + total);
+    // Exposition et courbe de tonalite : `commun.wgsl` a nouveau, et pour la meme raison. Un
+    // second chemin vers le pixel serait une seconde courbe, donc deux mondes qui ne se
+    // repondent plus. Le resultat est LINEAIRE : la surface de presentation encode la gamma.
+    let eclaire = presenter(ambiante + total);
 
-    // `params.w` a 1.0 = couleur PLATE : celle qui a ete demandee, sans lampe et sans gamma.
+    // `params.w` a 1.0 = couleur PLATE : celle qui a ete demandee, sans lampe et sans courbe.
     // C'est ce qu'exige une interface : un element de HUD ne vit pas dans la scene, il n'a donc
     // aucune raison de s'assombrir selon l'angle d'une lumiere, ni de changer si on la deplace.
+    //
+    // ⚠ Elle sort en `albedo`, c'est-a-dire en LINEAIRE — et c'est ce qui la fait enfin arriver
+    // a l'ecran telle qu'elle a ete demandee. Ecrite brute, elle traversait quand meme l'encodage
+    // sRGB de la surface : le fond des panneaux du HUD, demande a (13, 15, 20), sortait mesure a
+    // (63, 69, 80). Presque cinq fois trop clair, sous un commentaire qui promettait le contraire.
     let plat = clamp(in.params.w, 0.0, 1.0);
-    return vec4<f32>(mix(gamma_corrected, in.color.rgb, plat), 1.0);
+    return vec4<f32>(mix(eclaire, albedo, plat), 1.0);
 }

@@ -73,6 +73,39 @@ fn ambiance_hemispherique(direction: vec3<f32>) -> vec3<f32> {
     return mix(cadre.sol_point_blanc.rgb, cadre.ciel_exposition.rgb, vers_le_ciel);
 }
 
+// ── L'ESPACE DES COULEURS, ET LA FAUTE QUI RENDAIT TOUT TERNE ───────────────────────────────
+//
+// ## Ce qui se passait avant le 29 aout 2026, mesure au pixel pres
+//
+// La chaine d'affichage encodait la gamma DEUX FOIS. Le shader finissait par
+// `pow(couleur, 1/2.2)` — et la surface de presentation est un format `B8G8R8A8_SRGB`, qui fait
+// **deja** cette conversion tout seul a l'ecriture. Chaque encodage remonte les tons moyens :
+// deux encodages delavent tout, ecrasent le contraste et desaturent les couleurs.
+//
+// *C'etait la cause du « les couleurs ne sont vraiment pas belles du tout, tres ternes ».*
+//
+// **La preuve etait dans le HUD, et elle est numerique.** `hud.rs` porte un commentaire qui
+// affirmait que ses couleurs « sortent telles quelles a l'ecran ». Mesure sur une capture, le
+// fond des panneaux — demande a (0,05 / 0,06 / 0,08), donc (13, 15, 20) sur 255 — sortait a
+// **(63, 69, 80)**. C'est-a-dire, au bit pres sur les trois canaux, la valeur d'une couleur
+// LINEAIRE ecrite dans une cible sRGB. Le HUD etait 4,8 fois trop clair, et le commentaire
+// decrivait une intention que personne n'avait verifiee.
+//
+// ## La regle, et elle n'a rien de negociable
+//
+// **On calcule en LINEAIRE, on ecrit en LINEAIRE, et le format encode.** Une couleur ecrite par
+// un humain (`0.32, 0.82, 0.36` pour de l'herbe) est en revanche pensee en sRGB : c'est ce qu'un
+// selecteur de couleur lui montre. Elle se convertit donc a l'ENTREE, une fois — et jamais a la
+// sortie. C'est aussi ce qui rend l'eclairage physiquement juste : un albedo sRGB traite comme
+// lineaire fausse tout le calcul d'energie, silencieusement.
+fn vers_lineaire(couleur_srgb: vec3<f32>) -> vec3<f32> {
+    // La vraie courbe sRGB, pas l'approximation en 2,2 : elle a un segment droit pres du noir,
+    // sans lequel les tons les plus sombres remontent visiblement.
+    let bas = couleur_srgb / 12.92;
+    let haut = pow((couleur_srgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(haut, bas, couleur_srgb <= vec3<f32>(0.04045));
+}
+
 // ── DE LA LUMIERE A UN PIXEL ────────────────────────────────────────────────────────────────
 //
 // Reinhard ETENDU, avec un point blanc. Le Reinhard simple (x / (x+1)) compresse aussi les tons
@@ -84,11 +117,12 @@ fn ambiance_hemispherique(direction: vec3<f32>) -> vec3<f32> {
 // ⚠⚠ TOUT ce qui finit a l'ecran doit passer par ici, le fond compris. Deux chemins vers le
 // pixel, c'est deux courbes, donc deux mondes qui ne se repondent plus — le defaut exact que ce
 // fichier existe pour fermer.
+//
+// ⚠ Et il rend du LINEAIRE : aucune gamma ne s'ecrit ici, la surface s'en charge. Voir ci-dessus.
 fn presenter(lumiere_lineaire: vec3<f32>) -> vec3<f32> {
     let point_blanc = cadre.sol_point_blanc.w;
     // L'exposition est le diaphragme : elle multiplie ce qui arrive, avant la courbe.
     let eclaire = lumiere_lineaire * cadre.ciel_exposition.w;
-    let expose = eclaire * (vec3<f32>(1.0) + eclaire / (point_blanc * point_blanc))
-               / (vec3<f32>(1.0) + eclaire);
-    return pow(expose, vec3<f32>(1.0 / 2.2));
+    return eclaire * (vec3<f32>(1.0) + eclaire / (point_blanc * point_blanc))
+         / (vec3<f32>(1.0) + eclaire);
 }
