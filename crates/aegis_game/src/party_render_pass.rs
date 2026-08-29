@@ -530,9 +530,9 @@ self.file.vider();
 
             // La file est jouee ICI, apres avoir ete remplie. Le meme contenu servira
             // a la passe d'ombre, sans que le jeu ait a redire ce qu'il y a a dessiner.
-            let ignores = unsafe {
-                self.file.dessiner(&context.device, cmd, self.pipeline_layout, &[&self.cube_mesh])
-            };
+            // Deja dans le bloc unsafe de la passe : pas de second niveau.
+            let ignores =
+                self.file.dessiner(&context.device, cmd, self.pipeline_layout, &[&self.cube_mesh]);
             if ignores > 0 {
                 log::warn!("file de rendu : {ignores} dessins ignores (maillage inconnu)");
             }
