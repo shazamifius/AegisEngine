@@ -56,6 +56,10 @@ pub struct Exterieur<'a> {
     pub lobby: &'a crate::lobby::Lobby,
 }
 
+/// L'index du cube dans la table de maillages passee a la file. Une constante nommee plutot
+/// qu'un `0` : le jour ou un second maillage entre dans la file, un chiffre nu serait illisible.
+const MAILLAGE_CUBE: u16 = 0;
+
 pub struct PartyRenderPass {
     bg_pipeline: vk::Pipeline,
     bg_pipeline_layout: vk::PipelineLayout,
@@ -64,6 +68,10 @@ pub struct PartyRenderPass {
     pipeline_layout: vk::PipelineLayout,
     /// Ce qui est vrai pour toute l'image : la vue-projection, la caméra, les lumières.
     cadre: aegis_engine::render::cadre::Cadre,
+    /// Ce qu'il y a à dessiner cette image. ⚠ Elle existe pour les OMBRES : une ombre se
+    /// calcule en rejouant la scène depuis la lumière, ce qui est impossible quand le dessin
+    /// est impératif et entrelacé avec la logique de jeu.
+    file: aegis_engine::render::file::File,
 
     pub cube_mesh: GpuMesh,
     pub char_mesh: GpuMesh,
@@ -229,6 +237,7 @@ impl PartyRenderPass {
             particle_pipeline,
             pipeline_layout,
             cadre,
+            file: aegis_engine::render::file::File::nouvelle(),
 
             cube_mesh,
             char_mesh,
@@ -421,7 +430,8 @@ impl PartyRenderPass {
             // partagent la même caméra et les mêmes lumières.
             self.cadre.lier(&context.device, cmd, self.pipeline_layout);
 
-            for y in 0..game.grid.height {
+self.file.vider();
+                        for y in 0..game.grid.height {
                 for x in 0..game.grid.width {
                     let xi = x as i32;
                     let yi = y as i32;
@@ -437,14 +447,13 @@ impl PartyRenderPass {
                             _ => tile.color(),
                         };
 
-                        let push = PushConstants {
-                            model_matrix: model,
-                            color_tint: col,
+                        self.file.ajouter(aegis_engine::render::file::Dessin {
+                            maillage: MAILLAGE_CUBE,
+                            modele: model,
+                            teinte: col,
                             params: Vec4::new(0.3, 0.0, 0.0, 0.0),
-                        };
-
-                        context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&push));
-                        self.cube_mesh.draw(&context.device, cmd);
+                            porte_une_ombre: true,
+                        });
 
                         // 1. Décoration Procédurale de la Roche (Pierre) : Petits cubes gris plus sombres encastrés
                         if tile == TileType::MetalBlock {
@@ -456,13 +465,13 @@ impl PartyRenderPass {
 
                                 let sub_m = Mat4::from_translation(Vec3::new(x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y, 0.05))
                                     * Mat4::from_scale(Vec3::new(sz, sz, 0.92));
-                                let sub_push = PushConstants {
-                                    model_matrix: sub_m,
-                                    color_tint: Vec4::new(0.40, 0.43, 0.48, 1.0), // Gris Roche Plus Sombre
+                                self.file.ajouter(aegis_engine::render::file::Dessin {
+                                    maillage: MAILLAGE_CUBE,
+                                    modele: sub_m,
+                                    teinte: Vec4::new(0.40, 0.43, 0.48, 1.0),
                                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
-                                };
-                                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&sub_push));
-                                self.cube_mesh.draw(&context.device, cmd);
+                                    porte_une_ombre: true,
+                                });
                             }
                         }
 
@@ -476,13 +485,13 @@ impl PartyRenderPass {
 
                                 let sub_m = Mat4::from_translation(Vec3::new(x as f32 + 0.5 + off_x, y as f32 + 0.5 + off_y, 0.05))
                                     * Mat4::from_scale(Vec3::new(sz, sz, 0.92));
-                                let sub_push = PushConstants {
-                                    model_matrix: sub_m,
-                                    color_tint: Vec4::new(0.42, 0.27, 0.16, 1.0), // Très légèrement plus sombre, ultra-subtil
+                                self.file.ajouter(aegis_engine::render::file::Dessin {
+                                    maillage: MAILLAGE_CUBE,
+                                    modele: sub_m,
+                                    teinte: Vec4::new(0.42, 0.27, 0.16, 1.0),
                                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
-                                };
-                                context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&sub_push));
-                                self.cube_mesh.draw(&context.device, cmd);
+                                    porte_une_ombre: true,
+                                });
                             }
                         }
 
@@ -505,18 +514,27 @@ impl PartyRenderPass {
                                     let blade_m = Mat4::from_translation(Vec3::new(blade_x, y as f32 + 1.0 + blade_h * 0.45, 0.02))
                                         * Mat4::from_rotation_z(((h % 20) as f32 - 10.0) * 0.02)
                                         * Mat4::from_scale(Vec3::new(blade_w, blade_h, 0.18));
-                                    let blade_push = PushConstants {
-                                        model_matrix: blade_m,
-                                        color_tint: green_color,
+                                    self.file.ajouter(aegis_engine::render::file::Dessin {
+                                        maillage: MAILLAGE_CUBE,
+                                        modele: blade_m,
+                                        teinte: green_color,
                                         params: Vec4::new(0.3, 0.0, 0.0, 0.0),
-                                    };
-                                    context.device.cmd_push_constants(cmd, self.pipeline_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, as_bytes(&blade_push));
-                                    self.cube_mesh.draw(&context.device, cmd);
+                                        porte_une_ombre: true,
+                                    });
                                 }
                             }
                         }
                     }
                 }
+            }
+
+            // La file est jouee ICI, apres avoir ete remplie. Le meme contenu servira
+            // a la passe d'ombre, sans que le jeu ait a redire ce qu'il y a a dessiner.
+            let ignores = unsafe {
+                self.file.dessiner(&context.device, cmd, self.pipeline_layout, &[&self.cube_mesh])
+            };
+            if ignores > 0 {
+                log::warn!("file de rendu : {ignores} dessins ignores (maillage inconnu)");
             }
             // Rendu de l'Immense Bande Noire du Vide (Void Kill Line - 5 blocs en dessous du bloc le plus bas)
             let void_y = game.grid.get_void_kill_y();
