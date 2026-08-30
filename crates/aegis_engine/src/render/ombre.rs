@@ -175,6 +175,7 @@ impl Ombre {
             crate::render::pipeline::Reglages {
                 // Aucune cible de couleur : cette passe n'écrit que de la profondeur.
                 color_format: vk::Format::UNDEFINED,
+                second_format: None,
                 depth_format: Some(format),
                 depth_write: true,
                 melange: crate::render::pipeline::Melange::Aucun,

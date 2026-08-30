@@ -598,6 +598,8 @@ mod tests {
         ("halo_extraction.wgsl", include_str!("../shaders/halo_extraction.wgsl")),
         ("halo_descente.wgsl", include_str!("../shaders/halo_descente.wgsl")),
         ("halo_montee.wgsl", include_str!("../shaders/halo_montee.wgsl")),
+        ("occlusion.wgsl", include_str!("../shaders/occlusion.wgsl")),
+        ("copie.wgsl", include_str!("../shaders/copie.wgsl")),
     ];
 
     /// ⚠⚠ LE TEST QUI REND LA FRONTIÈRE INATTEIGNABLE, pas seulement écrite.

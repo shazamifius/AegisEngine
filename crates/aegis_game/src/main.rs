@@ -431,6 +431,13 @@ impl AegisApp {
                         },
                     }
                 }
+                console::Ordre::Occlusion { allume } => match self.party_render_pass.as_mut() {
+                    None => log::warn!("[occlusion] rien a regler : le rendu n'est pas encore ne"),
+                    Some(rendu) => {
+                        let retenu = rendu.regler_occlusion(allume);
+                        log::info!("[occlusion] {}", if retenu { "allumee" } else { "eteinte" });
+                    }
+                },
                 console::Ordre::Halo { allume } => match self.party_render_pass.as_mut() {
                     None => log::warn!("[halo] rien a regler : le rendu n'est pas encore ne"),
                     Some(rendu) => {

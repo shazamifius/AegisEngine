@@ -100,6 +100,9 @@ pub enum Ordre {
     /// montrent pas la même image (la simulation avance à l'horloge murale), donc comparer deux
     /// captures venues de deux lancements n'attribue rien à personne.
     Halo { allume: bool },
+    /// Allumer ou éteindre l'occlusion ambiante — même usage que `Halo` : comparer DANS la même
+    /// exécution, parce que deux lancements ne montrent pas la même image.
+    Occlusion { allume: bool },
 }
 
 /// L'instantané que la boucle publie pour la console. Volontairement plat et textuel : ce qui se
@@ -272,6 +275,7 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
             "tonalite            — MESURE ce que l'image fait a l'oeil (clarte, vivacite, familles)",
             "ambiance <champ> <valeurs...>",
             "halo on|off        — allume/eteint le halo, pour comparer DANS la meme execution",
+            "occlusion on|off   — allume/eteint l occlusion ambiante, meme usage",
             "                      ciel <r> <v> <b> | sol <r> <v> <b> | exposition <x>",
             "                      point_blanc <x>  | rugosite <x>    | reflectance <x>",
             "— le lobby —",
@@ -406,6 +410,11 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
         //
         // Sa raison d'etre est la MESURE : `capture` avant, `halo off`, `capture` apres, et les
         // deux images sont separees d'une seule image de jeu au lieu d'un lancement entier.
+        ["occlusion", etat @ ("on" | "off")] => {
+            pupitre.deposer(Ordre::Occlusion { allume: *etat == "on" });
+            "demande — le journal du jeu dira ce qui est retenu".to_string()
+        }
+
         ["halo", etat @ ("on" | "off")] => {
             pupitre.deposer(Ordre::Halo { allume: *etat == "on" });
             // Comme pour l'ambiance : l'ordre n'est joue qu'a l'image suivante. Annoncer un

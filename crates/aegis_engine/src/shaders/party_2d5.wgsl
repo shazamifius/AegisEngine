@@ -111,8 +111,24 @@ fn geometrie_schlick(n_dot_v: f32, rugosite: f32) -> f32 {
     return n_dot_v / max(n_dot_v * (1.0 - k) + k, 1e-7);
 }
 
+// ── CE QUE LA PASSE DE SCENE EMET ───────────────────────────────────────────────────────────
+//
+// DEUX images, et la seconde est la condition pour que l'occlusion ambiante soit juste.
+//
+// ⭐ Une fois `direct + ambiante` ecrit, plus rien ne les separe — et l'occlusion ne doit
+// multiplier QUE l'ambiante. Mesure au pied d'un mur ensoleille (direct 1,2, ambiante 0,02,
+// occlusion 0,5) : la valeur juste est 1,21 ; occulter la lumiere totale donne 0,61. Un facteur
+// deux, en plein soleil. On emet donc l'ambiante a part, et une passe de correction lui retire
+// ce que l'occlusion lui enleve.
+struct SortieScene {
+    /// Toute la lumiere : direct + ambiante + emission.
+    @location(0) lumiere: vec4<f32>,
+    /// L'ambiante SEULE, celle que l'occlusion a le droit d'assombrir.
+    @location(1) ambiante: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> SortieScene {
     let N = normalize(in.world_normal);
     let V = normalize(cadre.camera_et_compte.xyz - in.world_position);
     let n_dot_v = max(dot(N, V), 1e-4);
@@ -243,5 +259,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // composition comme le reste — la ou il ne doit pas l'etre. C'est pourquoi le HUD a change de
     // passe le meme jour, et non pas seulement de format.
     let plat = clamp(in.params.w, 0.0, 1.0);
-    return vec4<f32>(mix(eclaire, albedo, plat), 1.0);
+
+    var out: SortieScene;
+    out.lumiere = vec4<f32>(mix(eclaire, albedo, plat), 1.0);
+    // ⚠ Une couleur PLATE n'a pas d'ambiante : elle ne recoit aucune lumiere, donc l'occlusion
+    // n'a rien a lui retirer. Emettre son albedo ici la ferait s'assombrir dans les coins — une
+    // interface qui reagit a la geometrie derriere elle.
+    out.ambiante = vec4<f32>(ambiante * (1.0 - plat), 1.0);
+    return out;
 }

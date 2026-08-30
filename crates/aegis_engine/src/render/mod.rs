@@ -3,6 +3,7 @@ pub mod cibles;
 pub mod ecran;
 pub mod file;
 pub mod instances;
+pub mod occlusion;
 pub mod ombre;
 pub mod pipeline;
 pub mod push_constants;

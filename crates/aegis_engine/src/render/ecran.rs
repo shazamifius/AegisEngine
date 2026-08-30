@@ -234,6 +234,7 @@ impl Ecran {
                 // ⚠ Le format de l'ÉCRAN, pas celui de la scène : c'est la seule passe du moteur
                 // qui écrit dans l'image présentée.
                 color_format: gpu.swapchain_format,
+                second_format: None,
                 depth_format: None,
                 depth_write: false,
                 melange: Melange::Aucun,
@@ -266,6 +267,7 @@ impl Ecran {
         // Tout le halo vit dans le format de la scène, à un seul échantillon et sans profondeur.
         let dans_la_scene = |melange| Reglages {
             color_format: cibles.format_hdr,
+            second_format: None,
             depth_format: None,
             depth_write: false,
             melange,
@@ -707,6 +709,14 @@ impl Ecran {
     /// Le halo est-il allumé ?
     pub fn halo_allume(&self) -> bool {
         self.halo
+    }
+
+    /// Le contrat « une image à lire », partagé par TOUTES les passes plein écran du moteur.
+    ///
+    /// ⚠ L'occlusion le réutilise plutôt que d'en définir un second : deux descriptions du même
+    /// contrat finiraient par diverger, et rien ne le signalerait avant que la carte lise à côté.
+    pub fn layout_descripteur(&self) -> vk::DescriptorSetLayout {
+        self.layout_descripteur
     }
 
     /// Le layout que le jeu doit employer pour dessiner son interface dans la passe de l'écran.

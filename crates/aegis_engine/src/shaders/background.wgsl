@@ -56,8 +56,16 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// Les deux memes sorties que la passe de scene — voir `party_2d5.wgsl`. Un shader qui n'en
+// declarerait qu'une laisserait la seconde image indefinie la ou il dessine, et l'occlusion
+// corrigerait alors sur des valeurs qui ne veulent rien dire.
+struct SortieScene {
+    @location(0) lumiere: vec4<f32>,
+    @location(1) ambiante: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> SortieScene {
     // Du point de l'ecran a la direction que le regard suit dans le monde. Le plan lointain
     // (z = 1) suffit : seule la direction compte, la distance n'a pas de sens pour un ciel.
     let lointain = cadre.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
@@ -68,5 +76,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // dans `composition.wgsl`. Le fond et les objets ne peuvent donc plus vivre dans deux espaces
     // de tons differents — non pas parce qu'on les a regles pareil, mais parce qu'il n'y a plus
     // qu'un seul endroit ou la question se pose.
-    return vec4<f32>(ambiance_hemispherique(direction), 1.0);
+    let ciel = ambiance_hemispherique(direction);
+
+    var out: SortieScene;
+    out.lumiere = vec4<f32>(ciel, 1.0);
+    // ⚠ Le fond n'est PAS de l'ambiante au sens de l'occlusion : c'est le ciel vu en face, et
+    // rien ne peut le cacher. Emettre `ciel` ici le ferait assombrir par l'occlusion des objets
+    // devant lui — un cerne noir autour de chaque silhouette. Il emet donc ZERO.
+    out.ambiante = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    return out;
 }

@@ -21,3 +21,5 @@ pub const COMPOSITION_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), 
 pub const HALO_EXTRACTION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/halo_extraction.vert.spv"));
 pub const HALO_DESCENTE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/halo_descente.vert.spv"));
 pub const HALO_MONTEE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/halo_montee.vert.spv"));
+pub const OCCLUSION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/occlusion.vert.spv"));
+pub const COPIE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/copie.vert.spv"));

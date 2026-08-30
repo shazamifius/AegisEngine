@@ -270,7 +270,42 @@ pub struct Cibles {
     /// La scène en lumière, après moyenne des échantillons. C'est **elle** que le halo lit et que
     /// la composition porte à l'écran — l'image présentée n'est plus jamais dessinée directement.
     resolue: ImageAllouee,
+    /// L'AMBIANTE seule, écrite par la passe de scène en même temps que la lumière totale.
+    ///
+    /// ## ⭐ Pourquoi une seconde image plutôt qu'un calcul en post-traitement
+    ///
+    /// L'occlusion ambiante ne doit multiplier **que** l'ambiante : une surface en plein soleil au
+    /// fond d'un coin reste éclairée par le soleil. Or une fois la scène écrite, direct et ambiante
+    /// sont additionnés et plus rien ne les sépare.
+    ///
+    /// Mesuré au pied d'un mur ensoleillé — direct 1,2, ambiante 0,02, occlusion 0,5 : la valeur
+    /// juste est **1,21**, celle qu'on obtient en occultant la lumière totale est **0,61**. *Un
+    /// facteur deux, en plein soleil, sur une image dont on vient justement de monter le rapport
+    /// direct/ambiant.* La séparation n'est pas un raffinement, c'est la condition pour que l'effet
+    /// ne soit pas faux.
+    ///
+    /// Elle suit exactement le sort de la couleur : multi-échantillonnée et passagère pendant la
+    /// passe, réduite en fin de passe vers une image lisible.
+    ambiante: Option<ImageAllouee>,
+    ambiante_resolue: ImageAllouee,
     profondeur: ImageAllouee,
+    /// La profondeur à **un seul échantillon**, lisible par un shader.
+    ///
+    /// ## ⚠ Pourquoi elle existe en plus de l'autre, et ce qu'elle coûte
+    ///
+    /// La profondeur de la passe est multi-échantillonnée et **passagère** : sur un GPU à tuiles
+    /// elle ne touche jamais la mémoire centrale, et c'est ce qui rend l'anti-crénelage abordable.
+    /// Une texture, elle, doit exister pour de bon et n'avoir qu'un échantillon par pixel.
+    ///
+    /// Vulkan sait faire la réduction en fin de passe, exactement comme pour la couleur. Le mode
+    /// retenu est `SAMPLE_ZERO` — on garde le premier échantillon plutôt que d'en faire une
+    /// moyenne : **moyenner des profondeurs n'a aucun sens.** La moyenne de « 3 m » et « 10 m »
+    /// donne 6,5 m, une distance où il n'y a rien, et l'occlusion se calculerait sur une surface
+    /// fantôme le long de chaque arête.
+    ///
+    /// Absente quand il n'y a pas d'anti-crénelage : la profondeur ordinaire fait alors l'affaire,
+    /// et allouer une copie identique serait de l'excédent.
+    profondeur_lisible: Option<ImageAllouee>,
 }
 
 impl Cibles {
@@ -352,15 +387,64 @@ impl Cibles {
             false,
         )?;
 
+        let multi = echantillons != vk::SampleCountFlags::TYPE_1;
+
+        // L'ambiante suit la couleur : passagère et multi-échantillonnée s'il y a lieu, réduite
+        // vers une image que l'occlusion pourra lire.
+        let ambiante = if multi {
+            Some(ImageAllouee::creer(
+                gpu,
+                memory_props,
+                format_hdr,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                vk::ImageAspectFlags::COLOR,
+                echantillons,
+                true,
+            )?)
+        } else {
+            None
+        };
+
+        let ambiante_resolue = ImageAllouee::creer(
+            gpu,
+            memory_props,
+            format_hdr,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageAspectFlags::COLOR,
+            vk::SampleCountFlags::TYPE_1,
+            false,
+        )?;
+
         let profondeur = ImageAllouee::creer(
             gpu,
             memory_props,
             format_profondeur,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            // ⚠ `SAMPLED` seulement quand elle est LA profondeur lisible (pas d'anti-crenelage) :
+            // une image multi-echantillonnee passagere ne doit surtout pas devenir une texture,
+            // ce serait renoncer a tout ce que `TRANSIENT_ATTACHMENT` fait gagner.
+            if multi {
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+            } else {
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
+            },
             vk::ImageAspectFlags::DEPTH,
             echantillons,
-            true,
+            multi,
         )?;
+
+        let profondeur_lisible = if multi {
+            Some(ImageAllouee::creer(
+                gpu,
+                memory_props,
+                format_profondeur,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                vk::ImageAspectFlags::DEPTH,
+                vk::SampleCountFlags::TYPE_1,
+                false,
+            )?)
+        } else {
+            None
+        };
 
         let combien = 1u32 << (echantillons.as_raw().trailing_zeros());
         log::info!(
@@ -369,7 +453,17 @@ impl Cibles {
             gpu.swapchain_extent.height
         );
 
-        Ok(Self { echantillons, format_profondeur, format_hdr, couleur, resolue, profondeur })
+        Ok(Self {
+            echantillons,
+            format_profondeur,
+            format_hdr,
+            couleur,
+            resolue,
+            ambiante,
+            ambiante_resolue,
+            profondeur,
+            profondeur_lisible,
+        })
     }
 
     /// La vue dans laquelle la passe de scène écrit ses couleurs.
@@ -397,12 +491,57 @@ impl Cibles {
         self.resolue.image
     }
 
+    /// La vue dans laquelle la passe de scène écrit l'AMBIANTE.
+    pub fn vue_ambiante(&self) -> vk::ImageView {
+        match &self.ambiante {
+            Some(a) => a.vue,
+            None => self.ambiante_resolue.vue,
+        }
+    }
+
+    pub fn image_ambiante(&self) -> Option<vk::Image> {
+        self.ambiante.as_ref().map(|a| a.image)
+    }
+
+    /// L'ambiante réduite : ce que la correction d'occlusion lit.
+    pub fn vue_ambiante_resolue(&self) -> vk::ImageView {
+        self.ambiante_resolue.vue
+    }
+
+    pub fn image_ambiante_resolue(&self) -> vk::Image {
+        self.ambiante_resolue.image
+    }
+
     pub fn vue_profondeur(&self) -> vk::ImageView {
         self.profondeur.vue
     }
 
     pub fn image_profondeur(&self) -> vk::Image {
         self.profondeur.image
+    }
+
+    /// La profondeur qu'un shader peut lire — la résolue s'il y a de l'anti-crénelage, l'unique
+    /// sinon. **Un seul appelant, un seul concept** : rien en aval n'a à savoir laquelle c'est.
+    pub fn vue_profondeur_lisible(&self) -> vk::ImageView {
+        match &self.profondeur_lisible {
+            Some(p) => p.vue,
+            None => self.profondeur.vue,
+        }
+    }
+
+    pub fn image_profondeur_lisible(&self) -> vk::Image {
+        match &self.profondeur_lisible {
+            Some(p) => p.image,
+            None => self.profondeur.image,
+        }
+    }
+
+    /// La vue vers laquelle réduire les échantillons de profondeur, quand il y en a plusieurs.
+    ///
+    /// ⚠ Rend `None` sans anti-crénelage, et c'est ce qui doit décider : demander une réduction
+    /// sur une passe à un seul échantillon est refusé par la carte.
+    pub fn resolution_profondeur(&self) -> Option<vk::ImageView> {
+        self.profondeur_lisible.as_ref().map(|p| p.vue)
     }
 
     /// Vrai quand la passe doit moyenner ses échantillons vers la scène résolue.
@@ -432,7 +571,14 @@ impl Cibles {
             c.detruire(device);
         }
         self.resolue.detruire(device);
+        if let Some(a) = &self.ambiante {
+            a.detruire(device);
+        }
+        self.ambiante_resolue.detruire(device);
         self.profondeur.detruire(device);
+        if let Some(p) = &self.profondeur_lisible {
+            p.detruire(device);
+        }
     }
 }
 

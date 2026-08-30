@@ -133,6 +133,8 @@ pub struct PartyRenderPass {
     hud_pipeline: vk::Pipeline,
     /// Ce qui porte la lumière au pixel : la courbe de tonalité, appliquée une seule fois.
     ecran: aegis_engine::render::ecran::Ecran,
+    /// Ce que le ciel ne voit pas — retiré de l'ambiante, et d'elle seule.
+    occlusion: aegis_engine::render::occlusion::Occlusion,
     pipeline_layout: vk::PipelineLayout,
     /// Ce qui est vrai pour toute l'image : la vue-projection, la caméra, les lumières.
     cadre: aegis_engine::render::cadre::Cadre,
@@ -271,6 +273,10 @@ impl PartyRenderPass {
                 // Se tromper ici donne un pipeline que la carte refuse de creer, avec un message
                 // sur les formats d'attachement — c'est la bonne nouvelle, il ne passe pas.
                 color_format: cibles.format_hdr,
+                // ⚠ La seconde sortie porte l'AMBIANTE seule. Un shader qui declare `@location(1)`
+                // sans que ce format soit renseigne — ou l'inverse — donne un pipeline que la carte
+                // refuse : les deux se decident ensemble.
+                second_format: Some(cibles.format_hdr),
                 // Le fond n'a ni profondeur ni sommets : son shader fabrique ses trois points.
                 depth_format: None,
                 depth_write: false,
@@ -287,6 +293,7 @@ impl PartyRenderPass {
             p_frag_mod,
             aegis_engine::render::pipeline::Reglages {
                 color_format: cibles.format_hdr,
+                second_format: Some(cibles.format_hdr),
                 depth_format: Some(depth_format),
                 depth_write: true,
                 melange: aegis_engine::render::pipeline::Melange::Aucun,
@@ -302,6 +309,7 @@ impl PartyRenderPass {
             p_frag_mod,
             aegis_engine::render::pipeline::Reglages {
                 color_format: cibles.format_hdr,
+                second_format: Some(cibles.format_hdr),
                 // Les particules se melangent et n'ecrivent pas la profondeur : sinon la premiere
                 // dessinee masquerait toutes celles qui sont derriere elle.
                 depth_format: Some(depth_format),
@@ -320,6 +328,16 @@ impl PartyRenderPass {
             memory_props,
             &cibles,
             cadre.layout_descripteur,
+        )?;
+
+        // ⭐ L'occlusion reutilise le contrat de l'ecran plutot que d'en definir un second : une
+        // passe plein ecran lit une image, quelle qu'elle soit, et deux descriptions du meme
+        // contrat finiraient par diverger sans que rien ne le signale.
+        let occlusion = aegis_engine::render::occlusion::Occlusion::nouvelle(
+            gpu,
+            &cibles,
+            ecran.layout_descripteur(),
+            ecran.layout_pipeline(),
         )?;
 
         // ── LE MEME SHADER, MONTE UNE SECONDE FOIS POUR L'INTERFACE ──────────────────────────
@@ -346,6 +364,7 @@ impl PartyRenderPass {
             p_frag_mod,
             aegis_engine::render::pipeline::Reglages {
                 color_format: gpu.swapchain_format,
+                second_format: None,
                 depth_format: None,
                 depth_write: false,
                 melange: aegis_engine::render::pipeline::Melange::Aucun,
@@ -368,6 +387,7 @@ impl PartyRenderPass {
             particle_pipeline,
             hud_pipeline,
             ecran,
+            occlusion,
             pipeline_layout,
             cadre,
             file: aegis_engine::render::file::File::nouvelle(),
@@ -699,7 +719,50 @@ impl PartyRenderPass {
             // chaque image (`UNDEFINED`) et rien d'autre ne la fait entrer dans la disposition
             // d'attachement. L'oublier ne produit aucune erreur — juste un rendu indefini, ce que
             // le pilote a le droit de faire ressembler a n'importe quoi.
-            let mut barrieres = vec![barrier_scene, barrier_depth];
+            // ⚠ Chaque image ECRITE par la passe a besoin d'entrer dans sa disposition, y compris
+            // celles qui ne sont que des cibles de reduction : la carte y ecrit a la fin de la
+            // passe, et une image restee `UNDEFINED` y recoit un contenu que rien ne definit.
+            let en_attachement = |image, aspect, acces| {
+                vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(if aspect == vk::ImageAspectFlags::DEPTH {
+                        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                    } else {
+                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+                    })
+                    .src_access_mask(vk::AccessFlags::NONE)
+                    .dst_access_mask(acces)
+                    .image(image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: aspect,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+            };
+
+            let mut barrieres = vec![
+                barrier_scene,
+                barrier_depth,
+                en_attachement(
+                    self.cibles.image_ambiante_resolue(),
+                    vk::ImageAspectFlags::COLOR,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                ),
+                en_attachement(
+                    self.cibles.image_profondeur_lisible(),
+                    vk::ImageAspectFlags::DEPTH,
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                ),
+            ];
+            if let Some(image_ambiante) = self.cibles.image_ambiante() {
+                barrieres.push(en_attachement(
+                    image_ambiante,
+                    vk::ImageAspectFlags::COLOR,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                ));
+            }
             if let Some(image_msaa) = self.cibles.image_couleur() {
                 barrieres.push(
                     vk::ImageMemoryBarrier::default()
@@ -753,6 +816,28 @@ impl PartyRenderPass {
                     .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
             }
 
+            // ⚠ La SECONDE cible : l'ambiante seule. Elle suit exactement le sort de la couleur —
+            // multi-echantillonnee et jetee apres la moyenne, ou ecrite directement s'il n'y a pas
+            // d'anti-crenelage. C'est elle qui rend l'occlusion ambiante juste plutot qu'a peu pres.
+            let mut ambiante_attach = vk::RenderingAttachmentInfo::default()
+                .image_view(self.cibles.vue_ambiante())
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(if self.cibles.resout() {
+                    vk::AttachmentStoreOp::DONT_CARE
+                } else {
+                    vk::AttachmentStoreOp::STORE
+                })
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] },
+                });
+            if self.cibles.resout() {
+                ambiante_attach = ambiante_attach
+                    .resolve_mode(vk::ResolveModeFlags::AVERAGE)
+                    .resolve_image_view(self.cibles.vue_ambiante_resolue())
+                    .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            }
+
             let depth_attach = vk::RenderingAttachmentInfo::default()
                 .image_view(self.cibles.vue_profondeur())
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -760,10 +845,23 @@ impl PartyRenderPass {
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } });
 
+            // ⚠ La profondeur est REDUITE elle aussi, en `SAMPLE_ZERO` : on garde le premier
+            // echantillon plutot que d'en faire une moyenne. Moyenner des profondeurs n'a aucun
+            // sens — la moyenne de « 3 m » et « 10 m » designe une distance ou il n'y a rien, et
+            // l'occlusion se calculerait sur une surface fantome le long de chaque arete.
+            let depth_attach = match self.cibles.resolution_profondeur() {
+                None => depth_attach,
+                Some(vers) => depth_attach
+                    .resolve_mode(vk::ResolveModeFlags::SAMPLE_ZERO)
+                    .resolve_image_view(vers)
+                    .resolve_image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            };
+
+            let attaches = [color_attach, ambiante_attach];
             let rendering_info = vk::RenderingInfo::default()
                 .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: context.swapchain_extent })
                 .layer_count(1)
-                .color_attachments(std::slice::from_ref(&color_attach))
+                .color_attachments(&attaches)
                 .depth_attachment(&depth_attach);
 
             context.device.cmd_begin_rendering(cmd, &rendering_info);
@@ -1350,6 +1448,61 @@ impl PartyRenderPass {
             // d'un pixel dit encore combien il est lumineux, pas seulement combien il est clair.
             context.device.cmd_end_rendering(cmd);
 
+            // ⭐ L'OCCLUSION AMBIANTE : ce que le ciel ne voit pas, retiré de l'ambiante SEULE.
+            //
+            // ⚠ Elle vient AVANT le halo, et l'ordre compte : une zone occluse ne doit pas
+            // déborder du blanc à cause d'une lumière qu'elle ne reçoit pas. Le halo doit donc
+            // voir la scène déjà corrigée.
+            //
+            // La profondeur et l'ambiante réduites passent d'abord en lecture — elles sortent de
+            // la passe en disposition d'attachement.
+            let en_lecture = |image, aspect, vers| {
+                vk::ImageMemoryBarrier::default()
+                    .old_layout(if aspect == vk::ImageAspectFlags::DEPTH {
+                        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                    } else {
+                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+                    })
+                    .new_layout(vers)
+                    .src_access_mask(if aspect == vk::ImageAspectFlags::DEPTH {
+                        vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                    } else {
+                        vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    })
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .image(image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: aspect,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+            };
+            context.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[en_lecture(
+                    self.cibles.image_profondeur_lisible(),
+                    vk::ImageAspectFlags::DEPTH,
+                    vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                )],
+            );
+
+            self.occlusion.appliquer(
+                &context.device,
+                cmd,
+                &self.cibles,
+                context.swapchain_extent,
+            );
+
+            context.jalon(cmd, "occlusion");
+
             // ⚠ DEUX barrières, et aucune n'est facultative :
             //  • la scène passe d'attachement à texture — sans cette barrière, la composition
             //    lirait des pixels que la carte n'a pas fini d'écrire ;
@@ -1390,6 +1543,7 @@ impl PartyRenderPass {
                 &[],
                 &[scene_en_lecture, fenetre_en_attachement],
             );
+
 
             // ⭐ LE HALO : ce que l'écran ne peut pas montrer, rendu visible autour de sa source.
             //
@@ -1528,6 +1682,12 @@ impl PartyRenderPass {
         self.ecran.halo_allume()
     }
 
+    /// Allume ou éteint l'occlusion ambiante. Rend son nouvel état.
+    pub fn regler_occlusion(&mut self, allume: bool) -> bool {
+        self.occlusion.allumer(allume);
+        self.occlusion.active()
+    }
+
     /// L'ambiance courante, écrite telle qu'elle se recolle dans ce fichier.
     pub fn ambiance_decrite(&self) -> String {
         self.ambiance.decrire()
@@ -1564,5 +1724,7 @@ impl PartyRenderPass {
         if let Err(e) = self.ecran.redimensionner(gpu, memory_props, &self.cibles) {
             log::error!("chaine de l'ecran non recreee apres redimensionnement : {e}");
         }
+        // ⚠ L'occlusion pointe sur la profondeur et l'ambiante, qui viennent d'etre refaites.
+        self.occlusion.brancher(&gpu.device, &self.cibles, self.ecran.layout_descripteur());
     }
 }

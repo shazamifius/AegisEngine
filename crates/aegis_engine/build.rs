@@ -69,6 +69,8 @@ fn main() {
         ("halo_extraction.wgsl", "halo_extraction.vert.spv", "halo_extraction.frag.spv"),
         ("halo_descente.wgsl", "halo_descente.vert.spv", "halo_descente.frag.spv"),
         ("halo_montee.wgsl", "halo_montee.vert.spv", "halo_montee.frag.spv"),
+        ("occlusion.wgsl", "occlusion.vert.spv", "occlusion.frag.spv"),
+        ("copie.wgsl", "copie.vert.spv", "copie.frag.spv"),
     ];
 
     for (src_file, vert_out, frag_out) in shaders {

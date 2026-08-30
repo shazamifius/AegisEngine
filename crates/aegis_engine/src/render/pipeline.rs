@@ -4,14 +4,6 @@ use ash::Device;
 /// Usine de création de Pipelines Graphiques et Compute Native Vulkan 1.4.
 pub struct PipelineFactory;
 
-/// Comment un pipeline doit dessiner.
-///
-/// ## Pourquoi ce type plutôt que six arguments
-///
-/// La fabrique s'appelait avec `..., true, false, true, TYPE_4)`. Trois booléens nus, dans un
-/// ordre qu'il fallait retenir : intervertir « écrit la profondeur » et « mélange les couleurs »
-/// produit un pipeline parfaitement valide qui dessine mal, et **rien ne le signale**. Nommer
-/// chaque réglage au point d'appel rend cette faute visible en la lisant.
 /// Comment un dessin se combine avec ce qui est déjà là.
 ///
 /// ⚠ C'était un booléen `blend_enable` jusqu'au 30 août 2026. Le halo a besoin d'un troisième
@@ -41,14 +33,48 @@ pub enum Melange {
     /// La valeur est gravée dans le pipeline (`blend_constants`), pas réglée à l'exécution : elle
     /// se démontre, elle ne se choisit pas.
     Moitie,
+    /// Le dessin MULTIPLIE ce qui est là. `dst = src × dst`.
+    ///
+    /// ⭐ C'est ce qui permet à l'occlusion de moduler l'ambiante **sans lire deux textures** : au
+    /// lieu d'un shader qui prendrait l'ambiante et l'occlusion pour les combiner, une simple
+    /// copie de l'occlusion multiplie l'ambiante en place. La carte fait la combinaison, et chaque
+    /// passe de la chaîne ne lit jamais qu'une image — donc un seul agencement de descripteurs
+    /// pour toutes.
+    Multiplicatif,
+    /// Le dessin se RETIRE de ce qui est là. `dst = dst − src`.
+    ///
+    /// ⚠ La cible est en format **non signé** : ce qui passerait sous zéro est écrêté. Ce n'est
+    /// pas un problème ici — on retire de l'ambiante à une somme qui la contient — mais un usage
+    /// futur qui compterait sur des valeurs négatives se ferait avoir en silence.
+    Soustractif,
 }
 
 /// La constante de mélange de `Melange::Moitie`. Voir la démonstration ci-dessus.
 const MOITIE: [f32; 4] = [0.5, 0.5, 0.5, 0.5];
 
+/// Comment un pipeline doit dessiner.
+///
+/// ## Pourquoi ce type plutôt que six arguments
+///
+/// La fabrique s'appelait avec `..., true, false, true, TYPE_4)`. Trois booléens nus, dans un
+/// ordre qu'il fallait retenir : intervertir « écrit la profondeur » et « mélange les couleurs »
+/// produit un pipeline parfaitement valide qui dessine mal, et **rien ne le signale**. Nommer
+/// chaque réglage au point d'appel rend cette faute visible en la lisant.
 pub struct Reglages {
     /// Format de la cible couleur. `UNDEFINED` veut dire « passe de profondeur pure ».
     pub color_format: vk::Format,
+    /// Le format d'une **seconde** cible couleur, quand la passe en écrit deux.
+    ///
+    /// ⭐ La passe de scène s'en sert pour émettre l'AMBIANTE à part de la lumière totale. C'est ce
+    /// qui rend l'occlusion ambiante exacte : elle ne doit multiplier *que* l'ambiante, jamais la
+    /// lumière directe. Mesuré au pied d'un mur ensoleillé — direct 1,2, ambiante 0,02, occlusion
+    /// 0,5 — la valeur juste est 1,21 et celle qu'on obtient en occultant tout est 0,61. **Un
+    /// facteur deux, en plein soleil.** Séparer n'est donc pas un raffinement, c'est la condition
+    /// pour que l'effet ne soit pas faux.
+    ///
+    /// ⚠ Un shader qui déclare `@location(1)` DOIT trouver ce format renseigné, et l'inverse est
+    /// vrai aussi : les deux se décident ensemble ou la carte refuse le pipeline.
+    pub second_format: Option<vk::Format>,
     pub depth_format: Option<vk::Format>,
     /// Ce dessin met-il à jour la profondeur, ou se contente-t-il de la tester ?
     pub depth_write: bool,
@@ -127,6 +153,7 @@ impl PipelineFactory {
     ) -> Result<vk::Pipeline, Box<dyn std::error::Error>> {
         let Reglages {
             color_format,
+            second_format,
             depth_format,
             depth_write,
             melange,
@@ -270,6 +297,29 @@ impl PipelineFactory {
                 .dst_color_blend_factor(vk::BlendFactor::CONSTANT_COLOR)
                 .src_alpha_blend_factor(vk::BlendFactor::CONSTANT_ALPHA)
                 .dst_alpha_blend_factor(vk::BlendFactor::CONSTANT_ALPHA),
+            Melange::Multiplicatif => base
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::DST_COLOR)
+                .dst_color_blend_factor(vk::BlendFactor::ZERO)
+                .src_alpha_blend_factor(vk::BlendFactor::DST_ALPHA)
+                .dst_alpha_blend_factor(vk::BlendFactor::ZERO),
+            // ⚠ `REVERSE_SUBTRACT` calcule `dst − src`, et non `src − dst` : les deux existent et
+            // les confondre donne exactement l'image en négatif.
+            Melange::Soustractif => base
+                .blend_enable(true)
+                .color_blend_op(vk::BlendOp::REVERSE_SUBTRACT)
+                .alpha_blend_op(vk::BlendOp::REVERSE_SUBTRACT)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ONE)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE),
+        };
+
+        // ⚠ Chaque attachement porte son propre mélange, et Vulkan exige autant d'états que
+        // d'attachements. Le second reçoit le même que le premier : l'ambiante suit la couleur.
+        let attachements = match second_format {
+            None => vec![color_blend_attachment],
+            Some(_) => vec![color_blend_attachment, color_blend_attachment],
         };
 
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
@@ -279,7 +329,7 @@ impl PipelineFactory {
             // n'offrirait qu'une occasion de l'oublier. Sans état dynamique correspondant, une
             // valeur non posée serait zéro — c'est-à-dire un halo entièrement noir.
             .blend_constants(MOITIE)
-            .attachments(std::slice::from_ref(&color_blend_attachment));
+            .attachments(&attachements);
 
         let dynamic_states: &[vk::DynamicState] = if passe_de_profondeur_seule {
             &[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::DEPTH_BIAS]
@@ -288,10 +338,13 @@ impl PipelineFactory {
         };
         let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(dynamic_states);
 
+        let formats = match second_format {
+            None => vec![color_format],
+            Some(second) => vec![color_format, second],
+        };
         let mut rendering_create_info = vk::PipelineRenderingCreateInfo::default();
         if !passe_de_profondeur_seule {
-            rendering_create_info =
-                rendering_create_info.color_attachment_formats(std::slice::from_ref(&color_format));
+            rendering_create_info = rendering_create_info.color_attachment_formats(&formats);
         }
         if let Some(df) = depth_format {
             rendering_create_info = rendering_create_info.depth_attachment_format(df);
