@@ -63,8 +63,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let lointain = cadre.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
     let direction = normalize(lointain.xyz / lointain.w - cadre.camera_et_compte.xyz);
 
-    // Exactement la meme courbe que les objets : c'est ce qui fait qu'ils appartiennent a la
-    // meme image. Un fond qui ne passerait pas par `presenter` vivrait dans un autre espace de
-    // tons, et le probleme d'origine reviendrait par une autre porte.
-    return vec4<f32>(presenter(ambiance_hemispherique(direction)), 1.0);
+    // ⚠ Aucune courbe de tonalite ici, et c'est le changement du 30 aout : ce shader ecrit de la
+    // LUMIERE, pas une couleur d'ecran. La courbe est appliquee une seule fois, tout a la fin,
+    // dans `composition.wgsl`. Le fond et les objets ne peuvent donc plus vivre dans deux espaces
+    // de tons differents — non pas parce qu'on les a regles pareil, mais parce qu'il n'y a plus
+    // qu'un seul endroit ou la question se pose.
+    return vec4<f32>(ambiance_hemispherique(direction), 1.0);
 }

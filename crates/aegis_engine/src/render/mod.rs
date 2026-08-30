@@ -1,5 +1,6 @@
 pub mod cadre;
 pub mod cibles;
+pub mod ecran;
 pub mod file;
 pub mod instances;
 pub mod ombre;

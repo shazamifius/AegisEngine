@@ -27,7 +27,25 @@ pub struct PushConstants {
     /// place pendant que la caméra bouge.
     pub model_matrix: Mat4,
     pub color_tint: Vec4,
-    /// Quatre réglages libres lus par le shader. `w` vaut `COULEUR_PLATE` pour sortir la teinte
-    /// telle quelle, sans lampe ni correction gamma — c'est ce dont l'interface 2D a besoin.
+    /// Quatre réglages, dont **deux seulement sont lus** — et le dire est le point de ce
+    /// commentaire.
+    ///
+    /// | | rôle | lu par le shader ? |
+    /// |---|---|---|
+    /// | `x` | posé partout entre 0,1 et 0,8, sans que rien ne dise ce qu'il signifie | **non** |
+    /// | `y` | l'émission : combien l'objet brille de lui-même | oui, depuis le 30 août 2026 |
+    /// | `z` | jamais posé autrement qu'à zéro | non |
+    /// | `w` | `COULEUR_PLATE` pour sortir la teinte telle quelle, sans lampe ni courbe | oui |
+    ///
+    /// ⚠⚠ **`y` a voyagé pendant des mois sans que personne ne le lise.** Le jeu posait `8.0` sur
+    /// les étincelles et `5.0` sur l'aperçu du curseur ; le shader ne prenait que `w`. Rien ne
+    /// pouvait le signaler — le code qui pose est juste, celui qui transporte aussi, et un champ
+    /// qu'on n'ouvre pas ne produit aucun avertissement. *C'est le halo qui l'a révélé, en ne
+    /// faisant rien du tout.*
+    ///
+    /// ⚠ **`x` est la même dette, encore ouverte.** Neuf appels le posent à `0.3`, cinq à `0.2`,
+    /// un à `0.8` — vraisemblablement une rugosité ou un aspect métallique, mais **c'est une
+    /// supposition** et on ne devine pas un contrat. Elle se fermera avec les matériaux, qui sont
+    /// l'endroit où cette valeur aurait toujours dû vivre.
     pub params: Vec4,
 }

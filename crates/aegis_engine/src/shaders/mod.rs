@@ -11,3 +11,13 @@ pub const PARTY_2D5_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/
 // C'est la garde des couleurs qui l'a trouve, en cherchant autre chose.
 pub const OMBRE_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ombre.vert.spv"));
 pub const OMBRE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ombre.frag.spv"));
+pub const COMPOSITION_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/composition.vert.spv"));
+pub const COMPOSITION_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/composition.frag.spv"));
+
+// ⚠ Les trois passes du halo n'ont qu'une constante chacune : `build.rs` ecrit le meme SPIR-V
+// pour le sommet et le fragment (les deux points d'entree vivent dans le meme module), et
+// `Ecran` monte donc le meme module aux deux etages. Une seconde constante identique ne
+// tromperait que son lecteur.
+pub const HALO_EXTRACTION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/halo_extraction.vert.spv"));
+pub const HALO_DESCENTE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/halo_descente.vert.spv"));
+pub const HALO_MONTEE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/halo_montee.vert.spv"));

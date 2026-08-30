@@ -94,6 +94,12 @@ pub enum Ordre {
     /// ferait une seconde vérité, qui se périmerait au premier champ ajouté — le défaut même que
     /// tout le travail du jour a consisté à fermer ailleurs.
     Ambiance { champ: String, valeurs: Vec<f32> },
+    /// Allumer ou éteindre le halo, pour comparer les deux DANS LA MÊME exécution.
+    ///
+    /// ⚠ Ce n'est pas un réglage de confort : c'est un instrument. Deux exécutions du jeu ne
+    /// montrent pas la même image (la simulation avance à l'horloge murale), donc comparer deux
+    /// captures venues de deux lancements n'attribue rien à personne.
+    Halo { allume: bool },
 }
 
 /// L'instantané que la boucle publie pour la console. Volontairement plat et textuel : ce qui se
@@ -265,6 +271,7 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
             "ambiance            — le reglage courant, pret a recoller dans le code du jeu",
             "tonalite            — MESURE ce que l'image fait a l'oeil (clarte, vivacite, familles)",
             "ambiance <champ> <valeurs...>",
+            "halo on|off        — allume/eteint le halo, pour comparer DANS la meme execution",
             "                      ciel <r> <v> <b> | sol <r> <v> <b> | exposition <x>",
             "                      point_blanc <x>  | rugosite <x>    | reflectance <x>",
             "— le lobby —",
@@ -393,6 +400,17 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
         ["tonalite"] => {
             pupitre.deposer(Ordre::Tonalite);
             "mesure demandee — le releve arrive dans le journal du jeu".to_string()
+        }
+
+        // ── LE HALO ─────────────────────────────────────────────────────────────────────────
+        //
+        // Sa raison d'etre est la MESURE : `capture` avant, `halo off`, `capture` apres, et les
+        // deux images sont separees d'une seule image de jeu au lieu d'un lancement entier.
+        ["halo", etat @ ("on" | "off")] => {
+            pupitre.deposer(Ordre::Halo { allume: *etat == "on" });
+            // Comme pour l'ambiance : l'ordre n'est joue qu'a l'image suivante. Annoncer un
+            // succes qu'on n'a pas constate serait une victoire prematuree de trois mots.
+            "demande — le journal du jeu dira ce qui est retenu".to_string()
         }
 
         // ── LE LABORATOIRE D'AMBIANCE ───────────────────────────────────────────────────────

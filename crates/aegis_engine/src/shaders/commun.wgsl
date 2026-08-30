@@ -126,3 +126,33 @@ fn presenter(lumiere_lineaire: vec3<f32>) -> vec3<f32> {
     return eclaire * (vec3<f32>(1.0) + eclaire / (point_blanc * point_blanc))
          / (vec3<f32>(1.0) + eclaire);
 }
+
+// ── CE QUE L'ECRAN NE PEUT PAS MONTRER ──────────────────────────────────────────────────────
+//
+// ## ⭐ Le seuil du halo n'est pas un reglage : c'est une consequence
+//
+// Un halo se decrit partout comme « ce qui depasse un SEUIL », et ce seuil est presque toujours
+// un curseur — 0,8 ? 1,0 ? 1,2 ? Un chiffre a justifier pour toujours, faux des qu'on touche a
+// l'exposition, et qui fait briller un mur blanc autant qu'une lampe.
+//
+// Il n'y a pourtant rien a choisir. `presenter` porte deja un POINT BLANC : la valeur, une fois
+// exposee, qui arrive exactement a 1,0 sur l'ecran. Au-dela, la courbe compresse — c'est
+// litteralement de la lumiere que l'affichage ne peut PAS rendre a l'endroit ou elle se trouve.
+//
+// Le halo ne l'invente donc pas, il la REND VISIBLE AILLEURS : etalee autour de sa source, ou
+// l'ecran a encore de la place. C'est aussi ce que fait un vrai objectif, et un vrai oeil.
+//
+// La luminance de SCENE qui atteint ce point vaut `point_blanc / exposition` : les deux vivent
+// deja dans le cadre, les deux se reglent au laboratoire, et les deux ont un sens physique.
+// **Aucune constante n'apparait ici, et il n'y en avait aucune a choisir.**
+//
+// ⚠ Ce qui n'est PAS fait, et qu'il ne faut pas se raconter : le debordement n'est pas RETIRE de
+// la source. Un halo physiquement exact deplacerait cette lumiere au lieu de la copier. Ici on
+// l'ajoute — l'image gagne donc un peu d'energie. C'est le choix de tous les moteurs, parce que
+// vider le coeur d'une source la rend terne, mais **ce n'est pas une conservation d'energie** et
+// l'ecrire serait decrire une intention plutot que ce qui est.
+fn seuil_de_debordement() -> f32 {
+    // ⚠ L'exposition peut valoir zero — un reglage de laboratoire, ou un champ jamais rempli. La
+    // division donnerait alors l'infini, qui se propage silencieusement jusqu'a l'ecran noir.
+    return cadre.sol_point_blanc.w / max(cadre.ciel_exposition.w, 1e-4);
+}

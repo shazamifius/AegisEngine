@@ -198,19 +198,50 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // les faire diverger.
     let ambiante = ambiance_hemispherique(N) * albedo;
 
-    // Exposition et courbe de tonalite : `commun.wgsl` a nouveau, et pour la meme raison. Un
-    // second chemin vers le pixel serait une seconde courbe, donc deux mondes qui ne se
-    // repondent plus. Le resultat est LINEAIRE : la surface de presentation encode la gamma.
-    let eclaire = presenter(ambiante + total);
+    // ── CE QUE L'OBJET EMET DE LUI-MEME ─────────────────────────────────────────────────────
+    //
+    // ## ⭐⭐ Un mecanisme branche d'un SEUL COTE, trouve le 30 aout 2026 en cherchant autre chose
+    //
+    // Le jeu pose une valeur d'emission depuis toujours : `8.0` sur les etincelles, `5.0` sur
+    // l'apercu du curseur (« Lueur Emissive Wireframe Preview », dit le commentaire), `1.5` sur
+    // le lance-flammes. Elle traverse le processeur, entre dans le tampon d'instances, arrive
+    // jusqu'ici — et **aucune ligne ne la lisait**. Le shader ne prenait de `params` que sa
+    // composante `w`.
+    //
+    // Personne ne pouvait le voir : le code qui la pose est juste, le code qui la transporte est
+    // juste, et le compilateur n'a rien a dire d'un champ qu'on n'ouvre pas. C'est la famille de
+    // defauts la plus couteuse de ce projet — *du travail correct, branche nulle part.*
+    //
+    // ⚠ Et c'est le halo qui l'a revele, par l'absurde : ajoute la veille, il ne faisait
+    // strictement RIEN, parce que rien dans cette scene ne depassait le blanc affichable. Deux
+    // moities manquantes qui se masquaient l'une l'autre — l'emission sans lecteur, le halo sans
+    // source.
+    //
+    // L'emission MULTIPLIE l'albedo plutot que de s'y ajouter : une etincelle orange doit briller
+    // orange, pas devenir blanche. Et elle n'est bornee par rien — c'est tout l'interet d'une
+    // cible HDR : une valeur de 8 arrive a 8, deborde du blanc, et le halo la diffuse alentour.
+    let emis = albedo * max(in.params.y, 0.0);
+
+    // ⚠ AUCUNE COURBE DE TONALITE ICI DEPUIS LE 30 AOUT : ce shader ecrit de la LUMIERE, dans une
+    // cible HDR, et la courbe s'applique une seule fois tout a la fin (`composition.wgsl`). Une
+    // valeur de 40 sort donc a 40, et ce qui depasse le blanc affichable reste lisible en aval —
+    // c'est ce qui rend le halo possible, et plus generalement tout effet qui doit distinguer ce
+    // qui est LUMINEUX de ce qui est seulement clair.
+    let eclaire = ambiante + total + emis;
 
     // `params.w` a 1.0 = couleur PLATE : celle qui a ete demandee, sans lampe et sans courbe.
     // C'est ce qu'exige une interface : un element de HUD ne vit pas dans la scene, il n'a donc
     // aucune raison de s'assombrir selon l'angle d'une lumiere, ni de changer si on la deplace.
     //
-    // ⚠ Elle sort en `albedo`, c'est-a-dire en LINEAIRE — et c'est ce qui la fait enfin arriver
-    // a l'ecran telle qu'elle a ete demandee. Ecrite brute, elle traversait quand meme l'encodage
+    // ⚠ Elle sort en `albedo`, c'est-a-dire en LINEAIRE — et c'est ce qui la fait arriver a
+    // l'ecran telle qu'elle a ete demandee. Ecrite brute, elle traversait quand meme l'encodage
     // sRGB de la surface : le fond des panneaux du HUD, demande a (13, 15, 20), sortait mesure a
     // (63, 69, 80). Presque cinq fois trop clair, sous un commentaire qui promettait le contraire.
+    //
+    // ⚠⚠ Ce chemin ne sert plus QUE dans la passe de l'ecran, ou ce shader est monte une seconde
+    // fois au format de la fenetre. Un element plat dessine dans la scene serait courbe par la
+    // composition comme le reste — la ou il ne doit pas l'etre. C'est pourquoi le HUD a change de
+    // passe le meme jour, et non pas seulement de format.
     let plat = clamp(in.params.w, 0.0, 1.0);
     return vec4<f32>(mix(eclaire, albedo, plat), 1.0);
 }

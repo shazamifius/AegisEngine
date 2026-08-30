@@ -12,13 +12,47 @@ pub struct PipelineFactory;
 /// ordre qu'il fallait retenir : intervertir « écrit la profondeur » et « mélange les couleurs »
 /// produit un pipeline parfaitement valide qui dessine mal, et **rien ne le signale**. Nommer
 /// chaque réglage au point d'appel rend cette faute visible en la lisant.
+/// Comment un dessin se combine avec ce qui est déjà là.
+///
+/// ⚠ C'était un booléen `blend_enable` jusqu'au 30 août 2026. Le halo a besoin d'un troisième
+/// comportement — **additionner** — et un second booléen à côté du premier aurait rendu deux
+/// combinaisons sur quatre absurdes (« transparent ET additif »). Un choix ferme ce trou : les
+/// états impossibles cessent d'être exprimables.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Melange {
+    /// Le dessin remplace. C'est le cas de tout ce qui est opaque.
+    Aucun,
+    /// Le dessin se pose PAR-DESSUS selon son alpha. Les particules, les aperçus.
+    Transparence,
+    /// Le dessin S'AJOUTE à ce qui est là. De la lumière ne cache jamais de la lumière : elle
+    /// s'y additionne. C'est le seul mélange juste pour un halo, et c'est aussi le seul qui soit
+    /// indépendant de l'ordre — deux sources lumineuses donnent le même résultat dans les deux
+    /// sens, ce qu'aucune transparence ne garantit.
+    Additif,
+    /// **Moitié-moitié** : le dessin compte pour la moitié, ce qui est déjà là pour l'autre.
+    ///
+    /// ⭐ C'est le mélange de la remontée du halo, et le 0,5 n'est pas un réglage : appliqué à
+    /// chaque octave, il donne les poids 1/2, 1/4, 1/8… dont la somme fait **exactement 1**. Le
+    /// halo rend donc l'énergie du débordement, ni plus ni moins, et — ce qu'aucun réglage
+    /// n'aurait donné — son intensité **ne dépend pas du nombre de niveaux**, donc pas de la
+    /// taille de la fenêtre. Un poids « 1/N » aurait fait varier la force de l'effet à chaque
+    /// redimensionnement.
+    ///
+    /// La valeur est gravée dans le pipeline (`blend_constants`), pas réglée à l'exécution : elle
+    /// se démontre, elle ne se choisit pas.
+    Moitie,
+}
+
+/// La constante de mélange de `Melange::Moitie`. Voir la démonstration ci-dessus.
+const MOITIE: [f32; 4] = [0.5, 0.5, 0.5, 0.5];
+
 pub struct Reglages {
     /// Format de la cible couleur. `UNDEFINED` veut dire « passe de profondeur pure ».
     pub color_format: vk::Format,
     pub depth_format: Option<vk::Format>,
     /// Ce dessin met-il à jour la profondeur, ou se contente-t-il de la tester ?
     pub depth_write: bool,
-    pub blend_enable: bool,
+    pub melange: Melange,
     /// Faux pour un shader qui fabrique ses propres sommets, comme le fond.
     pub use_vertex_input: bool,
     /// ⚠ Doit valoir EXACTEMENT l'échantillonnage des images attachées à la passe. Un pipeline qui
@@ -95,7 +129,7 @@ impl PipelineFactory {
             color_format,
             depth_format,
             depth_write,
-            blend_enable,
+            melange,
             use_vertex_input,
             echantillons,
         } = reglages;
@@ -211,24 +245,40 @@ impl PipelineFactory {
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
-        let color_blend_attachment = if blend_enable {
-            vk::PipelineColorBlendAttachmentState::default()
-                .color_write_mask(vk::ColorComponentFlags::RGBA)
+        let base = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .alpha_blend_op(vk::BlendOp::ADD);
+
+        let color_blend_attachment = match melange {
+            Melange::Aucun => base.blend_enable(false),
+            Melange::Transparence => base
                 .blend_enable(true)
                 .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
                 .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                .color_blend_op(vk::BlendOp::ADD)
                 .src_alpha_blend_factor(vk::BlendFactor::ONE)
-                .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
-                .alpha_blend_op(vk::BlendOp::ADD)
-        } else {
-            vk::PipelineColorBlendAttachmentState::default()
-                .color_write_mask(vk::ColorComponentFlags::RGBA)
-                .blend_enable(false)
+                .dst_alpha_blend_factor(vk::BlendFactor::ZERO),
+            Melange::Additif => base
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ONE)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE),
+            Melange::Moitie => base
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::CONSTANT_COLOR)
+                .dst_color_blend_factor(vk::BlendFactor::CONSTANT_COLOR)
+                .src_alpha_blend_factor(vk::BlendFactor::CONSTANT_ALPHA)
+                .dst_alpha_blend_factor(vk::BlendFactor::CONSTANT_ALPHA),
         };
 
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
             .logic_op_enable(false)
+            // ⚠ Gravée dans le pipeline plutôt que posée à l'exécution : elle ne dépend de rien
+            // (ni de la scène, ni de la résolution, ni d'un goût), donc la rendre dynamique
+            // n'offrirait qu'une occasion de l'oublier. Sans état dynamique correspondant, une
+            // valeur non posée serait zéro — c'est-à-dire un halo entièrement noir.
+            .blend_constants(MOITIE)
             .attachments(std::slice::from_ref(&color_blend_attachment));
 
         let dynamic_states: &[vk::DynamicState] = if passe_de_profondeur_seule {

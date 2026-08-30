@@ -575,6 +575,31 @@ mod tests {
         );
     }
 
+    /// Tous les fichiers WGSL du moteur — les shaders compilés **et** les préambules qu'ils
+    /// incluent, puisque la faute peut vivre dans un préambule aussi bien que dans un shader.
+    ///
+    /// ⚠⚠ **UNE SEULE LISTE, et c'est le point.** Elle existait en DEUX exemplaires jusqu'au
+    /// 30 août 2026 — la garde des couleurs et celle de la gamma en tenaient chacune la sienne, à
+    /// jour d'accord par la seule vigilance. Ajouter le halo en aurait fait deux listes de dix
+    /// lignes à maintenir en parallèle, c'est-à-dire, tôt ou tard, une seule des deux corrigée.
+    ///
+    /// *C'est exactement la faute que `commun.wgsl` a fermée côté shaders, retrouvée côté tests.*
+    /// Un troisième test confronte celle-ci à `build.rs`, qui décide de ce qui est réellement
+    /// compilé : une liste ne peut donc plus oublier un shader neuf.
+    const SHADERS: &[(&str, &str)] = &[
+        ("commun.wgsl", include_str!("../shaders/commun.wgsl")),
+        ("objet.wgsl", include_str!("../shaders/objet.wgsl")),
+        ("plein_ecran.wgsl", include_str!("../shaders/plein_ecran.wgsl")),
+        ("party_2d5.wgsl", include_str!("../shaders/party_2d5.wgsl")),
+        ("background.wgsl", include_str!("../shaders/background.wgsl")),
+        ("ombre.wgsl", include_str!("../shaders/ombre.wgsl")),
+        ("composition.wgsl", include_str!("../shaders/composition.wgsl")),
+        ("halo.wgsl", include_str!("../shaders/halo.wgsl")),
+        ("halo_extraction.wgsl", include_str!("../shaders/halo_extraction.wgsl")),
+        ("halo_descente.wgsl", include_str!("../shaders/halo_descente.wgsl")),
+        ("halo_montee.wgsl", include_str!("../shaders/halo_montee.wgsl")),
+    ];
+
     /// ⚠⚠ LE TEST QUI REND LA FRONTIÈRE INATTEIGNABLE, pas seulement écrite.
     ///
     /// Le shader d'éclairage du moteur ne doit contenir **aucune couleur**. Une couleur y est une
@@ -595,19 +620,9 @@ mod tests {
     /// garde ; ici la preuve est venue de l'œil avant de venir du test.*
     #[test]
     fn aucun_shader_du_moteur_ne_choisit_de_couleur() {
-        // ⚠ Tout shader ajouté à `build.rs` doit être ajouté ici. Une liste oublie toujours
-        // quelque chose — c'est pourquoi un second test compare cette liste à celle de `build.rs`.
-        let shaders: [(&str, &str); 5] = [
-            ("commun.wgsl", include_str!("../shaders/commun.wgsl")),
-            ("objet.wgsl", include_str!("../shaders/objet.wgsl")),
-            ("party_2d5.wgsl", include_str!("../shaders/party_2d5.wgsl")),
-            ("background.wgsl", include_str!("../shaders/background.wgsl")),
-            ("ombre.wgsl", include_str!("../shaders/ombre.wgsl")),
-        ];
-
         let mut coupables = Vec::new();
 
-        for (nom, source) in shaders {
+        for &(nom, source) in SHADERS {
             for (numero, ligne) in source.lines().enumerate() {
                 let sans_commentaire = ligne.split("//").next().unwrap_or("");
                 let mut reste = sans_commentaire;
@@ -668,6 +683,9 @@ mod tests {
             let apres = &ligne[debut + 2..];
             let Some(fin) = apres.find(".wgsl\"") else { continue };
             let nom = format!("{}.wgsl", &apres[..fin]);
+            // ⚠ On cherche dans le TEXTE de ce fichier, pas dans la constante : c'est ce qui rend
+            // la sonde indépendante de la façon dont la liste est écrite, et ce qui la ferait
+            // encore tomber si quelqu'un remplaçait `include_str!` par autre chose sans y penser.
             if !garde.contains(&format!("(\"{nom}\", include_str!")) {
                 manquants.push(nom);
             }
@@ -774,15 +792,8 @@ mod tests {
         let contexte = include_str!("../core/gpu_context.rs");
         let surface_encode = contexte.contains("vk::Format::B8G8R8A8_SRGB");
 
-        let shaders: [(&str, &str); 4] = [
-            ("commun.wgsl", include_str!("../shaders/commun.wgsl")),
-            ("party_2d5.wgsl", include_str!("../shaders/party_2d5.wgsl")),
-            ("background.wgsl", include_str!("../shaders/background.wgsl")),
-            ("ombre.wgsl", include_str!("../shaders/ombre.wgsl")),
-        ];
-
         let mut encodeurs = Vec::new();
-        for (nom, source) in shaders {
+        for &(nom, source) in SHADERS {
             for (numero, ligne) in source.lines().enumerate() {
                 let code = ligne.split("//").next().unwrap_or("");
                 // La signature d'un encodage de gamma en sortie : élever à 1/2,2 ou à 1/2,4.

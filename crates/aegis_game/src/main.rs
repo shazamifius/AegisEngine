@@ -431,6 +431,13 @@ impl AegisApp {
                         },
                     }
                 }
+                console::Ordre::Halo { allume } => match self.party_render_pass.as_mut() {
+                    None => log::warn!("[halo] rien a regler : le rendu n'est pas encore ne"),
+                    Some(rendu) => {
+                        let retenu = rendu.regler_halo(allume);
+                        log::info!("[halo] {}", if retenu { "allume" } else { "eteint" });
+                    }
+                },
                 console::Ordre::Ambiance { champ, valeurs } => {
                     // ⚠ Les TROIS issues sont journalisees : retenu / refuse / impossible. Un
                     // reglage avale en silence ferait chercher le defaut dans le shader alors

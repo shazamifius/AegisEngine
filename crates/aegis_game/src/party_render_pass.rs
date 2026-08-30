@@ -103,6 +103,11 @@ pub struct PartyRenderPass {
     bg_pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     particle_pipeline: vk::Pipeline,
+    /// Le même shader que la scène, monté pour l'image de la FENÊTRE. Le HUD se dessine après la
+    /// composition — voir le commentaire à sa création.
+    hud_pipeline: vk::Pipeline,
+    /// Ce qui porte la lumière au pixel : la courbe de tonalité, appliquée une seule fois.
+    ecran: aegis_engine::render::ecran::Ecran,
     pipeline_layout: vk::PipelineLayout,
     /// Ce qui est vrai pour toute l'image : la vue-projection, la caméra, les lumières.
     cadre: aegis_engine::render::cadre::Cadre,
@@ -235,11 +240,16 @@ impl PartyRenderPass {
             bg_vert_mod,
             bg_frag_mod,
             aegis_engine::render::pipeline::Reglages {
-                color_format: gpu.swapchain_format,
+                // ⚠⚠ LE FORMAT DE LA SCENE, PAS CELUI DE LA FENETRE — et ils ne sont plus les
+                // memes depuis le 30 aout 2026. Tout ce qui dessine de la LUMIERE ecrit dans la
+                // cible HDR ; seules la composition et l'interface touchent l'image presentee.
+                // Se tromper ici donne un pipeline que la carte refuse de creer, avec un message
+                // sur les formats d'attachement — c'est la bonne nouvelle, il ne passe pas.
+                color_format: cibles.format_hdr,
                 // Le fond n'a ni profondeur ni sommets : son shader fabrique ses trois points.
                 depth_format: None,
                 depth_write: false,
-                blend_enable: false,
+                melange: aegis_engine::render::pipeline::Melange::Aucun,
                 use_vertex_input: false,
                 echantillons: cibles.echantillons,
             },
@@ -251,10 +261,10 @@ impl PartyRenderPass {
             p_vert_mod,
             p_frag_mod,
             aegis_engine::render::pipeline::Reglages {
-                color_format: gpu.swapchain_format,
+                color_format: cibles.format_hdr,
                 depth_format: Some(depth_format),
                 depth_write: true,
-                blend_enable: false,
+                melange: aegis_engine::render::pipeline::Melange::Aucun,
                 use_vertex_input: true,
                 echantillons: cibles.echantillons,
             },
@@ -266,14 +276,56 @@ impl PartyRenderPass {
             p_vert_mod,
             p_frag_mod,
             aegis_engine::render::pipeline::Reglages {
-                color_format: gpu.swapchain_format,
+                color_format: cibles.format_hdr,
                 // Les particules se melangent et n'ecrivent pas la profondeur : sinon la premiere
                 // dessinee masquerait toutes celles qui sont derriere elle.
                 depth_format: Some(depth_format),
                 depth_write: false,
-                blend_enable: true,
+                melange: aegis_engine::render::pipeline::Melange::Transparence,
                 use_vertex_input: true,
                 echantillons: cibles.echantillons,
+            },
+        )?;
+
+        // ⭐ LA CHAINE QUI PORTE LA LUMIERE AU PIXEL. Elle naît ici parce qu'elle a besoin du
+        // descripteur du cadre : c'est lui qui porte l'exposition et le point blanc, et la courbe
+        // de tonalite est la seule chose que la composition fait.
+        let ecran = aegis_engine::render::ecran::Ecran::nouveau(
+            gpu,
+            memory_props,
+            &cibles,
+            cadre.layout_descripteur,
+        )?;
+
+        // ── LE MEME SHADER, MONTE UNE SECONDE FOIS POUR L'INTERFACE ──────────────────────────
+        //
+        // ⚠ Ce n'est pas une duplication : c'est le MEME code monte pour une autre cible. Le HUD
+        // se dessine apres la composition, donc dans l'image de la FENETRE et non dans la scene
+        // HDR — un pipeline Vulkan porte le format de sa cible, il en faut donc un par cible.
+        //
+        // Trois differences avec celui de la scene, chacune pour une raison :
+        //  • le format de l'ecran, forcement ;
+        //  • **aucune profondeur** : le HUD se trie desormais lui-meme (voir `ui::Pinceau::
+        //    terminer`), ce qui epargne une image de profondeur pleine resolution ;
+        //  • un seul echantillon : l'interface n'a pas d'arete geometrique a lisser.
+        //
+        // ⚠ Il paie encore tout l'eclairage PBR pour rien — chaque lettre d'un score traverse la
+        // boucle des lumieres et quatre lectures de la carte d'ombre avant que `params.w` ne jette
+        // le resultat. C'est une dette CONNUE, laissee ouverte exprès : la fermer demande un
+        // shader d'interface a part, et l'ajouter dans le meme chantier rendrait impossible de
+        // savoir lequel des deux changements a bouge l'image.
+        let hud_pipeline = PipelineFactory::create_graphics_pipeline(
+            &gpu.device,
+            ecran.layout_pipeline(),
+            p_vert_mod,
+            p_frag_mod,
+            aegis_engine::render::pipeline::Reglages {
+                color_format: gpu.swapchain_format,
+                depth_format: None,
+                depth_write: false,
+                melange: aegis_engine::render::pipeline::Melange::Aucun,
+                use_vertex_input: true,
+                echantillons: vk::SampleCountFlags::TYPE_1,
             },
         )?;
 
@@ -289,6 +341,8 @@ impl PartyRenderPass {
             bg_pipeline_layout,
             pipeline,
             particle_pipeline,
+            hud_pipeline,
+            ecran,
             pipeline_layout,
             cadre,
             file: aegis_engine::render::file::File::nouvelle(),
@@ -584,12 +638,16 @@ impl PartyRenderPass {
             }
             context.jalon(cmd, "ombre");
 
-            let barrier_present = vk::ImageMemoryBarrier::default()
+            // ⚠ La scene resolue passe en attachement : c'est elle qu'on ecrit maintenant, et
+            // l'image de la fenetre attendra la composition. Elle est `UNDEFINED` a chaque image
+            // parce que la passe l'efface entierement — reclamer son ancien contenu couterait une
+            // lecture de plus pour des pixels qu'on va tous recouvrir.
+            let barrier_scene = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .src_access_mask(vk::AccessFlags::NONE)
                 .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .image(image)
+                .image(self.cibles.image_resolue())
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
@@ -616,7 +674,7 @@ impl PartyRenderPass {
             // chaque image (`UNDEFINED`) et rien d'autre ne la fait entrer dans la disposition
             // d'attachement. L'oublier ne produit aucune erreur — juste un rendu indefini, ce que
             // le pilote a le droit de faire ressembler a n'importe quoi.
-            let mut barrieres = vec![barrier_present, barrier_depth];
+            let mut barrieres = vec![barrier_scene, barrier_depth];
             if let Some(image_msaa) = self.cibles.image_couleur() {
                 barrieres.push(
                     vk::ImageMemoryBarrier::default()
@@ -649,7 +707,7 @@ impl PartyRenderPass {
             // Quand la carte ne sait pas anti-creneler, `vue_couleur` rend l'image presentee
             // elle-meme et rien de tout cela n'existe : le meme code sert les deux chemins.
             let mut color_attach = vk::RenderingAttachmentInfo::default()
-                .image_view(self.cibles.vue_couleur(view))
+                .image_view(self.cibles.vue_couleur())
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(if self.cibles.resout() {
@@ -657,12 +715,16 @@ impl PartyRenderPass {
                 } else {
                     vk::AttachmentStoreOp::STORE
                 })
-                .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.92, 0.95, 0.98, 1.0] } });
+                // ⚠ Zero, et non plus un blanc studio a 0,92. Cette valeur est desormais de la
+                // LUMIERE, pas une couleur d'ecran : un 0,92 lineaire y serait une source
+                // eclatante. De toute facon le fond recouvre chaque pixel — cet effacement n'est
+                // qu'un point de depart, et le noir est le seul qui ne mente pas sur ce qu'il est.
+                .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } });
 
             if self.cibles.resout() {
                 color_attach = color_attach
                     .resolve_mode(vk::ResolveModeFlags::AVERAGE)
-                    .resolve_image_view(view)
+                    .resolve_image_view(self.cibles.vue_resolue())
                     .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
             }
 
@@ -1254,15 +1316,115 @@ impl PartyRenderPass {
                 self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_preview);
             }
 
-            // ─── 4. LE HUD : ce qui se dessine sur l'ÉCRAN, et non dans le monde ─────────
-            //
             context.jalon(cmd, "apercu");
+
+            // ═══ FIN DE LA SCÈNE, DÉBUT DE L'ÉCRAN ═══════════════════════════════════════════
+            //
+            // Tout ce qui précède a écrit de la LUMIÈRE, dans une image HDR. Rien n'a encore été
+            // porté à l'échelle de l'écran, et c'est ce qui rend le halo possible : la valeur
+            // d'un pixel dit encore combien il est lumineux, pas seulement combien il est clair.
+            context.device.cmd_end_rendering(cmd);
+
+            // ⚠ DEUX barrières, et aucune n'est facultative :
+            //  • la scène passe d'attachement à texture — sans cette barrière, la composition
+            //    lirait des pixels que la carte n'a pas fini d'écrire ;
+            //  • l'image de la fenêtre entre en attachement pour la première fois de l'image.
+            let scene_en_lecture = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .image(self.cibles.image_resolue())
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            let fenetre_en_attachement = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::NONE)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            context.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[scene_en_lecture, fenetre_en_attachement],
+            );
+
+            // ⭐ LE HALO : ce que l'écran ne peut pas montrer, rendu visible autour de sa source.
+            //
+            // Il s'ajoute à la scène AVANT la courbe de tonalité, et c'est la seule place possible :
+            // après elle, il n'y aurait plus de différence entre un mur blanc et une lampe. Toute
+            // la conception — pourquoi il n'a ni seuil, ni intensité, ni rayon à régler — vit en
+            // tête de `halo.wgsl`.
+            self.ecran.diffuser(
+                &context.device,
+                cmd,
+                &self.cibles,
+                context.swapchain_extent,
+            );
+
+            context.jalon(cmd, "halo");
+
+            // ⚠ Aucune profondeur ici, et c'est voulu : la composition couvre l'écran entier et
+            // le HUD se trie lui-même. Une image de profondeur pleine résolution en moins.
+            let attache_ecran = vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                // `DONT_CARE` : la composition recouvre chaque pixel. Demander à la carte de
+                // charger l'ancien contenu serait lire une image entière pour l'écraser.
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE);
+            context.device.cmd_begin_rendering(
+                cmd,
+                &vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: context.swapchain_extent,
+                    })
+                    .layer_count(1)
+                    .color_attachments(std::slice::from_ref(&attache_ecran)),
+            );
+            context.device.cmd_set_viewport(cmd, 0, &[viewport]);
+            context.device.cmd_set_scissor(cmd, 0, &[scissor]);
+
+            // La courbe de tonalité, une seule fois, pour toute l'image. Le cadre porte
+            // l'exposition et le point blanc : sans lui, la composition n'aurait aucune courbe.
+            self.cadre.lier(&context.device, cmd, self.ecran.layout_pipeline());
+            self.ecran.composer(&context.device, cmd);
+
+            context.jalon(cmd, "composition");
+
+            // ─── LE HUD : ce qui se dessine sur l'ÉCRAN, et non dans le monde ────────────────
+            //
+            // ⚠ Il est ICI, après la courbe de tonalité, et c'est la seule place juste : une
+            // interface ne reçoit aucune lumière et ne doit subir aucune exposition. Passée dans
+            // la scène, un texte demandé en blanc pur sortirait gris à 62 %.
+            //
+            // Le tampon d'instances est relié : c'est le même que celui de la scène, avec les
+            // mêmes objets dedans — seuls les indices émis ici diffèrent.
+            self.instances.lier(&context.device, cmd);
 
             // Tout ce qui suit ignore la caméra. C'est le point entier : le tableau des scores
             // était jusqu'ici posé au centre de la CARTE, pendant que la caméra restait sur le
             // joueur qui venait de mourir — il ne s'affichait donc pour personne.
             if game.is_play_mode {
-                context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+                context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.hud_pipeline);
                 // ⚠ Le pinceau est NOMME pour pouvoir etre referme. Chaque lettre du HUD est un
                 // quad ; les emettre un par un, c'etait des centaines d'appels de dessin pour
                 // afficher un score. `terminer` les envoie tous en un seul.
@@ -1270,7 +1432,7 @@ impl PartyRenderPass {
                     lot: std::cell::RefCell::new(Vec::new()),
                     device: &context.device,
                     cmd,
-                    layout: self.pipeline_layout,
+                    layout: self.ecran.layout_pipeline(),
                     cube: &self.cube_mesh,
                     aspect,
                 };
@@ -1288,12 +1450,12 @@ impl PartyRenderPass {
             // LE LOBBY EN DERNIER, et hors du `is_play_mode` : on doit pouvoir choisir sa partie
             // même quand aucune n'a commencé — c'est justement le moment où l'on en a besoin.
             if exterieur.lobby.ouvert() {
-                context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+                context.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.hud_pipeline);
                 let pinceau = crate::hud::Pinceau {
                     lot: std::cell::RefCell::new(Vec::new()),
                     device: &context.device,
                     cmd,
-                    layout: self.pipeline_layout,
+                    layout: self.ecran.layout_pipeline(),
                     cube: &self.cube_mesh,
                     aspect,
                 };
@@ -1334,6 +1496,13 @@ impl PartyRenderPass {
         self.ambiance.regler(champ, valeurs)
     }
 
+    /// Allume ou éteint le halo. Rend son nouvel état, pour que l'appelant journalise ce qui EST
+    /// plutôt que ce qu'il a demandé.
+    pub fn regler_halo(&mut self, allume: bool) -> bool {
+        self.ecran.allumer(allume);
+        self.ecran.halo_allume()
+    }
+
     /// L'ambiance courante, écrite telle qu'elle se recolle dans ce fichier.
     pub fn ambiance_decrite(&self) -> String {
         self.ambiance.decrire()
@@ -1356,6 +1525,19 @@ impl PartyRenderPass {
         }
         if let Err(e) = self.cibles.recreer(gpu, memory_props) {
             log::error!("cibles de rendu non recreees apres redimensionnement : {e}");
+            // ⚠ On ne rebranche PAS sur des cibles qu'on vient d'echouer a refaire : le
+            // descripteur pointerait alors sur une vue detruite, ce que la carte n'est pas tenue
+            // de signaler. Mieux vaut garder l'ancien pointage, faux mais valide, et le dire.
+            return;
+        }
+        // ⚠⚠ SANS CETTE LIGNE, LE DESCRIPTEUR RESTE SUR L'IMAGE DETRUITE. Aucune erreur ne serait
+        // levee : selon le pilote, l'ecran resterait fige sur la derniere image d'avant, ou
+        // deviendrait noir, ou afficherait n'importe quoi — et seulement APRES un redimensionnement,
+        // c'est-a-dire dans le cas qu'on teste le moins.
+        //
+        // Les octaves du halo suivent la meme taille : elles sont refaites en meme temps.
+        if let Err(e) = self.ecran.redimensionner(gpu, memory_props, &self.cibles) {
+            log::error!("chaine de l'ecran non recreee apres redimensionnement : {e}");
         }
     }
 }

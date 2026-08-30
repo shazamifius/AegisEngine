@@ -177,7 +177,7 @@ impl Ombre {
                 color_format: vk::Format::UNDEFINED,
                 depth_format: Some(format),
                 depth_write: true,
-                blend_enable: false,
+                melange: crate::render::pipeline::Melange::Aucun,
                 use_vertex_input: true,
                 // ⚠ La carte d'ombre reste a UN echantillon, et ce n'est pas un oubli : elle ne
                 // s'affiche jamais, on y lit des profondeurs. Multi-echantillonner une profondeur

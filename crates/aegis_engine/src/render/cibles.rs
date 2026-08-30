@@ -27,16 +27,83 @@
 //! dû vivre là ».* Allouer une image Vulkan n'est pas une décision de jeu : aucune n'a de couleur,
 //! de forme ni de goût. Ce fichier les reprend, et le jeu n'a plus qu'à demander une image.
 //!
+//! ## 3. Ce qui a changé le 30 août 2026 : la scène ne se dessine plus dans l'écran
+//!
+//! Elle se dessine dans une image **HDR**, et une passe de composition la porte à l'écran. La
+//! raison est le halo (`ecran.rs`), mais elle vaut bien au-delà de lui.
+//!
+//! ⭐ **Une image à 8 bits par canal ne peut pas dire ce qui est LUMINEUX, seulement ce qui est
+//! CLAIR.** Elle s'arrête à 1,0, qui est « le blanc de l'écran » — un mur blanc et le soleil y
+//! sont la même valeur. Tout effet qui doit distinguer les deux (un halo, une adaptation de
+//! l'œil, une exposition automatique) est donc *impossible* après coup, quelle que soit
+//! l'ingéniosité qu'on y mette. Ce n'était pas un manque de finition : c'était un mur.
+//!
+//! Le format retenu — `B10G11R11_UFLOAT` — pèse **exactement autant que le précédent**, quatre
+//! octets par pixel, et monte jusqu'à 65 000 au lieu de 1. C'est le format des moteurs mobiles,
+//! et pour cette raison précise : sur un GPU à tuiles, la bande passante est la ressource rare,
+//! et doubler la taille de l'image de scène aurait coûté plus cher que tout le halo.
+//!
+//! ⚠ Il n'a **pas de canal alpha**. Aucun mélange du moteur n'en lit un (`SRC_ALPHA` lit celui de
+//! la source, pas celui de la destination), mais un futur effet qui voudrait de l'alpha dans la
+//! scène devra changer de format — c'est écrit ici pour qu'on le sache avant de le chercher.
+//!
 //! ## Ce qui n'est PAS garanti
 //!
 //! Le gain visuel est prouvé par l'œil, pas par un test — comme tout rendu perçu. Ce qui est
 //! vérifié ici de façon déterministe est le **choix** du nombre d'échantillons : qu'il ne demande
 //! jamais plus que ce que la carte annonce, et qu'il retombe proprement à un seul échantillon sur
 //! une machine qui ne sait rien faire d'autre.
+//!
+//! ⚠ **Et une limite connue de l'anti-crénelage, qui naît le jour même :** la moyenne des
+//! échantillons se fait désormais sur des valeurs HDR, *avant* la courbe de tonalité. Sur une
+//! arête entre un pixel très lumineux et un pixel sombre, moyenner puis courber ne donne pas la
+//! même chose que courber puis moyenner — l'arête ressort un peu plus claire qu'elle ne devrait.
+//! L'écart mesuré sur les valeurs de cette scène est de l'ordre de 7 % de luminance, sur les
+//! seuls pixels d'arête. C'est le prix connu du HDR, il se paie partout, et le remède (résoudre
+//! les échantillons en shader avec une courbe par échantillon) coûte bien plus que ce qu'il rend.
 
 use crate::core::memory::MemoryManager;
 use crate::GpuContext;
 use ash::vk;
+
+/// Le format dans lequel la scène se dessine, quand la carte l'accepte.
+///
+/// Trois canaux flottants tenant dans **32 bits** (11+11+10, exposant partagé par canal). Voir la
+/// note en tête de fichier : c'est le même poids que l'image d'écran, pour une plage 65 000 fois
+/// plus large.
+const HDR_COMPACT: vk::Format = vk::Format::B10G11R11_UFLOAT_PACK32;
+
+/// Le repli, quand `HDR_COMPACT` n'est pas utilisable. Deux fois plus lourd, et universel.
+const HDR_REPLI: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+
+/// Ce qu'une cible de scène doit savoir faire.
+///
+/// ⚠ Les quatre sont nécessaires, et en oublier un donne un défaut *silencieux* : sans
+/// `SAMPLED_IMAGE_FILTER_LINEAR` par exemple, la carte a le droit de rendre un échantillonnage
+/// au plus proche voisin — le halo devient alors une mosaïque, sans qu'aucune erreur ne soit levée.
+const CAPACITES_REQUISES: vk::FormatFeatureFlags = vk::FormatFeatureFlags::from_raw(
+    vk::FormatFeatureFlags::COLOR_ATTACHMENT.as_raw()
+        | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND.as_raw()
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE.as_raw()
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR.as_raw(),
+);
+
+/// Choisit le format de la scène : le compact s'il est pleinement utilisable, le repli sinon.
+///
+/// Fonction **pure** — elle ne reçoit que ce que la carte annonce, donc elle se teste sans GPU.
+pub fn format_hdr(
+    compact: vk::FormatFeatureFlags,
+    _repli: vk::FormatFeatureFlags,
+) -> vk::Format {
+    if compact.contains(CAPACITES_REQUISES) {
+        HDR_COMPACT
+    } else {
+        // Aucun test sur le repli : `R16G16B16A16_SFLOAT` est requis par la spécification Vulkan
+        // pour ces quatre usages. Le refuser aussi voudrait dire qu'aucun rendu n'est possible —
+        // il vaut mieux échouer plus tard, à la création de l'image, avec un message de la carte.
+        HDR_REPLI
+    }
+}
 
 /// Combien d'échantillons par pixel on demande quand la carte le permet.
 ///
@@ -83,6 +150,9 @@ struct ImageAllouee {
 }
 
 impl ImageAllouee {
+    /// `passagere` dit si l'image quitte la passe qui l'écrit. Une image passagère peut ne jamais
+    /// toucher la mémoire centrale sur un GPU à tuiles ; une image qu'on relit ensuite (la scène
+    /// résolue, que le halo et la composition échantillonnent) ne peut évidemment pas l'être.
     fn creer(
         gpu: &GpuContext,
         memory_props: &vk::PhysicalDeviceMemoryProperties,
@@ -90,7 +160,13 @@ impl ImageAllouee {
         usage: vk::ImageUsageFlags,
         aspect: vk::ImageAspectFlags,
         echantillons: vk::SampleCountFlags,
+        passagere: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let usage = if passagere {
+            usage | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
+        } else {
+            usage
+        };
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -108,7 +184,7 @@ impl ImageAllouee {
             // alors la garder en mémoire de tuile et ne jamais l'écrire en mémoire centrale.
             // Sans lui, on paierait la bande passante de quatre images entières — exactement ce
             // que la machine de référence ne peut pas se permettre.
-            .usage(usage | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT)
+            .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
@@ -118,19 +194,27 @@ impl ImageAllouee {
         // `LAZILY_ALLOCATED` va avec `TRANSIENT_ATTACHMENT` : sur les cartes qui le proposent
         // (les mobiles), la mémoire n'est jamais réellement engagée. Ailleurs elle n'existe pas,
         // et on retombe sur de la mémoire ordinaire — la même image, simplement payée.
-        let type_memoire = MemoryManager::find_memory_type(
-            memory_props,
-            besoins.memory_type_bits,
-            vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
-        )
-        .or_else(|| {
-            MemoryManager::find_memory_type(
-                memory_props,
-                besoins.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            )
-        })
-        .ok_or("aucune memoire ne convient pour une cible de rendu")?;
+        //
+        // ⚠ On ne la demande QUE pour une image passagère : une image qu'on relit doit exister
+        // pour de bon. La demander pour tout serait une faute que rien ne signalerait ici — elle
+        // se verrait à l'écran, plus tard, sous la forme d'un halo lu dans du vide.
+        let type_memoire = Some(())
+            .filter(|_| passagere)
+            .and_then(|_| {
+                MemoryManager::find_memory_type(
+                    memory_props,
+                    besoins.memory_type_bits,
+                    vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
+                )
+            })
+            .or_else(|| {
+                MemoryManager::find_memory_type(
+                    memory_props,
+                    besoins.memory_type_bits,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                )
+            })
+            .ok_or("aucune memoire ne convient pour une cible de rendu")?;
 
         let memoire = unsafe {
             gpu.device.allocate_memory(
@@ -176,10 +260,16 @@ pub struct Cibles {
     /// Combien d'échantillons par pixel, réellement retenus par cette carte.
     pub echantillons: vk::SampleCountFlags,
     pub format_profondeur: vk::Format,
+    /// Le format de la scène. ⚠ Tout pipeline qui dessine DANS la scène doit le déclarer, et non
+    /// celui de l'écran : les deux ne sont plus le même depuis le 30 août 2026.
+    pub format_hdr: vk::Format,
     /// L'image couleur multi-échantillonnée — **absente quand un seul échantillon suffit**, car on
-    /// dessine alors directement dans l'image présentée. Le chemin sans anti-crénelage ne coûte
+    /// dessine alors directement dans la scène résolue. Le chemin sans anti-crénelage ne coûte
     /// donc pas une image de plus : il n'en a simplement pas.
     couleur: Option<ImageAllouee>,
+    /// La scène en lumière, après moyenne des échantillons. C'est **elle** que le halo lit et que
+    /// la composition porte à l'écran — l'image présentée n'est plus jamais dessinée directement.
+    resolue: ImageAllouee,
     profondeur: ImageAllouee,
 }
 
@@ -218,7 +308,14 @@ impl Cibles {
 
         let echantillons = echantillons_retenus(supportes, plafond);
 
-        Self::batir(gpu, memory_props, echantillons, format_profondeur)
+        let proprietes = |f: vk::Format| unsafe {
+            gpu.instance
+                .get_physical_device_format_properties(gpu.physical_device, f)
+                .optimal_tiling_features
+        };
+        let format_hdr = format_hdr(proprietes(HDR_COMPACT), proprietes(HDR_REPLI));
+
+        Self::batir(gpu, memory_props, echantillons, format_profondeur, format_hdr)
     }
 
     fn batir(
@@ -226,6 +323,7 @@ impl Cibles {
         memory_props: &vk::PhysicalDeviceMemoryProperties,
         echantillons: vk::SampleCountFlags,
         format_profondeur: vk::Format,
+        format_hdr: vk::Format,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let couleur = if echantillons == vk::SampleCountFlags::TYPE_1 {
             None
@@ -233,12 +331,26 @@ impl Cibles {
             Some(ImageAllouee::creer(
                 gpu,
                 memory_props,
-                gpu.swapchain_format,
+                format_hdr,
                 vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 vk::ImageAspectFlags::COLOR,
                 echantillons,
+                // Passagère : les échantillons servent à la moyenne, et à rien après elle.
+                true,
             )?)
         };
+
+        let resolue = ImageAllouee::creer(
+            gpu,
+            memory_props,
+            format_hdr,
+            // Écrite par la scène (ou par la moyenne des échantillons), relue par le halo et par
+            // la composition. `SAMPLED` est ce qui autorise cette relecture.
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageAspectFlags::COLOR,
+            vk::SampleCountFlags::TYPE_1,
+            false,
+        )?;
 
         let profondeur = ImageAllouee::creer(
             gpu,
@@ -247,32 +359,42 @@ impl Cibles {
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             vk::ImageAspectFlags::DEPTH,
             echantillons,
+            true,
         )?;
 
         let combien = 1u32 << (echantillons.as_raw().trailing_zeros());
         log::info!(
-            "Cibles de rendu : {}x{}, {combien} echantillon(s) par pixel",
+            "Cibles de rendu : {}x{}, {combien} echantillon(s) par pixel, scene en {format_hdr:?}",
             gpu.swapchain_extent.width,
             gpu.swapchain_extent.height
         );
 
-        Ok(Self { echantillons, format_profondeur, couleur, profondeur })
+        Ok(Self { echantillons, format_profondeur, format_hdr, couleur, resolue, profondeur })
     }
 
-    /// La vue dans laquelle la passe écrit ses couleurs.
+    /// La vue dans laquelle la passe de scène écrit ses couleurs.
     ///
-    /// C'est l'image multi-échantillonnée s'il y en a une, et **l'image présentée sinon** — d'où
-    /// le paramètre. Un seul chemin de rendu sert les deux cas, sans condition ailleurs.
-    pub fn vue_couleur(&self, image_presentee: vk::ImageView) -> vk::ImageView {
+    /// C'est l'image multi-échantillonnée s'il y en a une, et **la scène résolue sinon**. Un seul
+    /// chemin de rendu sert les deux cas, sans condition ailleurs.
+    pub fn vue_couleur(&self) -> vk::ImageView {
         match &self.couleur {
             Some(c) => c.vue,
-            None => image_presentee,
+            None => self.resolue.vue,
         }
     }
 
     /// L'image multi-échantillonnée, quand elle existe — la barrière de disposition en a besoin.
     pub fn image_couleur(&self) -> Option<vk::Image> {
         self.couleur.as_ref().map(|c| c.image)
+    }
+
+    /// La scène en lumière, moyennée : ce que le halo lit et ce que la composition présente.
+    pub fn vue_resolue(&self) -> vk::ImageView {
+        self.resolue.vue
+    }
+
+    pub fn image_resolue(&self) -> vk::Image {
+        self.resolue.image
     }
 
     pub fn vue_profondeur(&self) -> vk::ImageView {
@@ -283,7 +405,7 @@ impl Cibles {
         self.profondeur.image
     }
 
-    /// Vrai quand la passe doit résoudre les échantillons vers l'image présentée.
+    /// Vrai quand la passe doit moyenner ses échantillons vers la scène résolue.
     pub fn resout(&self) -> bool {
         self.couleur.is_some()
     }
@@ -299,8 +421,9 @@ impl Cibles {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let echantillons = self.echantillons;
         let format = self.format_profondeur;
+        let hdr = self.format_hdr;
         self.detruire(&gpu.device);
-        *self = Self::batir(gpu, memory_props, echantillons, format)?;
+        *self = Self::batir(gpu, memory_props, echantillons, format, hdr)?;
         Ok(())
     }
 
@@ -308,6 +431,7 @@ impl Cibles {
         if let Some(c) = &self.couleur {
             c.detruire(device);
         }
+        self.resolue.detruire(device);
         self.profondeur.detruire(device);
     }
 }
@@ -352,6 +476,45 @@ mod tests {
         assert_eq!(
             echantillons_retenus(vk::SampleCountFlags::TYPE_1, 4),
             vk::SampleCountFlags::TYPE_1
+        );
+    }
+
+    /// Le format compact est retenu quand la carte le supporte **pleinement**.
+    #[test]
+    fn le_format_compact_est_retenu_quand_il_est_pleinement_utilisable() {
+        assert_eq!(format_hdr(CAPACITES_REQUISES, CAPACITES_REQUISES), HDR_COMPACT);
+    }
+
+    /// ⚠ Le cas qui compte : une seule capacité manquante suffit à le disqualifier.
+    ///
+    /// C'est le filtrage linéaire qui est le plus insidieux — une carte peut accepter d'écrire
+    /// dans le format et de le lire, mais pas de l'interpoler. Le halo deviendrait alors une
+    /// mosaïque, **sans aucun message**, et on chercherait le défaut dans le filtre.
+    #[test]
+    fn une_seule_capacite_manquante_fait_basculer_sur_le_repli() {
+        for manquante in [
+            vk::FormatFeatureFlags::COLOR_ATTACHMENT,
+            vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND,
+            vk::FormatFeatureFlags::SAMPLED_IMAGE,
+            vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
+        ] {
+            let ampute = vk::FormatFeatureFlags::from_raw(
+                CAPACITES_REQUISES.as_raw() & !manquante.as_raw(),
+            );
+            assert_eq!(
+                format_hdr(ampute, CAPACITES_REQUISES),
+                HDR_REPLI,
+                "sans {manquante:?}, le format compact n'est pas utilisable"
+            );
+        }
+    }
+
+    /// Une carte qui n'annonce rien ne fait pas échouer le choix : elle prend le repli.
+    #[test]
+    fn une_carte_qui_n_annonce_rien_prend_le_repli() {
+        assert_eq!(
+            format_hdr(vk::FormatFeatureFlags::empty(), vk::FormatFeatureFlags::empty()),
+            HDR_REPLI
         );
     }
 

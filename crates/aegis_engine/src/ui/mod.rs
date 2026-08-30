@@ -286,13 +286,35 @@ impl Pinceau<'_> {
     ///
     /// ⚠ A appeler une fois, apres le dernier trait du HUD. L'oublier ne produit aucune erreur :
     /// l'interface disparait simplement, ce qui est le genre de defaut qu'on met du temps a
-    /// attribuer. L'ordre d'emission n'a pas d'importance ici — c'est la COUCHE, portee par la
-    /// profondeur de chaque quad, qui decide de ce qui passe devant.
+    /// attribuer.
+    ///
+    /// ## ⭐ Ce qui a change le 30 aout 2026 : la couche est un ORDRE, pas une distance
+    ///
+    /// L'ordre d'emission n'avait pas d'importance jusqu'ici — c'etait la COUCHE, portee par la
+    /// profondeur de chaque quad, qui decidait de ce qui passe devant. Autrement dit, le HUD
+    /// s'appuyait sur le TAMPON DE PROFONDEUR de la scene pour se trier lui-meme.
+    ///
+    /// Le HUD ayant change de passe (il se dessine desormais apres la composition, hors de la
+    /// scene HDR), ce tampon n'existe plus la ou il vit. Le reflexe aurait ete d'en allouer un
+    /// second, pleine resolution, pour trier quelques centaines de rectangles.
+    ///
+    /// **On les trie plutot.** Un tri stable sur un lot deja rassemble coute quelques
+    /// microsecondes une fois par image, et il supprime une image entiere de profondeur — de la
+    /// memoire et de la bande passante, la ressource rare sur la machine de reference. Et il est
+    /// plus juste : la « couche » d'une interface est un rang, pas une distance a l'oeil. La
+    /// porter dans un tampon de profondeur flottant etait un detournement qui marchait.
+    ///
+    /// ⚠ Le tri est **stable** : a couche egale, l'ordre d'emission decide, ce qui est exactement
+    /// ce qu'attend celui qui ecrit un ecran de haut en bas.
     pub fn terminer(&self, instances: &crate::render::instances::Instances) {
-        let lot = self.lot.borrow();
+        let mut lot = self.lot.borrow_mut();
         if lot.is_empty() {
             return;
         }
+        // Profondeur DECROISSANTE : `profondeur()` rend une valeur d'autant plus petite que la
+        // couche est haute, et le dernier dessine est celui qu'on voit. `total_cmp` plutot que
+        // `partial_cmp` — il ordonne aussi les valeurs invalides au lieu de paniquer sur elles.
+        lot.sort_by(|a, b| b.modele.cols[3].z.total_cmp(&a.modele.cols[3].z));
         if let Some(premiere) = instances.poser(&lot) {
             self.cube.dessiner_instances(self.device, self.cmd, premiere, lot.len() as u32);
         }
