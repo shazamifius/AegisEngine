@@ -12,8 +12,37 @@ pub struct SawBladeObject {
 impl SawBladeObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
         let (v, i) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/saw_blade.glb"))?;
+
+        // ── LA SCIE ENTRE DANS LA TRAME DU MONDE ────────────────────────────────────────────
+        //
+        // Elle arrivait d'un modeleur : un disque rond, poli, avec des dents lisses. Posée dans un
+        // décor entièrement fait de cubes alignés, elle n'y cohabitait pas — elle y était déposée.
+        // *C'est le genre d'écart que l'œil voit tout de suite sans savoir le nommer.*
+        //
+        // ⚠ Le côté du voxel n'est PAS une résolution choisie : c'est celui de la trame du décor,
+        // `1 / SOUS_VOXELS` de bloc. La scie tombe donc exactement sur la même grille que les
+        // détails de la carte, et un objet plus grand aura simplement plus de voxels — pas des
+        // voxels plus gros. La question « en combien de subdivisions ? » ne se pose pas.
+        //
+        // Le maillage normalisé mesure 1,5 unité dans sa plus grande dimension (`glb_loader`), et
+        // la scie s'affiche à l'échelle 1 : une unité de maillage EST un bloc du monde.
+        let (v, i) = match crate::party_render_pass::voxeliser_pour_le_monde(&v, &i) {
+            Some(voxelise) => voxelise,
+            // ⚠ Une voxelisation vide veut dire que quelque chose ne va pas dans le maillage. On
+            // garde alors la forme lisse plutôt que de faire disparaître la scie : un piège
+            // mortel invisible est bien pire qu'un piège au mauvais style.
+            None => {
+                log::warn!("Scie : voxelisation vide, la forme lisse est conservee");
+                (v, i)
+            }
+        };
+
         let mesh = GpuMesh::upload(gpu, memory_props, &v, &i)?;
-        log::info!("Scie Rotative 3D (saw_blade.glb) initialisée.");
+        log::info!(
+            "Scie Rotative voxelisee : {} sommets, {} triangles",
+            v.len(),
+            i.len() / 3
+        );
 
         Ok(Self { mesh })
     }
