@@ -623,6 +623,35 @@ impl PartyRenderPass {
             // triplets de flottants — donc la copie ne coûte rien et se lit mieux qu'un emprunt
             // découpé.
             let palette = self.palette;
+
+            // ═══ LA JUNGLE DU FOND — dessinée AVANT tout le reste ════════════════════════════
+            //
+            // Elle vient en premier parce qu'elle est derrière : le test de profondeur suffirait,
+            // mais la dessiner d'abord évite de compter sur lui pour de la géométrie qui n'a aucune
+            // raison de disputer sa place au monde jouable.
+            //
+            // ⚠ `porte_une_ombre: false`, et ce n'est pas une économie : la carte d'ombre couvre une
+            // sphère de 28 unités autour de la caméra. Les deux plans les plus proches y entrent —
+            // ils projetteraient donc de vraies ombres sur le terrain de jeu, venues d'objets qu'on
+            // ne peut ni toucher ni éviter. *Un décor qui assombrit le jeu est pire qu'un décor
+            // absent.*
+            //
+            // ⚠⚠ Le temps vient de l'horloge de la manche, pas d'un compteur d'images : à 165 img/s
+            // ici et 72 sur la machine de référence, un balancement compté en images irait deux fois
+            // plus vite chez nous que chez un joueur. Le vent ne dépend pas du matériel.
+            for feuille in crate::fond::jungle(
+                self.camera_target.x,
+                game.round_timer,
+                [palette.jungle_loin, palette.jungle_moyenne, palette.jungle_proche],
+            ) {
+                self.file.ajouter(aegis_engine::render::file::Dessin {
+                    maillage: MAILLAGE_CUBE,
+                    modele: feuille.modele,
+                    teinte: feuille.teinte,
+                    params: Vec4::new(0.3, 0.0, 0.0, 0.0),
+                    porte_une_ombre: false,
+                });
+            }
                         for y in 0..game.grid.height {
                 for x in 0..game.grid.width {
                     let xi = x as i32;

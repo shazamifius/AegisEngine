@@ -74,6 +74,20 @@ pub struct Palette {
     pub brin_clair: [f32; 3],
     pub brin_moyen: [f32; 3],
     pub brin_sombre: [f32; 3],
+
+    /// Les trois plans de la jungle de fond, **du plus lointain au plus proche**.
+    ///
+    /// ⚠ Elles doivent aller en s'éclaircissant vers le fond ou en se rapprochant de sa couleur —
+    /// c'est ce qui donne la profondeur, bien plus que la taille des plantes. Un plan lointain aussi
+    /// contrasté qu'un plan proche annule la parallaxe à l'œil : on voit trois rangées, pas trois
+    /// distances.
+    ///
+    /// ⚠⚠ Et elles portent la **garde de lisibilité** : le fond doit se lire comme « derrière » au
+    /// premier coup d'œil. Un vert de jungle aussi franc que l'herbe jouable ferait chercher une
+    /// plateforme là où il n'y en a pas — la leçon de la scie, dans l'autre sens.
+    pub jungle_loin: [f32; 3],
+    pub jungle_moyenne: [f32; 3],
+    pub jungle_proche: [f32; 3],
 }
 
 impl Default for Palette {
@@ -90,6 +104,12 @@ impl Default for Palette {
             brin_clair: [0.32, 0.90, 0.35],
             brin_moyen: [0.20, 0.78, 0.26],
             brin_sombre: [0.14, 0.65, 0.20],
+            // Un point de départ, pas une décision : trois verts sourds qui vont en s'éclaircissant
+            // vers le lointain, franchement plus ternes que l'herbe jouable. **Son œil tranchera** —
+            // c'est pour ça qu'ils sont réglables.
+            jungle_loin: [0.20, 0.26, 0.21],
+            jungle_moyenne: [0.19, 0.29, 0.21],
+            jungle_proche: [0.17, 0.31, 0.20],
         }
     }
 }
@@ -98,7 +118,7 @@ impl Palette {
     /// Les champs réglables. **Une seule liste**, qui gouverne le réglage, l'aide et le test —
     /// même patron qu'`Ambiance::CHAMPS`, et pour la même raison : un champ ajouté sans être
     /// inscrit ici serait **invisible au laboratoire**, sans que rien ne le signale.
-    pub const CHAMPS: [&'static str; 8] = [
+    pub const CHAMPS: [&'static str; 11] = [
         "herbe",
         "terre",
         "pierre",
@@ -107,6 +127,9 @@ impl Palette {
         "brin_clair",
         "brin_moyen",
         "brin_sombre",
+        "jungle_loin",
+        "jungle_moyenne",
+        "jungle_proche",
     ];
 
     /// Change une couleur désignée par son nom. **Pure** : testable sans fenêtre et sans GPU.
@@ -140,6 +163,9 @@ impl Palette {
             "brin_clair" => self.brin_clair = c,
             "brin_moyen" => self.brin_moyen = c,
             "brin_sombre" => self.brin_sombre = c,
+            "jungle_loin" => self.jungle_loin = c,
+            "jungle_moyenne" => self.jungle_moyenne = c,
+            "jungle_proche" => self.jungle_proche = c,
             _ => unreachable!("la liste des champs a deja tranche"),
         }
         Ok(())
@@ -163,6 +189,9 @@ impl Palette {
         s.push_str(&l("brin_clair", self.brin_clair));
         s.push_str(&l("brin_moyen", self.brin_moyen));
         s.push_str(&l("brin_sombre", self.brin_sombre));
+        s.push_str(&l("jungle_loin", self.jungle_loin));
+        s.push_str(&l("jungle_moyenne", self.jungle_moyenne));
+        s.push_str(&l("jungle_proche", self.jungle_proche));
         s.push('}');
         s
     }

@@ -4,6 +4,7 @@ mod grid;
 mod traps;
 mod particles;
 mod palette;
+mod fond;
 mod player;
 mod mystery_box;
 mod party_game;
