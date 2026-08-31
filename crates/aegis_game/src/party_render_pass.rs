@@ -47,32 +47,27 @@ fn tile_hash(x: i32, y: i32, seed: u32) -> u32 {
 /// Tout se pose desormais sur une grille de 1/8e de bloc. Les tailles et les positions sont des
 /// ENTIERS de sous-voxels, donc alignees par construction. *Huit constantes arbitraires n'ont pas
 /// retreci : elles ont cesse d'exister, remplacees par un seul entier qui a un sens.*
+///
+/// ## ⚠ Ce chiffre vit dans le JEU, et pourquoi le moteur n'y touchera jamais
+///
+/// Le moteur sait voxeliser ([`aegis_engine::geometry::voxel`]) : c'est de la geometrie, sans
+/// gout. Mais **la finesse de la trame est une decision de direction artistique**, au meme titre
+/// que la couleur du ciel. Un moteur qui graverait `1/8` deciderait du grain de tous les jeux
+/// qu'il portera.
+///
+/// ## ⚠⚠ Et ce chiffre a une PORTEE, mesuree le 31 aout 2026
+///
+/// Une fonction passait ici les maillages importes dans cette meme trame, pour qu'un objet et un
+/// detail de decor tombent sur la meme grille. Elle n'a jamais eu qu'un seul appelant — la scie —
+/// et **son rendu a ete rejete a l'oeil** : voir `objects/saw_blade.rs`, qui porte la mesure et la
+/// cause. Elle a donc ete retiree plutot que gardee morte.
+///
+/// Ce qu'il faut en retenir avant de la reecrire : un objet importe mesure 1,5 unite dans sa plus
+/// grande dimension (`glb_loader` normalise) et s'affiche a l'echelle 1, donc **12 voxels**. Tout
+/// detail plus fin que 1/12e de l'objet n'est pas arrondi par la trame : il est efface. La trame
+/// convient aux formes taillees pour elle, pas aux modeles fins — et l'affiner pour un seul objet
+/// ferait exactement ce que ce commentaire dit d'eviter : deux chiffres au lieu d'un.
 const SOUS_VOXELS: u32 = 8;
-
-/// Ramène un maillage importé dans la trame du décor, ou rend `None` s'il n'en reste rien.
-///
-/// ## ⭐ Pourquoi cette fonction vit ICI, dans le jeu, et non dans le moteur
-///
-/// Le moteur sait voxeliser — c'est une opération de géométrie, sans goût
-/// ([`aegis_engine::geometry::voxel`]). Mais **la finesse de la trame est une décision de
-/// direction artistique**, et elle appartient au jeu au même titre que la couleur du ciel. Un
-/// moteur qui graverait `1/8` déciderait du grain de tous les jeux qu'il portera.
-///
-/// C'est aussi ce qui garantit qu'un objet importé et un détail de décor tombent sur la **même**
-/// grille : les deux lisent `SOUS_VOXELS`, il n'y a pas deux chiffres à tenir d'accord.
-///
-/// ⚠ Une unité de maillage vaut un bloc du monde : `glb_loader` normalise chaque modèle à 1,5
-/// unité dans sa plus grande dimension, et les objets s'affichent à l'échelle 1. Le jour où un
-/// objet s'affichera à une autre échelle, il devra diviser ce côté par la sienne — sans quoi ses
-/// voxels seront à la bonne taille dans son fichier et à la mauvaise à l'écran.
-pub fn voxeliser_pour_le_monde(
-    sommets: &[aegis_engine::geometry::vertex::Vertex],
-    indices: &[u32],
-) -> Option<(Vec<aegis_engine::geometry::vertex::Vertex>, Vec<u32>)> {
-    let cote = 1.0 / SOUS_VOXELS as f32;
-    let (v, i) = aegis_engine::geometry::voxel::voxeliser(sommets, indices, cote);
-    (!v.is_empty()).then_some((v, i))
-}
 
 /// Place un detail de `cotes` sous-voxels sur la face d'un bloc, aligne sur la sous-grille.
 ///

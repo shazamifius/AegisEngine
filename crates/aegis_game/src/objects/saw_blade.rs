@@ -13,33 +13,41 @@ impl SawBladeObject {
     pub fn new(gpu: &GpuContext, memory_props: &vk::PhysicalDeviceMemoryProperties) -> Result<Self, Box<dyn std::error::Error>> {
         let (v, i) = GlbLoader::load_glb_bytes(include_bytes!("../../../../assets/modeles/saw_blade.glb"))?;
 
-        // ── LA SCIE ENTRE DANS LA TRAME DU MONDE ────────────────────────────────────────────
+        // ── ⚠ LA SCIE N'EST PAS VOXELISÉE, ET C'EST UN VERDICT, PAS UN OUBLI ────────────────
         //
-        // Elle arrivait d'un modeleur : un disque rond, poli, avec des dents lisses. Posée dans un
-        // décor entièrement fait de cubes alignés, elle n'y cohabitait pas — elle y était déposée.
-        // *C'est le genre d'écart que l'œil voit tout de suite sans savoir le nommer.*
+        // ## Ce qui a été tenté le 31 août 2026, et pourquoi c'est revenu en arrière
         //
-        // ⚠ Le côté du voxel n'est PAS une résolution choisie : c'est celui de la trame du décor,
-        // `1 / SOUS_VOXELS` de bloc. La scie tombe donc exactement sur la même grille que les
-        // détails de la carte, et un objet plus grand aura simplement plus de voxels — pas des
-        // voxels plus gros. La question « en combien de subdivisions ? » ne se pose pas.
+        // Elle passait par `voxeliser_pour_le_monde` : la même trame que le décor, `1/SOUS_VOXELS`
+        // de bloc. Le raisonnement tenait — un disque poli posé dans un monde de cubes alignés n'y
+        // cohabite pas, il y est déposé — et la mesure aussi (771 sommets / 1402 triangles ont
+        // donné 1392 sommets / **696** triangles, les faces internes n'étant jamais émises).
         //
-        // Le maillage normalisé mesure 1,5 unité dans sa plus grande dimension (`glb_loader`), et
-        // la scie s'affiche à l'échelle 1 : une unité de maillage EST un bloc du monde.
-        let (v, i) = match crate::party_render_pass::voxeliser_pour_le_monde(&v, &i) {
-            Some(voxelise) => voxelise,
-            // ⚠ Une voxelisation vide veut dire que quelque chose ne va pas dans le maillage. On
-            // garde alors la forme lisse plutôt que de faire disparaître la scie : un piège
-            // mortel invisible est bien pire qu'un piège au mauvais style.
-            None => {
-                log::warn!("Scie : voxelisation vide, la forme lisse est conservee");
-                (v, i)
-            }
-        };
-
+        // **Le rendu, lui, a été rejeté à l'œil, et l'œil est le juge.** Ses mots : *« la
+        // pixelisation de la scie est HORRIBLE (…) actuellement c'est vraiment trop moche »*.
+        //
+        // ## La cause exacte, parce qu'elle décide de la suite
+        //
+        // La scie mesure 1,5 unité dans sa plus grande dimension (`glb_loader` normalise), et
+        // s'affiche à l'échelle 1 : **12 voxels de diamètre**. Ses dents, elles, mesurent une
+        // fraction de ce diamètre — donc **moins d'un voxel**. La trame ne les arrondit pas : elle
+        // les efface. Il ne restait qu'un disque cranté, et un piège mortel qui ne se reconnaît
+        // plus n'est plus un piège, c'est une surprise.
+        //
+        // ⚠ **Le défaut d'origine est donc ROUVERT** (la scie est de nouveau lisse dans un monde de
+        // cubes) — le dire plutôt que le taire : c'est un arbitrage entre deux défauts, pas une
+        // correction.
+        //
+        // ## Ce qui la ferait entrer dans la trame POUR DE VRAI
+        //
+        // Rien ici : `voxeliser_pour_le_monde` reste juste, et sert les autres objets importés. Ce
+        // qui manque est **en amont, dans le modèle** — des dents d'au moins deux voxels, donc
+        // taillées pour une scie de 1,5 bloc, ou une scie plus grande. Affiner la trame pour un
+        // seul objet est le piège à éviter : elle vaudrait alors deux chiffres au lieu d'un, et
+        // l'objet cesserait de tomber sur la même grille que le décor — soit exactement la
+        // propriété qu'on cherchait.
         let mesh = GpuMesh::upload(gpu, memory_props, &v, &i)?;
         log::info!(
-            "Scie Rotative voxelisee : {} sommets, {} triangles",
+            "Scie Rotative (forme lisse, non voxelisee) : {} sommets, {} triangles",
             v.len(),
             i.len() / 3
         );
