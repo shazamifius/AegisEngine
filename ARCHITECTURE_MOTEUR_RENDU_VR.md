@@ -1,7 +1,56 @@
 # Master Blueprint Encyclopédique : Architecture d'un Moteur de Rendu 3D Hybride Extrême (VR Photoréaliste ↔ Mobiles Restreints)
 
+> # ⚠⚠⚠ AVERTISSEMENT AJOUTÉ LE 31 AOÛT 2026 — LIRE AVANT TOUT LE RESTE
+>
+> **CE DOCUMENT EST UNE BIBLIOGRAPHIE, PAS UN ÉTAT DU MOTEUR, ET PAS UN PLAN D'EXÉCUTION.**
+>
+> Il a été écrit le 8 août 2026. **Il a été lu comme un plan, et c'est lui qui a produit les
+> 19 briques mortes du moteur** : `restir_pass.rs`, `visibility_pass.rs`, `gaussian_pass.rs`,
+> `bindless.rs`, `oit_pass.rs`, `object_space_pass.rs`, `fluid_pass.rs`… — des fichiers portant le nom
+> des techniques les plus avancées du rendu temps réel, **dont aucune ne tournait**, parce que le
+> `RenderGraph` censé les orchestrer n'était instancié nulle part. Le coût n'était pas en calcul, il
+> était **en vérité** : un lecteur qui ouvrait `render/` cochait ReSTIR.
+>
+> **Elles ont été mises en sommeil le 29 août 2026** (préfixe `_`, ligne `mod` retirée) — jamais
+> supprimées, parce que sous la plomberie vivent de vraies formules justes et testées.
+> **→ Ce qu'elles contiennent réellement : `prive/moteur/BRIQUES-EN-SOMMEIL.md` (dépôt `web3game-notes`).**
+>
+> **CE QUI FAIT AUTORITÉ SUR L'ÉTAT ET SUR LE PLAN :**
+> | | |
+> |---|---|
+> | L'état **mesuré** du moteur | `prive/moteur/00-MOTEUR.md` |
+> | Le plan de chantier, les budgets, les critères de fin | `prive/moteur/PLAN-RENDU.md` |
+> | Le corpus extérieur, à jour, avec verdicts | `prive/moteur/REFERENCES.md` |
+>
+> **⚠ ET IL CONTREDIT `PLAN-RENDU.md` SUR UN POINT D'ARCHITECTURE RÉEL**, resté non relevé pendant
+> trois semaines : il propose des **algorithmes différents** selon le niveau de matériel (*Feature
+> Levels* — lightmaps + WBOIT en bas, ReSTIR PT + A-buffer en haut), là où `PLAN-RENDU.md` pose une
+> ligne rouge : *« ce qui change entre le bas et le haut, ce sont des NOMBRES, jamais des algorithmes
+> différents ; le jour où la version PC a son propre shader, on a deux moteurs. »*
+> **Cet arbitrage n'est pas tranché** — il est posé, avec ses deux thèses et leurs coûts, en fin de
+> `prive/moteur/REFERENCES.md` § « Le carrefour ».
+>
+> **⚠ Et deux affirmations de ce document sont périmées ou fausses pour notre cible :**
+> - Le § 10 recommande une architecture hybride **`wgpu` + `ash`**. **Le moteur n'utilise pas `wgpu`** :
+>   il parle à Vulkan par `ash` directement, et compile ses shaders WGSL → SPIR-V par `naga` en
+>   `build.rs`. Ce chapitre décrit une pile qui n'est pas la nôtre.
+> - Il donne ReSTIR PT comme le chemin haut de gamme sans le chiffrer sur mobile. **Mesure publiée en
+>   juillet 2026 (Traverse Research, Moving Mobile Graphics) : ≈ 10 ms pour la GI diffuse SEULE, sur
+>   le meilleur GPU mobile de 2026, avec ray tracing MATÉRIEL, pour UN SEUL œil — à 27 im/s.** Notre
+>   budget est de 13,9 ms pour deux yeux sur un Adreno 650 de 2020. *La famille stochastique est hors
+>   budget Quest 2 d'un ordre de grandeur.*
+>
+> **Ce qu'il reste, et qui a de la valeur :** un panorama large, avec ses équations et ses sources.
+> **À utiliser comme point de départ de lecture, jamais comme description de ce qui existe ici.**
+>
+> ---
+
 > **Document de Référence Ultime & Encyclopédie Technologique**  
 > *Agrégation 100 % exhaustive de la recherche publique (SIGGRAPH, EGSR, IEEE), des brevets industriels, de la logique spéculative et des retours d'ingénierie privée (NVIDIA Research, AMD RDNA, Epic Games, Meta Reality Labs, Embark Studios, Oxide Games, Google Filament, thatgamecompany).*
+>
+> ⚠ *« Agrégation 100 % exhaustive » est une affirmation d'exhaustivité — donc invérifiable, donc
+> indéfendable. Elle est fausse de fait : ce document ignore les cascades de radiance en 3D
+> (2026), la perspective aérienne de Hillaire, SSILVB, et toute la littérature mobile 2025-2026.*
 
 ---
 
