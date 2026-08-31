@@ -260,11 +260,33 @@ fn fs_main(in: VertexOutput) -> SortieScene {
     // passe le meme jour, et non pas seulement de format.
     let plat = clamp(in.params.w, 0.0, 1.0);
 
+    // ⚠⚠ L'OPACITE DEMANDEE, ENFIN TRANSMISE — elle valait `1.0` EN DUR jusqu'au 31 aout 2026.
+    //
+    // Une particule de poussiere naissait avec une opacite de 0,65 dans `particles.rs`, et ce
+    // chiffre etait **jete ici**, une ligne avant d'atteindre la carte. Aucun melange, quel que
+    // soit le pipeline, ne pouvait donc rendre quoi que ce soit transparent : le facteur
+    // `SRC_ALPHA` valait toujours un.
+    //
+    // *C'etait l'une des trois causes — chacune suffisante a annuler les deux autres — qui
+    // faisaient sortir les particules opaques. Voir `prive/aegis/PLAN-IMAGE.md`, etape B.*
+    let opacite = clamp(in.color.a, 0.0, 1.0);
+
     var out: SortieScene;
-    out.lumiere = vec4<f32>(mix(eclaire, albedo, plat), 1.0);
+    out.lumiere = vec4<f32>(mix(eclaire, albedo, plat), opacite);
     // ⚠ Une couleur PLATE n'a pas d'ambiante : elle ne recoit aucune lumiere, donc l'occlusion
     // n'a rien a lui retirer. Emettre son albedo ici la ferait s'assombrir dans les coins — une
     // interface qui reagit a la geometrie derriere elle.
-    out.ambiante = vec4<f32>(ambiante * (1.0 - plat), 1.0);
+    //
+    // ⚠⚠ ET SON OPACITE EST ZERO, TOUJOURS — ce n'est pas un oubli, c'est la regle qui protege
+    // l'occlusion. Cette seconde image porte l'ambiante SEULE ; l'occlusion la multiplie puis la
+    // SOUSTRAIT de la scene. Une surface qui se melange et qui y deposerait quelque chose se
+    // verrait donc retirer de la lumiere qu'elle n'a jamais recue — un cerne sombre autour de
+    // chaque particule.
+    //
+    // Avec zero, le melange `SRC_ALPHA / ONE_MINUS_SRC_ALPHA` laisse l'ambiante **exactement**
+    // telle qu'elle etait. Et pour tout ce qui est opaque, le melange est desactive : la valeur
+    // est ecrite telle quelle, et **aucun shader en aval ne lit ce canal** (`composition.wgsl` et
+    // `halo.wgsl` lisent `.rgb`). Une seule regle sert donc les deux cas.
+    out.ambiante = vec4<f32>(ambiante * (1.0 - plat), 0.0);
     return out;
 }

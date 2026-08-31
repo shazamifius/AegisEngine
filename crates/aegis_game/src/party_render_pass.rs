@@ -1323,17 +1323,9 @@ impl PartyRenderPass {
                     }
                 }
 
-                // 10. Rendu du Système de Particules Procédurales (Course, Dérapage, Glissade sur Tous Blocs, Impact)
-                for particle in &player.particles.particles {
-                    let p_m = Mat4::from_translation(particle.pos)
-                        * Mat4::from_scale(particle.size);
-                    let push_p = PushConstants {
-                        model_matrix: p_m,
-                        color_tint: particle.color,
-                        params: Vec4::new(0.0, particle.emissive, 0.0, 0.0),
-                    };
-                    self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_p);
-                }
+                // 10. Les particules de ce joueur ne sont PLUS dessinées ici — voir le bloc
+                //     « TOUTES LES PARTICULES, EN DERNIER » à la fin de la passe du monde. Elles
+                //     étaient émises au milieu des objets opaques, donc sous le pipeline opaque.
             }
 
             // Le tableau des scores ne se dessine plus ici : il vivait dans le MONDE, posé au
@@ -1401,14 +1393,72 @@ impl PartyRenderPass {
                 self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push_tete);
             }
 
-            // Les particules du JEU (par opposition à celles de chaque joueur, dessinées plus
-            // haut). `PartyGame::particles` était avancé à chaque image depuis toujours et
-            // n'était affiché nulle part : tout ce qu'on y émettait disparaissait en silence.
-            for particule in &game.particles.particles {
+            // ═══ TOUTES LES PARTICULES, EN DERNIER ═══════════════════════════════════════════
+            //
+            // ## Ce qui n'allait pas jusqu'au 31 août 2026, et son verdict à l'œil
+            //
+            // *« les particules se fondent mal, pas vraiment transparentes avec le décor — je
+            // parle principalement de celles quand on marche et qu'on fait des traces ; le feu,
+            // le laser, ça ne pose pas de problème. »*
+            //
+            // **Elles étaient dessinées OPAQUES.** `particle_pipeline` — mélange alpha, sans
+            // écriture de profondeur — existait, était correct, et n'était lié **que pour
+            // l'aperçu de l'éditeur**, plus bas. Les particules, elles, étaient émises au milieu
+            // des objets du monde, donc sous le pipeline opaque. *Un mécanisme branché d'un seul
+            // côté, avec un commentaire qui promettait le contraire.*
+            //
+            // Deux autres causes tombaient au même endroit, et **chacune suffisait à annuler les
+            // deux autres** : le shader forçait l'opacité à 1,0 (`party_2d5.wgsl`), et l'alpha ne
+            // décroissait pas avec l'âge (`Particle::couleur_maintenant`). Réparer une seule
+            // n'aurait rien produit de visible — d'où la conclusion naturelle et fausse « ce
+            // n'était pas ça ».
+            //
+            // ## Pourquoi elles sont rassemblées ICI, et pas remises chacune à sa place
+            //
+            // Trois raisons qui vont dans le même sens, et c'est ce qui en fait une conception
+            // plutôt qu'un déplacement :
+            //
+            // 1. **L'ORDRE.** Un mélange alpha n'est juste que si ce qui est derrière est déjà
+            //    dessiné. Émises au milieu du monde, les particules se mélangeaient avec un décor
+            //    incomplet — et le résultat dépendait de l'ordre des joueurs.
+            // 2. **UN SEUL CHANGEMENT DE PIPELINE** au lieu d'un par joueur. C'est l'état le plus
+            //    coûteux à changer sur un GPU à tuiles, la machine de référence du projet.
+            // 3. **UNE SEULE DÉFINITION.** Les deux boucles étaient un copier-coller ; le fondu de
+            //    fin aurait dû être ajouté aux deux, et une seule aurait fini par diverger.
+            //
+            // ⚠ **Rien d'opaque ne doit être dessiné après ce bloc** — le pipeline lié ici n'écrit
+            // pas la profondeur. Le seul dessin qui suit est l'aperçu de l'éditeur, qui lie son
+            // propre pipeline.
+            //
+            // ⚠ Les particules ne sont **pas triées** entre elles : le résultat dépend donc encore
+            // de leur ordre d'émission. Pour de la poussière et des étincelles, l'œil ne le voit
+            // pas. La brique qui règle ça pour de bon (`_oit_pass.rs`, transparence pondérée sans
+            // tri) **dort dans le moteur** et n'est pas réveillée ici : ce serait sur-dimensionné,
+            // et une brique rallumée doit être exercée dans le même commit.
+            //   *Dette écrite, pas faite — `prive/aegis/BRIQUES-EN-SOMMEIL.md`.*
+            context.device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.particle_pipeline,
+            );
+
+            // Celles de chaque joueur (course, dérapage, glissade, impact), puis celles du JEU.
+            // `PartyGame::particles` était avancé à chaque image depuis toujours et n'était
+            // affiché nulle part : tout ce qu'on y émettait disparaissait en silence.
+            let particules = game
+                .players
+                .iter()
+                .flat_map(|session| session.player.particles.particles.iter())
+                .chain(game.particles.particles.iter());
+
+            for particule in particules {
                 let m = Mat4::from_translation(particule.pos) * Mat4::from_scale(particule.size);
                 let push = PushConstants {
                     model_matrix: m,
-                    color_tint: particule.color,
+                    // ⚠ Et non `particule.color` : c'est ici que le fondu de fin entre dans
+                    // l'image. Lire le champ brut redonnerait une particule qui disparaît d'un
+                    // coup, sans que rien ne le signale.
+                    color_tint: particule.couleur_maintenant(),
                     params: Vec4::new(0.0, particule.emissive, 0.0, 0.0),
                 };
                 self.instances.dessiner_avec(&context.device, cmd, &self.cube_mesh, &push);

@@ -11,6 +11,38 @@ pub struct Particle {
     pub max_life: f32,
 }
 
+impl Particle {
+    /// La couleur de la particule **à cet instant**, fondu de fin compris.
+    ///
+    /// ## Le défaut qu'elle corrige, et il se voyait
+    ///
+    /// `life` ne servait qu'à SUPPRIMER la particule quand elle atteignait `max_life`. Une
+    /// poussière de course vivait donc à pleine opacité pendant un quart de seconde, puis
+    /// **disparaissait d'un coup**. C'est l'un des trois défauts qui faisaient dire, à l'œil,
+    /// que les particules « se fondent mal ».
+    ///
+    /// ⚠ *Le carnet Unreal portait déjà la règle, écrite pour un autre moteur en juillet 2026 :
+    /// « fondu de queue par l'ÂGE, jamais par U ». Elle n'avait simplement jamais traversé.*
+    ///
+    /// ## Pourquoi une décroissance linéaire sur TOUTE la vie, et pas un fondu sur la fin
+    ///
+    /// Un fondu « sur les 30 derniers pour cent » demanderait un 0,3 à justifier pour toujours.
+    /// Ici l'opacité vaut simplement la fraction de vie qui reste : **aucune constante n'apparaît**,
+    /// et le comportement est celui qu'on attend d'une poussière qui se disperse — pleine à
+    /// l'émission, éteinte à sa mort. *La courbe exacte reste un goût : si l'œil trouve qu'elle
+    /// traîne, c'est ici qu'on la change, et nulle part ailleurs.*
+    pub fn couleur_maintenant(&self) -> Vec4 {
+        // ⚠ `max_life` vient d'un tirage aléatoire ; se garder d'une division par zéro coûte une
+        // comparaison et évite un `NaN` qui rendrait la particule invisible sans rien dire.
+        let reste = if self.max_life > 0.0 {
+            (1.0 - self.life / self.max_life).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Vec4::new(self.color.x, self.color.y, self.color.z, self.color.w * reste)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ParticleEffectManager {
     pub particles: Vec<Particle>,
@@ -240,5 +272,71 @@ impl ParticleEffectManager {
                 max_life: 0.35 + r3 * 0.25,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Le témoin du fondu de fin. Il tombe si `couleur_maintenant` redevient un simple accès au
+    /// champ `color` — c'est-à-dire si la particule se remet à disparaître d'un coup.
+    fn poussiere(life: f32, max_life: f32) -> Particle {
+        Particle {
+            pos: Vec3::splat(0.0),
+            vel: Vec3::splat(0.0),
+            size: Vec3::splat(0.1),
+            color: Vec4::new(0.88, 0.88, 0.82, 0.65),
+            emissive: 0.0,
+            life,
+            max_life,
+        }
+    }
+
+    #[test]
+    fn une_particule_neuve_a_toute_l_opacite_qu_on_lui_a_donnee() {
+        let p = poussiere(0.0, 0.30);
+        assert!((p.couleur_maintenant().w - 0.65).abs() < 1e-6);
+    }
+
+    #[test]
+    fn une_particule_s_efface_au_lieu_de_disparaitre_d_un_coup() {
+        // ⚠ C'est LE défaut que ce fondu corrige : `life` ne servait qu'à supprimer la
+        // particule, donc elle vivait à pleine opacité puis s'effaçait instantanément.
+        let debut = poussiere(0.0, 0.30).couleur_maintenant().w;
+        let milieu = poussiere(0.15, 0.30).couleur_maintenant().w;
+        let fin = poussiere(0.29, 0.30).couleur_maintenant().w;
+
+        assert!(milieu < debut, "l'opacite doit decroitre : {milieu} >= {debut}");
+        assert!(fin < milieu, "l'opacite doit continuer de decroitre : {fin} >= {milieu}");
+        assert!(fin < 0.05, "en fin de vie elle doit etre quasi eteinte, pas a {fin}");
+    }
+
+    #[test]
+    fn la_couleur_elle_meme_ne_bouge_pas_avec_l_age() {
+        // Seule l'opacite s'eteint. Une poussiere qui changerait de teinte en vieillissant
+        // serait un effet que personne n'a demande.
+        let jeune = poussiere(0.0, 0.30).couleur_maintenant();
+        let vieille = poussiere(0.25, 0.30).couleur_maintenant();
+        assert!((jeune.x - vieille.x).abs() < 1e-6);
+        assert!((jeune.y - vieille.y).abs() < 1e-6);
+        assert!((jeune.z - vieille.z).abs() < 1e-6);
+    }
+
+    #[test]
+    fn une_duree_de_vie_nulle_ne_produit_pas_de_nan() {
+        // `max_life` vient d'un tirage aleatoire. Une division par zero donnerait un NaN, et un
+        // NaN en alpha rend la particule invisible SANS que rien ne le signale.
+        let p = poussiere(0.0, 0.0).couleur_maintenant();
+        assert!(p.w.is_finite(), "l'opacite doit rester un nombre, pas {}", p.w);
+        assert_eq!(p.w, 0.0);
+    }
+
+    #[test]
+    fn une_particule_en_sursis_ne_remonte_jamais_au_dessus_de_zero() {
+        // Si une image passe entre le depassement de `max_life` et la suppression, l'opacite
+        // doit rester bornee : sans le `clamp`, elle deviendrait negative.
+        let p = poussiere(0.45, 0.30).couleur_maintenant();
+        assert_eq!(p.w, 0.0);
     }
 }
