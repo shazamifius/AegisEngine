@@ -80,16 +80,47 @@ fn teinte(couleur: [f32; 3]) -> Vec4 {
     Vec4::new(couleur[0], couleur[1], couleur[2], 1.0)
 }
 
+/// La taille d'une tache, en sous-voxels, tiree entre `mini` et `maxi` inclus.
+///
+/// ⚠ **Le hachage doit etre DIFFERENT de celui qui decide la position.** Avec le meme, taille et
+/// position seraient correlees — les grosses taches tomberaient toujours au meme endroit du bloc,
+/// et l'oeil lirait un motif la ou l'on croit poser du hasard.
+///
+/// ⚠⚠ Et une limite a dire plutot qu'a cacher : entre `mini` et `maxi` il n'y a que des ENTIERS de
+/// sous-voxels. Sa demande etait que la taille « varie enormement » ; avec un maximum fixe a la
+/// taille actuelle (deja jugee trop grosse), la plage reelle est 1 ou 2 — il n'existe rien entre
+/// les deux. *Si son oeil trouve que ca ne varie pas assez, la vraie reponse n'est pas d'elargir
+/// ici : c'est que la trame du decor est trop grossiere pour ce que le grain demande, et ca se
+/// decide au niveau de `SOUS_VOXELS`, pas ici.*
+fn taille_tache(h: u32, mini: u32, maxi: u32) -> u32 {
+    mini + h % (maxi.saturating_sub(mini) + 1)
+}
+
 /// Place un detail de `cotes` sous-voxels sur la face d'un bloc, aligne sur la sous-grille.
 ///
-/// ⚠ `h` decide de la position, mais **seulement parmi les emplacements ou le detail tient
-/// entier**. Un detail qui deborderait du bloc se verrait immediatement sur une carte reguliere.
+/// ## ⚠⚠ LA MARGE — corrige un artefact qu'il a vu avant moi (31 aout 2026)
+///
+/// Ses mots : *« les taches sur les murs sont random, et certaines sont a la frontiere entre la
+/// pierre et l'air — du coup ca cree des artefacts ultra moches, il faudrait prevoir une marge »*.
+///
+/// Il avait raison, et la cause etait exactement la : `cx` allait de 0 a `8 - cotes`, donc une
+/// tache pouvait **coller au bord du bloc**. Or elle n'est pas peinte a plat — elle AVANCE hors de
+/// la face (`avancee`, epaisseur `0.92`). Contre un bloc voisin plein, personne ne le voit ; contre
+/// de l'AIR, sa tranche depasse dans le vide et se lit comme un defaut de modele.
+///
+/// ⚠ *Le commentaire d'origine promettait deja que le detail « tient entier » dans le bloc — et
+/// c'etait vrai. Tenir dans le bloc ne suffisait pas : il faut ne pas TOUCHER son bord.* Une garde
+/// juste, mais posee un cran trop loin.
+///
+/// La marge d'un sous-voxel de chaque cote coute deux emplacements sur sept, et rend l'artefact
+/// **inatteignable** plutot que rare — ce qui vaut mieux qu'un cas limite qui ne se reproduit que
+/// sur certaines cartes.
 fn detail_voxel(bloc_x: i32, bloc_y: i32, h: u32, cotes: u32, avancee: f32) -> Mat4 {
     let pas = 1.0 / SOUS_VOXELS as f32;
-    // Les emplacements possibles : de 0 a (8 - cotes), inclus.
-    let libres = (SOUS_VOXELS - cotes + 1).max(1);
-    let cx = h % libres;
-    let cy = (h / libres) % libres;
+    // Emplacements possibles : de 1 a (8 - cotes - 1), inclus — jamais 0, jamais le bord oppose.
+    let libres = SOUS_VOXELS.saturating_sub(cotes + 1).max(1);
+    let cx = 1 + h % libres;
+    let cy = 1 + (h / libres) % libres;
 
     Mat4::from_translation(Vec3::new(
         bloc_x as f32 + (cx as f32 + cotes as f32 * 0.5) * pas,
@@ -628,12 +659,18 @@ impl PartyRenderPass {
 
                         // 1. Décoration Procédurale de la Roche (Pierre) : Petits cubes gris plus sombres encastrés
                         if tile == TileType::MetalBlock {
+                            // ⚠ LE GRAIN DE LA PIERRE EST LE PLUS GROS DES DEUX, et c'est une
+                            // hierarchie voulue : *« ce qui est perturbant, c'est que les taches
+                            // de la terre et de la pierre soient de la meme grosseur »*. Elles
+                            // etaient toutes a 2 sous-voxels — deux matieres, un seul grain, donc
+                            // aucune des deux ne se lisait comme une matiere.
+                            //
+                            // ⚠⚠ Le maximum est 2, et il ne monte pas : c'est la taille d'AVANT,
+                            // qu'il juge deja trop grosse. On descend, on ne monte jamais.
                             for k in 0..3 {
                                 let h = tile_hash(xi, yi, k);
-                                // Deux sous-voxels de cote, soit un quart de bloc : c'est la plus
-                                // petite taille qui se lise encore comme un volume a distance de
-                                // jeu. En dessous, on ajoute du bruit, pas du detail.
-                                let sub_m = detail_voxel(xi, yi, h, 2, 0.05);
+                                let cotes = taille_tache(tile_hash(xi, yi, k + 200), 1, 2);
+                                let sub_m = detail_voxel(xi, yi, h, cotes, 0.05);
                                 self.file.ajouter(aegis_engine::render::file::Dessin {
                                     maillage: MAILLAGE_CUBE,
                                     modele: sub_m,
@@ -646,12 +683,19 @@ impl PartyRenderPass {
 
                         // 2. Décoration Procédurale de la Terre (Dirt) : Très léger et très petit (1 à 2 micro-tavelures subtiles)
                         if tile == TileType::SolidBlock {
-                            for k in 0..2 {
+                            // ⚠ LA TERRE PORTE LE GRAIN LE PLUS FIN — *« la terre aussi random,
+                            // mais avec des taches encore plus petites que la pierre »*. Un seul
+                            // sous-voxel, jamais deux : c'est ce qui distingue les deux matieres
+                            // au premier coup d'oeil, sans qu'aucune ne devienne bruyante.
+                            //
+                            // ⚠⚠ Le commentaire d'avant affirmait que deux sous-voxels etaient
+                            // « la plus petite taille qui se lise comme un volume » — vrai pour un
+                            // VOLUME pose dans la scene, faux pour une tache plaquee sur une face.
+                            // *Une regle juste, appliquee au mauvais objet.* Son oeil a tranche :
+                            // a un sous-voxel, la terre se lit comme de la terre.
+                            for k in 0..3 {
                                 let h = tile_hash(xi, yi, k + 10);
-                                // La terre porte des cailloux, pas de la poussiere : ils faisaient
-                                // 0,05 unite, c'est-a-dire deux pixels a l'ecran — invisibles
-                                // individuellement, et sales collectivement.
-                                let sub_m = detail_voxel(xi, yi, h, 2, 0.05);
+                                let sub_m = detail_voxel(xi, yi, h, 1, 0.05);
                                 self.file.ajouter(aegis_engine::render::file::Dessin {
                                     maillage: MAILLAGE_CUBE,
                                     modele: sub_m,
