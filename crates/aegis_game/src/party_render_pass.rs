@@ -69,6 +69,17 @@ fn tile_hash(x: i32, y: i32, seed: u32) -> u32 {
 /// ferait exactement ce que ce commentaire dit d'eviter : deux chiffres au lieu d'un.
 const SOUS_VOXELS: u32 = 8;
 
+/// Une couleur de la palette, telle que le rendu l'attend : opaque.
+///
+/// ⚠ L'alpha est toujours 1 pour du décor, et ce n'est pas une simplification : depuis le 31 août
+/// 2026, l'alpha de la teinte traverse jusqu'à la carte (`party_2d5.wgsl`). Une couleur de bloc qui
+/// porterait 0,9 par distraction rendrait le décor **translucide**, et le mélange n'étant pas activé
+/// sur le pipeline du monde, elle sortirait quand même opaque — donc le défaut ne se verrait qu'un
+/// jour lointain, en changeant tout autre chose.
+fn teinte(couleur: [f32; 3]) -> Vec4 {
+    Vec4::new(couleur[0], couleur[1], couleur[2], 1.0)
+}
+
 /// Place un detail de `cotes` sous-voxels sur la face d'un bloc, aligne sur la sous-grille.
 ///
 /// ⚠ `h` decide de la position, mais **seulement parmi les emplacements ou le detail tient
@@ -171,6 +182,15 @@ pub struct PartyRenderPass {
     /// long pour comparer deux reglages, donc le choix se faisait de memoire. La console la regle
     /// en direct (« ambiance ciel 0.1 0.2 0.4 »), et ce qui plait devient le defaut ci-dessous.
     ambiance: aegis_engine::render::cadre::Ambiance,
+
+    /// Les couleurs du DÉCOR, mutables pour la même raison que l'ambiance ci-dessus.
+    ///
+    /// ⚠ L'ambiance règle la LUMIÈRE ; la palette règle la MATIÈRE. Les confondre a coûté un
+    /// atelier entier le 31 août 2026 : quatre ambiances lui ont été soumises, toutes rejetées —
+    /// parce qu'aucun réglage de lumière ne peut rattraper un vert d'herbe trop saturé. *Voir
+    /// `palette.rs` : ces huit couleurs étaient dispersées en littéraux dans ce fichier, et une
+    /// neuvième dormait dans `grid.rs` en croyant être la vraie.*
+    palette: crate::palette::Palette,
 
     pub camera_pos: Vec3,
     pub camera_target: Vec3,
@@ -441,6 +461,12 @@ impl PartyRenderPass {
                 ..aegis_engine::render::cadre::Ambiance::default()
             },
 
+            // ⚠ Le défaut porte EXACTEMENT les couleurs qui étaient dispersées dans ce fichier —
+            // le déplacement ne devait rien changer à l'image. Un test le vérifie couleur par
+            // couleur (`palette.rs`), parce qu'un rangement qui modifie en douce ce qu'il range
+            // est pire que le désordre : personne ne saurait quoi chercher.
+            palette: crate::palette::Palette::default(),
+
             camera_pos: Vec3::new(5.0, 3.0, 16.0),
             camera_target: Vec3::new(5.0, 3.0, 0.0),
             zoom_level: 1.0,
@@ -560,6 +586,12 @@ impl PartyRenderPass {
             // deborder au bout de quelques images, et les objets disparaitraient un par un.
             self.instances.recommencer();
             self.file.vider();
+
+            // ⚠ Copiée AVANT la boucle : `self.file.ajouter(...)` emprunte `self` mutablement, et
+            // lire `self.palette` au milieu ferait refuser le programme. `Palette` est `Copy` — huit
+            // triplets de flottants — donc la copie ne coûte rien et se lit mieux qu'un emprunt
+            // découpé.
+            let palette = self.palette;
                         for y in 0..game.grid.height {
                 for x in 0..game.grid.width {
                     let xi = x as i32;
@@ -569,10 +601,20 @@ impl PartyRenderPass {
                         let model = Mat4::from_translation(Vec3::new(x as f32 + 0.5, y as f32 + 0.5, 0.0))
                             * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0));
 
+                        // ⚠⚠ CE `match` EST LA VRAIE PALETTE DU DÉCOR, et `tile.color()` n'est
+                        // qu'un repli. Les trois blocs les plus visibles du jeu ne passent pas par
+                        // `grid.rs`, qui porte pourtant une fonction nommée `color()` avec des
+                        // valeurs DIFFÉRENTES — régler celle-là n'aurait rien changé à l'image.
+                        // *Deux définitions de la même chose, dont une se croit vraie.*
+                        //
+                        // Les couleurs du décor vivent désormais dans `palette.rs`, réglables en
+                        // direct (« palette herbe 0.3 0.6 0.3 »). Celles du GAMEPLAY restent dans
+                        // `grid.rs` et n'ont pas à se régler à l'œil : elles sont un code de
+                        // lecture — un piège doit se reconnaître —, pas un goût.
                         let col = match tile {
-                            TileType::GrassBlock => Vec4::new(0.32, 0.82, 0.36, 1.0), // Herbe Vert Vif Pur
-                            TileType::SolidBlock => Vec4::new(0.48, 0.32, 0.20, 1.0), // Terre Marron
-                            TileType::MetalBlock => Vec4::new(0.60, 0.63, 0.68, 1.0), // Pierre Grise
+                            TileType::GrassBlock => teinte(palette.herbe),
+                            TileType::SolidBlock => teinte(palette.terre),
+                            TileType::MetalBlock => teinte(palette.pierre),
                             _ => tile.color(),
                         };
 
@@ -595,7 +637,7 @@ impl PartyRenderPass {
                                 self.file.ajouter(aegis_engine::render::file::Dessin {
                                     maillage: MAILLAGE_CUBE,
                                     modele: sub_m,
-                                    teinte: Vec4::new(0.40, 0.43, 0.48, 1.0),
+                                    teinte: teinte(palette.eclats_pierre),
                                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
                                     porte_une_ombre: true,
                                 });
@@ -613,7 +655,7 @@ impl PartyRenderPass {
                                 self.file.ajouter(aegis_engine::render::file::Dessin {
                                     maillage: MAILLAGE_CUBE,
                                     modele: sub_m,
-                                    teinte: Vec4::new(0.42, 0.27, 0.16, 1.0),
+                                    teinte: teinte(palette.tavelures_terre),
                                     params: Vec4::new(0.3, 0.0, 0.0, 0.0),
                                     porte_une_ombre: true,
                                 });
@@ -638,9 +680,9 @@ impl PartyRenderPass {
                                     let blade_h = hauteur as f32 * pas;
 
                                     let green_color = match k % 3 {
-                                        0 => Vec4::new(0.32, 0.90, 0.35, 1.0), // Vert Vif
-                                        1 => Vec4::new(0.20, 0.78, 0.26, 1.0), // Émeraude
-                                        _ => Vec4::new(0.14, 0.65, 0.20, 1.0), // Forêt
+                                        0 => teinte(palette.brin_clair),
+                                        1 => teinte(palette.brin_moyen),
+                                        _ => teinte(palette.brin_sombre),
                                     };
 
                                     // Aucune rotation : un brin incline sur une grille de voxels
@@ -1718,6 +1760,17 @@ impl PartyRenderPass {
     /// les champs et leurs bornes, et une reformulation ici serait une seconde vérité à tenir.
     pub fn regler_ambiance(&mut self, champ: &str, valeurs: &[f32]) -> Result<(), String> {
         self.ambiance.regler(champ, valeurs)
+    }
+
+    /// Règle une couleur du décor, en direct. Même raison d'être que `regler_ambiance` : l'œil ne
+    /// peut trancher que ce qu'il voit, et il ne compare que ce qui change devant lui.
+    pub fn regler_palette(&mut self, champ: &str, valeurs: &[f32]) -> Result<(), String> {
+        self.palette.regler(champ, valeurs)
+    }
+
+    /// La palette courante, prête à recoller dans le code du jeu.
+    pub fn palette_decrite(&self) -> String {
+        self.palette.decrire()
     }
 
     /// Allume ou éteint le halo. Rend son nouvel état, pour que l'appelant journalise ce qui EST

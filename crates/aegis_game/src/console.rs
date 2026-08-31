@@ -94,6 +94,12 @@ pub enum Ordre {
     /// ferait une seconde vérité, qui se périmerait au premier champ ajouté — le défaut même que
     /// tout le travail du jour a consisté à fermer ailleurs.
     Ambiance { champ: String, valeurs: Vec<f32> },
+    /// Régler une couleur du DÉCOR (herbe, terre, pierre, brins…), en direct.
+    ///
+    /// ⚠ Distinct d'`Ambiance` à dessein : l'une éclaire, l'autre colore. Le 31 août 2026, quatre
+    /// ambiances lui ont été soumises et rejetées en bloc — parce que le levier manquant était
+    /// celui-ci, et qu'il n'existait pas : les couleurs vivaient en littéraux dispersés.
+    Palette { champ: String, valeurs: Vec<f32> },
     /// Allumer ou éteindre le halo, pour comparer les deux DANS LA MÊME exécution.
     ///
     /// ⚠ Ce n'est pas un réglage de confort : c'est un instrument. Deux exécutions du jeu ne
@@ -136,6 +142,11 @@ pub struct Etat {
     /// Publiee en TEXTE et non en valeurs : ce qui se lit dans un terminal se compare aussi dans
     /// un test, et surtout se recolle sans etre retranscrit.
     pub ambiance: String,
+    /// La palette du DÉCOR, même forme et même raison que `ambiance` ci-dessus.
+    ///
+    /// ⚠ L'ambiance règle la LUMIÈRE, la palette règle la MATIÈRE. Les avoir confondues a coûté un
+    /// atelier entier le 31 août 2026 : aucun réglage de lumière ne rattrape un vert trop saturé.
+    pub palette: String,
     /// Le temps GPU par etape : nom, moyenne, pire cas, nombre d'images agregees.
     ///
     /// ⚠ Contrairement a `travail`, ce releve ne VOYAGE PAS : il decrit ce GPU, ce pilote, ce
@@ -278,6 +289,12 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
             "occlusion on|off   — allume/eteint l occlusion ambiante, meme usage",
             "                      ciel <r> <v> <b> | sol <r> <v> <b> | exposition <x>",
             "                      point_blanc <x>  | rugosite <x>    | reflectance <x>",
+            "                      intensite_soleil <x>",
+            "palette             — les couleurs du DECOR, pretes a recoller dans le code",
+            "palette <nom> <r> <v> <b>",
+            "                      herbe | terre | pierre | eclats_pierre | tavelures_terre",
+            "                      brin_clair | brin_moyen | brin_sombre",
+            "                      ⚠ l ambiance ECLAIRE, la palette COLORE — deux leviers distincts",
             "— le lobby —",
             "echap               — ouvre ou referme le lobby",
             "zones               — les boutons atteignables sur l'ecran courant",
@@ -456,6 +473,32 @@ pub fn repondre(ligne: &str, pupitre: &Pupitre) -> String {
             // moteur peut le refuser (champ inconnu, valeur absurde). Annoncer un succes qu'on
             // n'a pas constate serait une victoire prematuree de trois mots.
             "ordre transmis — relire avec « ambiance » pour voir ce qui a ete retenu".to_string()
+        }
+
+        ["palette"] => {
+            let e = pupitre.lire_etat();
+            if e.palette.is_empty() {
+                return "(aucune image dessinee — la palette n'est pas encore publiee)".to_string();
+            }
+            e.palette
+        }
+
+        ["palette", champ, valeurs @ ..] => {
+            let mut nombres = Vec::with_capacity(valeurs.len());
+            for v in valeurs {
+                match v.parse::<f32>() {
+                    Err(_) => return format!("« {v} » n'est pas un nombre (le separateur est le POINT)"),
+                    Ok(n) => nombres.push(n),
+                }
+            }
+            if nombres.is_empty() {
+                return format!("palette {champ} <r> <v> <b> — aucune valeur donnee");
+            }
+            pupitre.deposer(Ordre::Palette {
+                champ: (*champ).to_string(),
+                valeurs: nombres,
+            });
+            "ordre transmis — relire avec « palette » pour voir ce qui a ete retenu".to_string()
         }
 
         ["gpu", "zero"] => {

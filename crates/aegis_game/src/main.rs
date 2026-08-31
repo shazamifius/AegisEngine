@@ -3,6 +3,7 @@
 mod grid;
 mod traps;
 mod particles;
+mod palette;
 mod player;
 mod mystery_box;
 mod party_game;
@@ -265,6 +266,8 @@ fn publier_etat_console(
     // Deja ecrite en texte : c'est le rendu de passe qui la porte, et le lui emprunter ici
     // entrerait en conflit avec l'emprunt mutable du moteur de rendu.
     ambiance: String,
+    // Idem : déjà écrite en texte par le rendu de passe, pour la même raison d'emprunt.
+    palette: String,
 ) {
     {
         let moi = g.players.iter().find(|p| p.is_human);
@@ -286,6 +289,7 @@ fn publier_etat_console(
             position: moi.map(|p| (p.player.position.x, p.player.position.y)).unwrap_or((0.0, 0.0)),
             demonstration,
             ambiance,
+            palette,
             // Le nom de l'écran, et ses boutons tels qu'ils viennent d'être DESSINÉS. C'est la
             // seule façon pour un scénario de viser un bouton sans en coder la position — donc
             // sans qu'un ajustement de pixel ne le fasse cliquer dans le vide en silence.
@@ -445,6 +449,18 @@ impl AegisApp {
                         log::info!("[halo] {}", if retenu { "allume" } else { "eteint" });
                     }
                 },
+                console::Ordre::Palette { champ, valeurs } => {
+                    // Mêmes trois issues que l'ambiance, et pour la même raison : un réglage avalé
+                    // en silence ferait chercher le défaut dans le rendu alors qu'il est dans le
+                    // mot tapé.
+                    match self.party_render_pass.as_mut() {
+                        None => log::warn!("[palette] rien a regler : le rendu n'est pas encore ne"),
+                        Some(rendu) => match rendu.regler_palette(&champ, &valeurs) {
+                            Ok(()) => log::info!("[palette] {champ} = {valeurs:?}"),
+                            Err(e) => log::warn!("[palette] refuse : {e}"),
+                        },
+                    }
+                }
                 console::Ordre::Ambiance { champ, valeurs } => {
                     // ⚠ Les TROIS issues sont journalisees : retenu / refuse / impossible. Un
                     // reglage avale en silence ferait chercher le defaut dans le shader alors
@@ -483,6 +499,7 @@ impl AegisApp {
             &self.lobby,
             engine.gpu.chrono.as_ref(),
             party_render_pass.ambiance_decrite(),
+            party_render_pass.palette_decrite(),
         );
 
         // On pousse NOTRE position au cœur, et rien d'autre : lui seul décide ce que les autres
