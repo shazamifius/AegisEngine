@@ -859,6 +859,41 @@ mod tests {
         h as f32 / u32::MAX as f32
     }
 
+    /// ⭐⭐ **L'EMPREINTE D'UNE IMAGE, ET POURQUOI ELLE EXISTE** — comparer deux machines sans
+    /// s'échanger un seul fichier.
+    ///
+    /// Née le 1er septembre 2026, quand le moteur a tourné pour la première fois sur un téléphone
+    /// (Motorola G54, ARM64, Android). **Quatorze des quinze images produites étaient identiques au
+    /// bit près à celles du PC x86.** La quinzième — la nectarine intégrée en **48 pas** — non ;
+    /// alors que la MÊME image en **4 pas** l'était.
+    ///
+    /// *C'est l'ACCUMULATION qui sépare les deux machines, pas le calcul.* Un `a*b + c` peut être
+    /// fusionné en une instruction unique (un seul arrondi) sur ARM et scindé en deux (deux
+    /// arrondis) sur x86. L'écart vaut une fraction de bit par opération — invisible à 4 pas,
+    /// suffisant à 48 pour déplacer un niveau sur 255 quelque part.
+    ///
+    /// ## ⚠ Ce qu'il faut en retenir, et c'est une règle
+    ///
+    /// **Ne JAMAIS graver l'empreinte d'une image dans une assertion.** Un tel test passerait ici et
+    /// tomberait chez quelqu'un d'autre, en accusant un code parfaitement juste. *La reproductibilité
+    /// au bit près entre architectures n'est pas une propriété du moteur — et vouloir l'exiger
+    /// fabriquerait un test qui ment.*
+    ///
+    /// Cette empreinte **s'affiche**, elle ne juge pas. Elle sert à comparer deux machines d'un coup
+    /// d'œil, et à mesurer si un écart grandit.
+    fn signature(rvb: &[u8]) -> String {
+        // FNV-1a, écrit ici en quatre lignes : aucune dépendance, et il n'a rien à protéger.
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut somme: u64 = 0;
+        for &o in rvb {
+            h ^= o as u64;
+            h = h.wrapping_mul(0x100000001b3);
+            somme += o as u64;
+        }
+        // La somme dit l'AMPLEUR d'un écart là où l'empreinte ne dit que son existence.
+        format!("empreinte {h:016x} · somme des canaux {somme}")
+    }
+
     /// Un passage doux de 0 à 1 entre deux bornes — la courbe d'Hermite `3t² − 2t³`.
     ///
     /// ⚠ **Sa dérivée s'annule aux deux bouts**, et c'est toute la différence avec un `clamp` :
@@ -1317,6 +1352,7 @@ mod tests {
             crate::image::png::encoder(cote as u32, cote as u32, &image_fine).expect("png"),
         )
         .expect("ecriture");
+        println!("  48 pas : {}", signature(&image_fine));
 
         // ⭐ LE MÊME CHAMP EN QUATRE PAS — le budget d'un casque. C'est le curseur d'adaptativité,
         // rendu visible : un seul nombre change, ni le code ni le champ.
@@ -1327,6 +1363,7 @@ mod tests {
             crate::image::png::encoder(cote as u32, cote as u32, &image_grossiere).expect("png"),
         )
         .expect("ecriture");
+        println!("   4 pas : {}", signature(&image_grossiere));
 
         // ── Ce que ce test contrôle vraiment ─────────────────────────────────────────────────
         // 1. Le champ CHANGE l'image. Sans ça, tout ce fichier serait décoratif.
