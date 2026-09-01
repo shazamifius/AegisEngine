@@ -18,5 +18,6 @@ pub mod ui;
 
 pub use core::math;
 pub use core::bytes;
+#[cfg(feature = "fenetre")]
 pub use core::engine::Engine;
 pub use core::gpu_context::GpuContext;

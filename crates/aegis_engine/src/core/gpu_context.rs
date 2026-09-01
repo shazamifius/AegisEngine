@@ -1,9 +1,28 @@
 use crate::chrono_gpu::ChronoGpu;
 use ash::vk;
+#[cfg(feature = "fenetre")]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::ffi::CStr;
+#[cfg(feature = "fenetre")]
 use std::sync::Arc;
-use winit::window::Window;
+
+/// ⭐⭐ **CE QU'EST UNE FENÊTRE POUR LE MOTEUR — et ce qu'elle devient quand il n'y en a pas.**
+///
+/// Avec la fonction `fenetre`, c'est la fenêtre de winit, comme avant.
+///
+/// **Sans elle, c'est un type INHABITABLE** — une énumération sans variante, dont aucune valeur ne
+/// peut exister. Ce n'est pas une astuce de compilation : c'est le compilateur qui **garantit**
+/// qu'aucune fenêtre ne circule dans le moteur. Un `Option<&Fenetre>` ne peut alors valoir que
+/// `None`, et il n'y a aucun chemin où l'oublier.
+///
+/// *C'est la doctrine du projet appliquée aux types : une garde posée là où le chemin se décide
+/// ferme la classe entière ; une liste de « pense à vérifier » en oublie toujours un.*
+#[cfg(feature = "fenetre")]
+pub type Fenetre = winit::window::Window;
+
+/// Sans système de fenêtrage, aucune fenêtre ne peut exister — et le compilateur le sait.
+#[cfg(not(feature = "fenetre"))]
+pub enum Fenetre {}
 
 /// Struct regroupant la file de traitement et son index de famille.
 pub struct QueueInfo {
@@ -65,7 +84,8 @@ pub struct GpuContext {
 
 impl GpuContext {
     /// Initialise une instance Vulkan 1.4 native pure, sélectionne le GPU et crée le Swapchain.
-    pub fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
+    #[cfg(feature = "fenetre")]
+    pub fn new(window: Arc<Fenetre>) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Initialisation de l'API Vulkan 1.4 Native via ash (Pure From Scratch)...");
 
         // 1. Chargement de la bibliothèque dynamique Vulkan
@@ -584,7 +604,11 @@ impl GpuContext {
     /// Le reste — la barrière, le carnet de commandes, le chronomètre — est identique, et ce n'est
     /// pas une commodité : *un banc qui suivrait un autre chemin que le jeu mesurerait autre chose
     /// que le jeu.*
-    pub fn begin_frame(&mut self, window: Option<&Window>) -> Result<(vk::CommandBuffer, usize), Box<dyn std::error::Error>> {
+    // Sans fenêtrage, `window` est un `Option` d'un type inhabitable : il ne peut valoir que
+    // `None`, et aucun chemin ne le lit. Le paramètre reste pour que la signature soit la même
+    // des deux côtés — c'est le prix d'une API unique, et il est bas.
+    #[cfg_attr(not(feature = "fenetre"), allow(unused_variables))]
+    pub fn begin_frame(&mut self, window: Option<&Fenetre>) -> Result<(vk::CommandBuffer, usize), Box<dyn std::error::Error>> {
         unsafe {
             self.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX)?;
 
@@ -599,6 +623,9 @@ impl GpuContext {
                 match result {
                     Ok((idx, _sub)) => idx,
                     Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                        // Sans fenêtrage, `Fenetre` est inhabitable : ce bras ne peut pas exister,
+                        // et le compilateur n'a même pas de quoi le compiler.
+                        #[cfg(feature = "fenetre")]
                         if let Some(w) = window {
                             self.resize(w);
                         }
@@ -634,11 +661,12 @@ impl GpuContext {
     }
 
     /// Ferme l'image, la soumet, et la présente **s'il y a quelqu'un pour la voir**.
+    #[cfg_attr(not(feature = "fenetre"), allow(unused_variables))]
     pub fn end_frame(
         &mut self,
         cmd: vk::CommandBuffer,
         image_index: usize,
-        window: Option<&Window>,
+        window: Option<&Fenetre>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             self.device.end_command_buffer(cmd)?;
@@ -682,6 +710,9 @@ impl GpuContext {
             let result = self.swapchain_loader.queue_present(self.graphics_queue.queue, &present_info);
 
             if result == Ok(true) || result == Err(vk::Result::ERROR_OUT_OF_DATE_KHR) || result == Err(vk::Result::SUBOPTIMAL_KHR) {
+                // Même raison qu'au-dessus : sans fenêtrage, ce bras ne peut pas exister — on n'est
+                // d'ailleurs jamais arrivé ici, `presente()` a déjà rendu la main.
+                #[cfg(feature = "fenetre")]
                 if let Some(w) = window {
                     self.resize(w);
                 }
@@ -720,7 +751,8 @@ impl GpuContext {
     }
 
     /// Redimensionne la taille du Swapchain Vulkan lors du redimensionnement de la fenêtre.
-    pub fn resize(&mut self, window: &Window) {
+    #[cfg(feature = "fenetre")]
+    pub fn resize(&mut self, window: &Fenetre) {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
             return;

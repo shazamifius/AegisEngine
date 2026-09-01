@@ -9,14 +9,28 @@ description = "Pure Vulkan 1.4 From Scratch 3D Engine for VR and Mobile"
 name = "aegis_engine"
 path = "src/lib.rs"
 
+
+# ⭐⭐ « fenetre » est ACTIVÉE PAR DÉFAUT — rien ne change pour le jeu. La retirer donne un moteur
+# qui ne sait plus ouvrir de fenêtre, et **c'est exactement ce qu'il faut sur une cible qui n'en a
+# pas** : un téléphone en ligne de commande, une CI nue, un banc de mesure.
+#
+# ⚠ Elle est née d'un échec mesuré le 1er septembre 2026 : la compilation du moteur pour Android
+# s'arrête sur `android-activity`, une dépendance que **winit** tire d'office dès que la cible est
+# Android — alors que `GpuContext::sans_ecran` avait justement été écrit pour se passer de fenêtre.
+# *Le mode sans écran existait, et la dépendance qu'il devait supprimer restait obligatoire à la
+# COMPILATION. Une capacité qu'on ne peut pas compiler seule n'est pas une capacité séparée.*
+[features]
+default = ["fenetre"]
+fenetre = ["dep:winit", "dep:ash-window", "dep:raw-window-handle"]
+
 [dependencies]
 # Direct Vulkan 1.4 C API Bindings (Zero Middleware)
 ash = "0.38"
-ash-window = "0.13"
-raw-window-handle = "0.6"
+ash-window = { version = "0.13", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
 
 # Windowing & Events
-winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06"] }
+winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06"], optional = true }
 
 # Logging & Diagnostic
 log = "0.4"
