@@ -44,6 +44,15 @@ pub struct GpuContext {
     /// Sans écran, c'est nous qui décidons quelle image sert : ce compteur tourne à la place de
     /// `acquire_next_image`. Inutilisé dès qu'une chaîne de présentation existe.
     image_suivante: usize,
+    /// ⚠ **La mémoire des images que NOUS avons allouées** — vide dès qu'une chaîne de
+    /// présentation existe, car ces images-là appartiennent au système de fenêtrage.
+    ///
+    /// *Elle manquait, et c'était une fuite silencieuse* : `sans_ecran` allouait une image et sa
+    /// mémoire par tampon, les empilait dans un vecteur local, et ce vecteur mourait à la fin de la
+    /// fonction en emportant les identifiants sans rien détruire. **Aucun warning ne pouvait le
+    /// dire** — `push` est un usage. Sur un processus court, le pilote nettoie derrière ; dans une
+    /// suite de tests qui ouvre un contexte par cas, ça s'accumule.
+    memoires_des_images: Vec<vk::DeviceMemory>,
     /// L'index de l'image la plus récemment rendue.
     ///
     /// ⚠ **La capture et la mesure lisaient toujours `swapchain_images[0]`**, quelle que soit
@@ -281,6 +290,9 @@ impl GpuContext {
             in_flight_fence,
             chrono,
             image_suivante: 0,
+            // Avec un écran, les images viennent de la chaîne de présentation : elles ne sont pas
+            // à nous, et les détruire serait une faute.
+            memoires_des_images: Vec::new(),
             derniere_image: 0,
         })
     }
@@ -522,6 +534,7 @@ impl GpuContext {
             command_buffers,
             chrono,
             image_suivante: 0,
+            memoires_des_images: memoires,
             derniere_image: 0,
             device,
         })
@@ -764,11 +777,90 @@ impl Drop for GpuContext {
                 chrono.detruire(&self.device);
             }
             self.device.destroy_command_pool(self.command_pool, None);
-            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
-            self.surface_loader.destroy_surface(self.surface, None);
+
+            // ⚠⚠ DEUX FAUTES CORRIGÉES ICI, ET LES DEUX N'ONT ÉTÉ VUES QUE LE JOUR OÙ
+            // `sans_ecran` A ENFIN ÉTÉ APPELÉ.
+            //
+            // **① Ce `Drop` détruisait la chaîne de présentation SANS CONDITION.** Sans écran, le
+            // chargeur de l'extension existe mais ses pointeurs sont **nuls** — l'extension n'est
+            // pas activée. Le programme s'arrêtait donc net sur `Unable to load
+            // destroy_swapchain_khr`, dans un `drop`, c'est-à-dire là où une panique ne peut même
+            // pas se dérouler proprement (`SIGABRT`).
+            //
+            // *Et le plus instructif : le commentaire de `sans_ecran` promettait déjà que « rien ne
+            // doit les appeler ». Ce `Drop` les appelait.* **Un commentaire qui décrit une
+            // garantie que le code ne tient pas est plus dangereux qu'une absence de commentaire**
+            // — il fait passer le lecteur, moi compris.
+            //
+            // **② Les images d'un contexte sans écran nous appartiennent, et personne ne les
+            // libérait.** Ni elles, ni leur mémoire. Aucun warning ne pouvait le dire.
+            if self.swapchain != vk::SwapchainKHR::null() {
+                self.swapchain_loader.destroy_swapchain(self.swapchain, None);
+            }
+            if self.surface != vk::SurfaceKHR::null() {
+                self.surface_loader.destroy_surface(self.surface, None);
+            }
+            if !self.memoires_des_images.is_empty() {
+                for &image in self.swapchain_images.iter() {
+                    self.device.destroy_image(image, None);
+                }
+                for &memoire in self.memoires_des_images.iter() {
+                    self.device.free_memory(memoire, None);
+                }
+            }
+
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
         log::info!("Ressources Vulkan 1.4 libérées proprement.");
+    }
+}
+
+#[cfg(test)]
+mod tests_sans_ecran {
+    use super::*;
+
+    /// ⭐⭐ **LE PREMIER TEST QUI OUVRE LA PORTE SANS ÉCRAN** — et elle n'avait jamais été poussée.
+    ///
+    /// `sans_ecran` était écrit, complet, soigneusement documenté — et **appelé par rien**, depuis
+    /// sa naissance. C'est la famille de défauts n° 1 du projet dans sa forme la plus discrète :
+    /// *le remède est déjà écrit, et branché à rien.*
+    ///
+    /// **Ce que ça débloque dépasse largement ce test :** tant que le contexte Vulkan exigeait une
+    /// fenêtre, aucune passe de rendu ne pouvait être vérifiée autrement qu'à l'œil, sur une
+    /// capture, à la main. *C'est la raison structurelle pour laquelle « le rendu casse en
+    /// silence » dans ce projet — pas une négligence, une architecture.*
+    ///
+    /// ⚠ **Ignoré si aucun Vulkan n'est joignable.** Une machine sans pilote — une CI nue — n'a pas
+    /// à faire échouer la suite ; mais l'absence est **dite**, jamais avalée en silence.
+    #[test]
+    fn le_contexte_sans_ecran_s_ouvre_vraiment() {
+        let contexte = match GpuContext::sans_ecran(64, 64, 2) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("⚠ aucun Vulkan joignable sur cette machine : {e}");
+                println!("  (le test est neutralise, PAS reussi — il n'a rien prouve)");
+                return;
+            }
+        };
+
+        let nom = unsafe { CStr::from_ptr(contexte.proprietes.device_name.as_ptr()) };
+        println!("  contexte sans ecran ouvert sur : {}", nom.to_string_lossy());
+        println!("  format des images : {:?}", contexte.swapchain_format);
+        println!("  images allouees   : {}", contexte.swapchain_images.len());
+
+        // Les trois choses sans lesquelles aucune passe ne peut tourner.
+        assert!(!contexte.swapchain_images.is_empty(), "aucune image de destination");
+        assert_eq!(contexte.swapchain_extent.width, 64);
+        assert_eq!(contexte.swapchain_extent.height, 64);
+        // ⚠ Et celle qu'on oublie : sans file de commandes, on a un GPU qu'on ne peut pas faire
+        // travailler.
+        assert!(
+            !contexte.command_buffers.is_empty(),
+            "aucun tampon de commandes — le contexte est inerte"
+        );
+        // Un contexte sans écran ne présente rien, par construction. Si ce drapeau disait le
+        // contraire, la boucle de rendu essaierait de présenter dans le vide.
+        assert!(!contexte.presente(), "un contexte sans ecran ne doit rien presenter");
     }
 }
