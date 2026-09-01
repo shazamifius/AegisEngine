@@ -85,11 +85,32 @@ pub struct CarteEpaisseur {
     pub hauteur: usize,
     /// Ligne par ligne, du haut vers le bas.
     pub valeurs: Vec<f32>,
+    /// La distance à laquelle le rayon ENTRE dans la matière. `f32::INFINITY` s'il n'entre jamais.
+    ///
+    /// ⚠ **C'est le minimum sur toutes les faces avant**, donc le premier contact. Sur un objet
+    /// creux ou non convexe, la matière ne commence pas forcément là — mais le rayon, si.
+    pub entree: Vec<f32>,
+    /// La distance à laquelle le rayon SORT — le maximum sur toutes les faces arrière.
+    pub sortie: Vec<f32>,
 }
 
 impl CarteEpaisseur {
     pub fn lire(&self, x: usize, y: usize) -> f32 {
         self.valeurs[y * self.largeur + x]
+    }
+
+    /// Le segment `[entrée, sortie]` d'un pixel, ou `None` si le rayon n'a rien rencontré.
+    ///
+    /// ⭐ **C'est ce couple qui ouvre l'intérieur des choses.** L'épaisseur seule dit *combien* de
+    /// matière ; le segment dit *où elle est*, donc il permet de la parcourir et de demander, en
+    /// chaque point, de quoi elle est faite.
+    pub fn segment(&self, indice: usize) -> Option<(f32, f32)> {
+        let (e, s) = (self.entree[indice], self.sortie[indice]);
+        if self.valeurs[indice] > 0.0 && e.is_finite() && s > e {
+            Some((e, s))
+        } else {
+            None
+        }
     }
 
     /// La plus grande épaisseur rencontrée — utile pour normaliser une visualisation.
@@ -114,6 +135,104 @@ impl CarteEpaisseur {
 /// l'appelant décide de quelle matière il parle.
 pub fn transmittance(sigma: f32, distance: f32) -> f32 {
     (-sigma * distance).exp()
+}
+
+/// ⭐⭐⭐ **TRAVERSER LA MATIÈRE** — marcher le segment et demander, en chaque point, de quoi elle
+/// est faite.
+///
+/// C'est le geste qui sépare une boule translucide d'une nectarine. Jusqu'ici `sigma` était une
+/// constante : la matière était homogène, donc lisse, donc morte. Ici `sigma` devient une
+/// **fonction de la position**, et tout ce qu'un fruit a d'intérieur devient exprimable — la peau,
+/// la chair, les fibres, le noyau.
+///
+/// ```text
+///     T(λ) = exp( − ∫ σ(p, λ) dl )      le long du segment [entrée, sortie]
+/// ```
+///
+/// ## ⚠ Pourquoi une INTÉGRALE et pas une somme de couches — c'est son objection, encore
+///
+/// Empiler des coques (une pour la peau, une pour la chair) ramènerait exactement ce qu'il a
+/// réfuté : des surfaces qui se croisent, convergent, et laissent une marche visible à chaque
+/// frontière. **Une intégrale n'a pas de frontières** : `σ` varie continûment, donc l'image n'a
+/// aucune marche à montrer. *Ses mots : « que ça devienne un tout ensemble, qui ne fasse pas
+/// d'artefacts et de cristallisation. »*
+///
+/// ## ⭐ `pas` EST le curseur d'adaptativité, et c'est un nombre
+///
+/// Quatre pas sur un casque, soixante-quatre sur une machine de bureau : **le même code, le même
+/// champ, la même image en mieux.** C'est exactement la ligne rouge du projet — *ce qui change
+/// entre le bas et le haut, ce sont des NOMBRES, jamais des algorithmes différents.*
+///
+/// ## Les paramètres
+///
+/// - `direction` : la direction **normalisée** du rayon d'un pixel. C'est à l'appelant de la
+///   fournir, car lui seul sait comment sa caméra est bâtie.
+/// - `sigma` reçoit le point du monde, la distance à la surface la plus proche *le long du rayon*,
+///   **et la longueur du pas** — voir ci-dessous, c'est le paramètre le plus important des trois.
+///
+/// ## ⚠⚠ POURQUOI `sigma` DOIT CONNAÎTRE LA LONGUEUR DU PAS — mesuré, pas prévu
+///
+/// La première version ne la lui donnait pas, et le résultat à quatre pas n'était pas *plus
+/// grossier* : il était **faux**. Des taches apparaissaient là où le champ n'a rien, parce qu'un
+/// détail plus fin que le pas est échantillonné au hasard au lieu d'être moyenné. *Et mon test le
+/// déclarait acceptable — l'œil a tranché contre lui.*
+///
+/// **Un champ honnête ne rend pas ce qu'on ne peut pas payer : il rend sa MOYENNE.** C'est le
+/// principe du mip-mapping, appliqué à une fonction. La conséquence dépasse ce fichier :
+///
+/// > **L'adaptativité ne consiste pas à baisser un nombre. Elle consiste à demander au champ ce
+/// > qu'il peut honnêtement rendre à ce budget-là.**
+///
+/// *Baisser le nombre seul donne des artefacts ; baisser le nombre ET la finesse demandée donne une
+/// dégradation gracieuse.* ⚠ Ce second nombre est une **approximation** de la vraie distance à la surface : elle
+///   est exacte pour un rayon perpendiculaire, et surestime pour un rayon rasant. *Une peau définie
+///   par lui paraîtra donc un peu épaisse sur les bords — ce qui se corrige un jour avec un champ
+///   de distance, et pas aujourd'hui.*
+pub fn integrer_le_champ<D, S>(
+    carte: &CarteEpaisseur,
+    camera: Vec3,
+    direction: D,
+    pas: usize,
+    sigma: S,
+) -> Vec<[f32; 3]>
+where
+    D: Fn(usize, usize) -> Vec3,
+    S: Fn(Vec3, f32, f32) -> [f32; 3],
+{
+    let pas = pas.max(1);
+    let mut transmittance = vec![[1.0f32; 3]; carte.largeur * carte.hauteur];
+
+    for y in 0..carte.hauteur {
+        for x in 0..carte.largeur {
+            let indice = y * carte.largeur + x;
+            let Some((entree, sortie)) = carte.segment(indice) else {
+                continue;
+            };
+
+            let rayon = direction(x, y);
+            let dl = (sortie - entree) / pas as f32;
+            let mut integrale = [0.0f32; 3];
+
+            for k in 0..pas {
+                // Le milieu de chaque tranche : c'est la règle du point médian, deux fois plus
+                // précise que le bord pour le même nombre d'évaluations.
+                let t = entree + (k as f32 + 0.5) * dl;
+                let point = camera + rayon * t;
+                let depuis_la_surface = (t - entree).min(sortie - t);
+
+                let s = sigma(point, depuis_la_surface, dl);
+                for canal in 0..3 {
+                    integrale[canal] += s[canal] * dl;
+                }
+            }
+
+            for canal in 0..3 {
+                transmittance[indice][canal] = (-integrale[canal]).exp();
+            }
+        }
+    }
+
+    transmittance
 }
 
 /// Un sommet projeté, prêt à être rastérisé.
@@ -162,6 +281,8 @@ pub fn rendre(
     hauteur: usize,
 ) -> CarteEpaisseur {
     let mut valeurs = vec![0.0f32; largeur * hauteur];
+    let mut entree = vec![f32::INFINITY; largeur * hauteur];
+    let mut sortie = vec![f32::NEG_INFINITY; largeur * hauteur];
 
     for triangle in indices.chunks_exact(3) {
         let mut sommets = [SommetProjete { x: 0.0, y: 0.0, distance_sur_w: 0.0, inverse_w: 0.0 }; 3];
@@ -195,10 +316,10 @@ pub fn rendre(
             continue;
         }
 
-        accumuler_triangle(&sommets, &mut valeurs, largeur, hauteur);
+        accumuler_triangle(&sommets, &mut valeurs, &mut entree, &mut sortie, largeur, hauteur);
     }
 
-    CarteEpaisseur { largeur, hauteur, valeurs }
+    CarteEpaisseur { largeur, hauteur, valeurs, entree, sortie }
 }
 
 /// Ajoute la contribution signée d'un triangle projeté.
@@ -211,6 +332,8 @@ pub fn rendre(
 fn accumuler_triangle(
     sommets: &[SommetProjete; 3],
     valeurs: &mut [f32],
+    entree: &mut [f32],
+    sortie: &mut [f32],
     largeur: usize,
     hauteur: usize,
 ) {
@@ -276,7 +399,16 @@ fn accumuler_triangle(
 
             // ⭐ Le geste entier tient dans cette ligne : on entre, on retranche ; on sort, on
             // ajoute. Une face avant a une aire signée négative à l'écran.
-            valeurs[py * largeur + px] += if aire < 0.0 { -distance } else { distance };
+            let indice = py * largeur + px;
+            if aire < 0.0 {
+                valeurs[indice] -= distance;
+                // On entre : la première entrée est la plus proche.
+                entree[indice] = entree[indice].min(distance);
+            } else {
+                valeurs[indice] += distance;
+                // On sort : la dernière sortie est la plus lointaine.
+                sortie[indice] = sortie[indice].max(distance);
+            }
         }
     }
 }
@@ -285,6 +417,16 @@ fn accumuler_triangle(
 mod tests {
     use super::*;
     use crate::geometry::primitives::Primitives;
+
+    /// Un passage doux de 0 à 1 entre deux bornes — la courbe d'Hermite `3t² − 2t³`.
+    ///
+    /// ⚠ **Sa dérivée s'annule aux deux bouts**, et c'est toute la différence avec un `clamp` :
+    /// une rampe linéaire a un coude, et un coude se VOIT sur une image. *La première nectarine
+    /// portait deux anneaux nets pour cette seule raison.*
+    fn fondu(depart: f32, arrivee: f32, valeur: f32) -> f32 {
+        let t = ((valeur - depart) / (arrivee - depart)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
 
     /// Une sphère, sa caméra, et la matrice qui va avec — le décor de tous les tests d'ici.
     fn sphere(rayon: f32, tranches: u32) -> (Vec<Vec3>, Vec<u32>, Mat4, Vec3, f32) {
@@ -431,8 +573,13 @@ mod tests {
         };
 
         let mut valeurs = vec![0.0f32; 32 * 32];
-        accumuler_triangle(&[s(10.0, 10.0), s(20.0, 20.0), s(10.0, 20.0)], &mut valeurs, 32, 32);
-        accumuler_triangle(&[s(10.0, 10.0), s(20.0, 10.0), s(20.0, 20.0)], &mut valeurs, 32, 32);
+        let mut entree = vec![f32::INFINITY; 32 * 32];
+        let mut sortie = vec![f32::NEG_INFINITY; 32 * 32];
+        let mut poser = |t: [SommetProjete; 3], v: &mut Vec<f32>| {
+            accumuler_triangle(&t, v, &mut entree, &mut sortie, 32, 32)
+        };
+        poser([s(10.0, 10.0), s(20.0, 20.0), s(10.0, 20.0)], &mut valeurs);
+        poser([s(10.0, 10.0), s(20.0, 10.0), s(20.0, 20.0)], &mut valeurs);
 
         // Les pixels dont le centre est sur la diagonale partagée.
         for k in 10..20 {
@@ -576,6 +723,190 @@ mod tests {
         );
 
         println!("images ecrites dans {}", dossier.display());
+    }
+
+    /// ⭐⭐⭐ **LE PAS 3 — L'INTÉRIEUR DU FRUIT.**
+    ///
+    /// Jusqu'ici la matière était homogène : un `sigma` constant, donc une boule lisse. Ici le
+    /// champ répond différemment en chaque point — **la peau, la chair, les fibres, le noyau** —
+    /// et la nectarine cesse d'être une boule.
+    ///
+    /// ⚠ **Aucune coque n'est modélisée, et c'est tout le sujet.** Il n'y a qu'UNE enveloppe
+    /// triangulaire ; ce qu'il y a dedans est une fonction. *C'est ce qui évite les surfaces qui se
+    /// croisent et la « cristallisation » qu'il redoutait.*
+    ///
+    /// ⚠ **Le juge est son œil.** Ce test ne mesure que deux choses, et aucune n'est un verdict de
+    /// beauté : que le champ change réellement l'image, et que quatre pas suffisent presque.
+    #[test]
+    fn une_nectarine_et_son_interieur() {
+        let (sommets, indices) = Primitives::create_uv_sphere(1.0, 96, 96);
+        let positions: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.position[0] * 1.04, s.position[1] * 0.93, s.position[2] * 1.04))
+            .collect();
+
+        let cote = 512usize;
+        let camera = Vec3::new(0.0, 0.0, 3.6);
+        let fov = 38f32.to_radians();
+        let vue = Mat4::look_at_rh(camera, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+        let projection = Mat4::perspective_rh(fov, 1.0, 0.1, 100.0);
+        let carte = rendre(&positions, &indices, projection * vue, camera, cote, cote);
+
+        // La direction du rayon d'un pixel. ⚠ Elle DOIT suivre la même convention que `rendre` —
+        // ici la caméra regarde vers −Z, la droite est +X, le haut est +Y, et `perspective_rh`
+        // n'inverse pas Y.
+        let tangente = (fov * 0.5).tan();
+        let direction = move |x: usize, y: usize| -> Vec3 {
+            let ndc_x = (x as f32 + 0.5) / cote as f32 * 2.0 - 1.0;
+            let ndc_y = (y as f32 + 0.5) / cote as f32 * 2.0 - 1.0;
+            Vec3::new(ndc_x * tangente, ndc_y * tangente, -1.0).normalize()
+        };
+
+        // ⚠ La garde qui empêche de rendre un champ ALIGNÉ DE TRAVERS — le défaut le plus probable
+        // ici, et le plus difficile à voir : une image fausse reste jolie. Au pixel central, le
+        // milieu du segment doit tomber sur le cœur du fruit.
+        let centre = cote / 2 * cote + cote / 2;
+        let (e, s) = carte.segment(centre).expect("le pixel central traverse le fruit");
+        let coeur = camera + direction(cote / 2, cote / 2) * (e + s) * 0.5;
+        assert!(coeur.length() < 0.05, "le champ est decale : le coeur tombe en {coeur:?}");
+
+        // ── LE CHAMP DE LA NECTARINE ─────────────────────────────────────────────────────────
+        // Quatre matières, aucune surface. Les nombres viennent du test, jamais du moteur.
+        const CHAIR: [f32; 3] = [0.85, 2.6, 4.3];
+        const PEAU: [f32; 3] = [7.0, 17.0, 26.0];
+        const EPAISSEUR_PEAU: f32 = 0.042;
+        const NOYAU: f32 = 0.33;
+
+        let champ = |p: Vec3, depuis_la_surface: f32, dl: f32| -> [f32; 3] {
+            let r = p.length();
+
+            // ⚠ AUCUN SEUIL FRANC ICI, et c'est toute la leçon de la première image. Elle portait
+            // des anneaux concentriques nets et une bande verticale : **chaque `if` et chaque
+            // `clamp` avait laissé sa marche.** C'est très exactement la « cristallisation » qu'il
+            // redoutait, arrivée par la porte à laquelle je ne regardais pas — non pas par la
+            // géométrie, mais par le CHAMP. *Un fondu doux (`fondu`) n'a pas de dérivée qui casse,
+            // donc rien à montrer.*
+
+            // Le noyau : ce qui ne laisse presque rien passer, avec un bord qui s'estompe.
+            let dedans_le_noyau = fondu(NOYAU + 0.05, NOYAU - 0.05, r);
+            // La peau : une couche fine, bien plus dense, bien plus mordante dans le bleu.
+            let dans_la_peau = fondu(EPAISSEUR_PEAU, EPAISSEUR_PEAU * 0.45, depuis_la_surface);
+
+            // Les fibres — ce qu'il appelle « les petites sanguinités, les petits fils ». Elles
+            // rayonnent du noyau vers la peau, donc elles se décrivent par la DIRECTION du point,
+            // pas par sa position : c'est ce qui les fait converger là où il faut sans qu'on ait à
+            // les dessiner.
+            let n = p.normalize();
+            let azimut = n.z.atan2(n.x);
+            let trame = (azimut * 11.0 + n.y * 3.5).sin() * (n.y * 12.0 + azimut).cos();
+            // La puissance resserre les filaments : sans elle on aurait des vagues, pas des fils.
+            let filament = trame.abs().powf(7.0);
+            // ⭐ **Ce facteur efface la couture de l'azimut**, et il n'est pas une rustine : sur
+            // l'axe vertical, `atan2` n'a pas de valeur — mais les fibres d'un fruit s'y confondent
+            // aussi. En annulant leur amplitude là où elles convergent, la discontinuité perd son
+            // amplitude en même temps que son sens. *La marche ne rétrécit pas : elle disparaît.*
+            let loin_de_l_axe = (n.x * n.x + n.z * n.z).sqrt();
+            // Elles s'éteignent contre le noyau et contre la peau, comme dans un vrai fruit.
+            let montee = fondu(NOYAU, NOYAU + 0.22, r);
+            let descente = fondu(1.02, 0.70, r);
+            // ⭐⭐ LA NETTETÉ QU'ON PEUT SE PAYER. Les filaments ont une période spatiale d'environ
+            // `2πr/11` ; si le pas la dépasse, les échantillonner donne du hasard, pas du détail.
+            // On les ramène donc vers leur moyenne — ils s'estompent au lieu de se déchirer.
+            // *C'est ça, coller à la limite physique : ne pas prétendre au détail qu'on ne paie pas.*
+            // ⚠ Réduire l'amplitude ne suffit PAS : un motif à 30 % reste échantillonné au hasard,
+            // donc tacheté à 30 %. **Il faut qu'il DISPARAISSE quand le pas atteint sa période** —
+            // au-delà, un échantillon ne porte plus d'information sur lui, seulement du bruit.
+            // *À quatre pas, la nectarine n'a donc pas de fibres. Elle n'a pas de fausses fibres.*
+            let periode = std::f32::consts::TAU * r / 11.0;
+            let nettete = fondu(periode * 0.55, periode * 0.18, dl);
+            let f = filament * nettete * loin_de_l_axe * montee * descente * 7.5;
+
+            let chair = [CHAIR[0] + f * 0.55, CHAIR[1] + f * 1.6, CHAIR[2] + f * 2.4];
+            let mut sigma = [0.0f32; 3];
+            for canal in 0..3 {
+                // Les trois matières se mélangent par fondu, jamais par branchement.
+                let c = chair[canal] * (1.0 - dans_la_peau) + PEAU[canal] * dans_la_peau;
+                sigma[canal] = c * (1.0 - dedans_le_noyau) + 90.0 * dedans_le_noyau;
+            }
+            sigma
+        };
+
+        const SOLEIL: f32 = 6.0;
+        const FOND: [f32; 3] = [0.055, 0.05, 0.06];
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier de preuves");
+
+        let peindre = |transmittance: &[[f32; 3]]| -> Vec<u8> {
+            let mut rvb = vec![0u8; cote * cote * 3];
+            for i in 0..cote * cote {
+                let dans_la_matiere = carte.valeurs[i] > 0.0;
+                for canal in 0..3 {
+                    let lumiere = if dans_la_matiere {
+                        SOLEIL * transmittance[i][canal]
+                    } else {
+                        FOND[canal]
+                    };
+                    let affiche = (lumiere / (1.0 + lumiere)).powf(1.0 / 2.2);
+                    rvb[i * 3 + canal] = (affiche.clamp(0.0, 1.0) * 255.0) as u8;
+                }
+            }
+            rvb
+        };
+
+        let fine = integrer_le_champ(&carte, camera, direction, 48, champ);
+        let image_fine = peindre(&fine);
+        std::fs::write(
+            dossier.join("nectarine-interieur.png"),
+            crate::image::png::encoder(cote as u32, cote as u32, &image_fine).expect("png"),
+        )
+        .expect("ecriture");
+
+        // ⭐ LE MÊME CHAMP EN QUATRE PAS — le budget d'un casque. C'est le curseur d'adaptativité,
+        // rendu visible : un seul nombre change, ni le code ni le champ.
+        let grossiere = integrer_le_champ(&carte, camera, direction, 4, champ);
+        let image_grossiere = peindre(&grossiere);
+        std::fs::write(
+            dossier.join("nectarine-4-pas.png"),
+            crate::image::png::encoder(cote as u32, cote as u32, &image_grossiere).expect("png"),
+        )
+        .expect("ecriture");
+
+        // ── Ce que ce test contrôle vraiment ─────────────────────────────────────────────────
+        // 1. Le champ CHANGE l'image. Sans ça, tout ce fichier serait décoratif.
+        let homogene = integrer_le_champ(&carte, camera, direction, 48, |_, _, _| CHAIR);
+        let ecart: f32 = (0..cote * cote)
+            .map(|i| (fine[i][0] - homogene[i][0]).abs())
+            .sum::<f32>()
+            / (cote * cote) as f32;
+        assert!(ecart > 0.004, "le champ ne change presque rien ({ecart}) — il n'est pas lu");
+
+        // 2. ⭐⭐ QUATRE PAS DÉGRADENT SANS INVENTER — et j'ai mesuré la mauvaise chose deux fois
+        //    avant d'écrire cette ligne, donc elle mérite son explication.
+        //
+        //    Mon premier critère était « l'image à 4 pas ressemble à l'image à 48 pas ». **Il est
+        //    faux**, et il l'était doublement : il a laissé passer une image tachetée (l'écart
+        //    moyen restait sous le seuil), puis il a REFUSÉ la correction (une image honnêtement
+        //    lissée s'écarte forcément plus d'une image détaillée qu'une image bruitée).
+        //
+        //    Ce qu'on veut n'est pas la ressemblance : c'est **qu'aucune structure n'apparaisse qui
+        //    n'existe pas**. Un artefact est une variation entre pixels voisins ; une dégradation
+        //    gracieuse est plus LISSE que l'original, jamais plus agitée.
+        let rugosite = |img: &[u8]| -> f32 {
+            let mut somme = 0.0;
+            for y in 0..cote {
+                for x in 1..cote {
+                    let i = (y * cote + x) * 3;
+                    somme += (img[i] as i32 - img[i - 3] as i32).unsigned_abs() as f32;
+                }
+            }
+            somme / (cote * (cote - 1)) as f32
+        };
+        let (rf, rg) = (rugosite(&image_fine), rugosite(&image_grossiere));
+        println!("rugosite : 48 pas = {rf:.3}, 4 pas = {rg:.3}");
+        assert!(
+            rg <= rf,
+            "quatre pas AGITENT l'image ({rg:.3} contre {rf:.3}) — ce sont des artefacts, pas une degradation"
+        );
     }
 
     /// Un maillage fermé non convexe donne la somme de ses segments de matière, sans un mot de code
