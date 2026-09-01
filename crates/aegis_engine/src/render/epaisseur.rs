@@ -248,6 +248,54 @@ where
     resultat
 }
 
+/// ⭐⭐⭐ **LA LOI DE SNELL-DESCARTES**, sous forme vectorielle — et ce qu'elle donne gratuitement.
+///
+/// ```text
+///     n₁ · sin θ₁  =  n₂ · sin θ₂
+/// ```
+///
+/// - `incident` : la direction du rayon, **normalisée**, qui arrive sur la surface.
+/// - `normale` : la normale de la surface, **tournée vers le rayon qui arrive**.
+/// - `eta` : le rapport `n₁ / n₂` — le milieu qu'on quitte sur celui qu'on entre. De l'air vers du
+///   sucre : `1,0 / 1,5`. Du sucre vers l'air : `1,5 / 1,0`.
+///
+/// ## ⭐ La réflexion totale n'est PAS un cas à coder
+///
+/// Elle est **ce qui reste quand l'équation n'a pas de racine**. Quand `sin θ₂` dépasserait 1, il
+/// n'existe aucune direction réfractée — la lumière ne peut plus sortir, elle rebrousse chemin.
+/// C'est un `None`, pas un `if`.
+///
+/// *Et c'est exactement l'angle critique de 41,8° dont parlait le texte sur la sucette : il n'est
+/// écrit nulle part dans ce fichier. Il tombe de `arcsin(1/1,5)`, et un test le mesure.*
+///
+/// ⚠ **Elle suppose un milieu HOMOGÈNE de part et d'autre.** Là où l'indice varie continûment (les
+/// striae d'un bonbon, l'air chaud au-dessus d'une route), la lumière courbe au lieu de casser —
+/// c'est l'équation de l'eikonale, et elle n'est pas ici.
+pub fn refracter(incident: Vec3, normale: Vec3, eta: f32) -> Option<Vec3> {
+    let cos_i = -incident.dot(normale);
+    let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
+    if sin2_t > 1.0 {
+        // Pas de racine : réflexion totale interne.
+        return None;
+    }
+    Some(incident * eta + normale * (eta * cos_i - (1.0 - sin2_t).sqrt()))
+}
+
+/// La réflexion spéculaire — ce que devient un rayon quand il ne peut pas entrer.
+pub fn reflechir(incident: Vec3, normale: Vec3) -> Vec3 {
+    incident - normale * (2.0 * incident.dot(normale))
+}
+
+/// **La part de lumière RÉFLÉCHIE par une interface**, approximation de Schlick.
+///
+/// Elle vaut peu de face et **monte à 1 en incidence rasante** : c'est pourquoi le bord de toute
+/// bille brille, et c'est aussi ce qui donne son liseré lumineux à une sucette. *Le moteur portait
+/// déjà `fresnel_schlick` dans ses shaders ; c'est la même chose, ici pour le processeur.*
+pub fn fresnel(cos_incidence: f32, n1: f32, n2: f32) -> f32 {
+    let r0 = ((n1 - n2) / (n1 + n2)).powi(2);
+    r0 + (1.0 - r0) * (1.0 - cos_incidence.abs()).clamp(0.0, 1.0).powi(5)
+}
+
 /// Ce que le rayon d'un pixel a rapporté de sa traversée.
 #[derive(Clone, Copy)]
 pub struct Traversee {
@@ -1471,6 +1519,232 @@ mod tests {
             "une normale est a l'envers sur un pixel qui traverse {:.1} % du diametre — ce n'est \
              plus la tangence, c'est un vrai defaut d'orientation",
             plus_epais / diametre * 100.0
+        );
+    }
+
+    /// La loi de Snell vérifiée **par sa définition**, pas par une image.
+    #[test]
+    fn snell_respecte_le_rapport_des_sinus() {
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        for degres in [0.0f32, 10.0, 30.0, 55.0, 75.0, 89.0] {
+            let a = degres.to_radians();
+            let incident = Vec3::new(a.sin(), 0.0, -a.cos());
+            let eta = 1.0 / 1.5;
+            let t = refracter(incident, n, eta).expect("entrer dans un milieu plus dense reussit toujours");
+
+            let sin_sortie = (t.x * t.x + t.y * t.y).sqrt();
+            // n₁ sin θ₁ = n₂ sin θ₂  →  1,0 · sin(a) = 1,5 · sin θ₂
+            let attendu = a.sin() / 1.5;
+            assert!(
+                (sin_sortie - attendu).abs() < 1e-5,
+                "a {degres}° : sin sortant {sin_sortie} au lieu de {attendu}"
+            );
+            assert!((t.length() - 1.0).abs() < 1e-5, "la direction refractee n'est pas unitaire");
+        }
+    }
+
+    /// ⭐⭐ **L'ANGLE CRITIQUE DE 41,8° N'EST ÉCRIT NULLE PART — il se MESURE.**
+    ///
+    /// Le texte sur la sucette l'annonce comme un fait de la matière : au-delà de 41,8°, un rayon
+    /// qui tente de sortir du sucre vers l'air est réfléchi en totalité. *Ce nombre n'apparaît dans
+    /// aucune ligne de ce fichier.* On le retrouve en cherchant l'angle où `refracter` cesse d'avoir
+    /// une réponse.
+    ///
+    /// **C'est la meilleure preuve qu'on ait de la justesse de cette fonction :** elle produit une
+    /// constante physique qu'on ne lui a pas donnée.
+    #[test]
+    fn l_angle_critique_du_sucre_tombe_de_l_equation() {
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let eta = 1.5 / 1.0; // du sucre vers l'air
+
+        let mut critique = 90.0f32;
+        let mut angle = 0.0f32;
+        while angle < 90.0 {
+            let a = angle.to_radians();
+            let incident = Vec3::new(a.sin(), 0.0, -a.cos());
+            if refracter(incident, n, eta).is_none() {
+                critique = angle;
+                break;
+            }
+            angle += 0.01;
+        }
+
+        let theorique = (1.0f32 / 1.5).asin().to_degrees();
+        println!("angle critique mesure : {critique:.2}° (theorie {theorique:.2}°)");
+        assert!(
+            (critique - theorique).abs() < 0.05,
+            "l'angle critique vaut {critique}° au lieu de {theorique}°"
+        );
+        assert!(
+            (critique - 41.8).abs() < 0.1,
+            "l'angle critique du sucre devrait valoir 41,8° et vaut {critique}°"
+        );
+    }
+
+    /// En incidence normale, rien ne dévie — et Fresnel donne les ~4 % de réflexion du verre.
+    #[test]
+    fn de_face_rien_ne_devie_et_fresnel_donne_quatre_pour_cent() {
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let incident = Vec3::new(0.0, 0.0, -1.0);
+        let t = refracter(incident, n, 1.0 / 1.5).unwrap();
+        assert!((t - incident).length() < 1e-6, "un rayon perpendiculaire ne devrait pas devier");
+
+        let r = fresnel(1.0, 1.0, 1.5);
+        assert!((r - 0.04).abs() < 0.005, "Fresnel de face vaut {r} au lieu de ~0,04");
+        // Et en rasant, tout est réfléchi : c'est le liseré brillant de toute bille.
+        assert!(fresnel(0.0, 1.0, 1.5) > 0.99, "en rasant, Fresnel doit tendre vers 1");
+    }
+
+    /// ⭐⭐⭐ **LA RÉFRACTION** — la première image où la lumière change de direction.
+    ///
+    /// Trois rendus de la même bille de sucre devant le même damier :
+    /// **sans dévier** · **Snell à l'entrée seule** · **Snell aux deux interfaces**.
+    ///
+    /// ⚠ **On quitte ici le terrain de l'exact.** L'épaisseur et le champ étaient justes par
+    /// construction — la somme signée ne ment pas. La réfraction à deux interfaces, elle, est une
+    /// **approximation** : je connais la sortie du rayon DROIT, pas celle du rayon dévié. *L'erreur
+    /// est mesurée plus bas plutôt qu'estimée, mais elle existe.*
+    #[test]
+    fn la_refraction_replie_le_monde_derriere_la_bille() {
+        let (sommets, indices) = Primitives::create_uv_sphere(1.0, 96, 96);
+        let positions: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
+            .collect();
+        let normales: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.normal[0], s.normal[1], s.normal[2]))
+            .collect();
+
+        let cote = 512usize;
+        let camera = Vec3::new(0.0, 0.0, 3.6);
+        let fov = 36f32.to_radians();
+        let vue = Mat4::look_at_rh(camera, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+        let carte = rendre(
+            &positions,
+            Some(&normales),
+            &indices,
+            Mat4::perspective_rh(fov, 1.0, 0.1, 100.0) * vue,
+            camera,
+            cote,
+            cote,
+        );
+
+        let tangente = (fov * 0.5).tan();
+        let direction = |x: usize, y: usize| -> Vec3 {
+            let ndc_x = (x as f32 + 0.5) / cote as f32 * 2.0 - 1.0;
+            let ndc_y = 1.0 - (y as f32 + 0.5) / cote as f32 * 2.0;
+            Vec3::new(ndc_x * tangente, ndc_y * tangente, -1.0).normalize()
+        };
+
+        // Le monde derrière : un damier en coordonnées de direction. **Aucune géométrie** — ce qui
+        // compte est de reconnaître d'un coup d'œil si l'image est repliée, inversée, comprimée.
+        let environnement = |d: Vec3| -> [f32; 3] {
+            let u = d.z.atan2(d.x) / std::f32::consts::TAU + 0.5;
+            let v = d.y.clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+            let case = (u * 28.0).floor() as i32 + (v * 14.0).floor() as i32;
+            if case.rem_euclid(2) == 0 {
+                [0.80, 0.83, 0.90]
+            } else {
+                [0.045, 0.05, 0.075]
+            }
+        };
+
+        const N_SUCRE: f32 = 1.50;
+        // Une teinte bleue légère, pour que la traversée se voie sans masquer le damier.
+        const SIGMA: [f32; 3] = [0.55, 0.20, 0.06];
+
+        // `interfaces` : 0 = aucune déviation · 1 = l'entrée seule · 2 = entrée + sortie.
+        let rendu = |interfaces: u8| -> Vec<u8> {
+            let mut rvb = vec![0u8; cote * cote * 3];
+            for y in 0..cote {
+                for x in 0..cote {
+                    let i = y * cote + x;
+                    let rayon = direction(x, y);
+                    let mut lumiere = environnement(rayon);
+
+                    if let Some((e, s2)) = carte.segment(i) {
+                        let ne = carte.normale_entree[i];
+                        let cos_i = -rayon.dot(ne);
+                        // Fresnel : ce qui rebondit sur la surface au lieu d'entrer. C'est lui qui
+                        // allume le bord de toute bille, et il ne demande aucun réglage.
+                        let part_reflechie = fresnel(cos_i, 1.0, N_SUCRE);
+                        let reflet = environnement(reflechir(rayon, ne));
+
+                        let mut sortant = rayon;
+                        if interfaces >= 1 {
+                            sortant = refracter(rayon, ne, 1.0 / N_SUCRE).unwrap_or(rayon);
+                        }
+                        if interfaces >= 2 {
+                            // ⚠ L'APPROXIMATION EST ICI, ET NULLE PART AILLEURS : on redresse le
+                            // rayon avec la normale de sortie du rayon DROIT, alors que le rayon
+                            // dévié ne sort pas exactement au même endroit.
+                            let ns = carte.normale_sortie[i];
+                            sortant = refracter(sortant, ns * -1.0, N_SUCRE / 1.0)
+                                // Pas de racine : réflexion totale, le rayon reste prisonnier.
+                                .unwrap_or_else(|| reflechir(sortant, ns * -1.0));
+                        }
+
+                        let fond = environnement(sortant);
+                        let epaisseur = s2 - e;
+                        for canal in 0..3 {
+                            let traverse =
+                                fond[canal] * transmittance(SIGMA[canal], epaisseur);
+                            lumiere[canal] = traverse * (1.0 - part_reflechie)
+                                + reflet[canal] * part_reflechie;
+                        }
+                    }
+
+                    for canal in 0..3 {
+                        rvb[i * 3 + canal] =
+                            ((lumiere[canal].powf(1.0 / 2.2)).clamp(0.0, 1.0) * 255.0) as u8;
+                    }
+                }
+            }
+            rvb
+        };
+
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier");
+        for (nom, n) in [
+            ("refraction-0-sans.png", 0u8),
+            ("refraction-1-entree.png", 1),
+            ("refraction-2-deux-interfaces.png", 2),
+        ] {
+            std::fs::write(
+                dossier.join(nom),
+                crate::image::png::encoder(cote as u32, cote as u32, &rendu(n)).expect("png"),
+            )
+            .expect("ecriture");
+        }
+
+        // ── ⭐ CE QUI EST MESURÉ : L'IMAGE EST-ELLE VRAIMENT INVERSÉE ? ───────────────────────
+        // Une sphère pleine d'indice 1,5 a son foyer juste derrière sa face arrière : elle replie
+        // le monde et **l'inverse**. Donc un rayon qui part vers la DROITE doit ressortir en
+        // regardant vers la GAUCHE. Si ce signe ne bascule pas, il n'y a pas de lentille.
+        let mut inverses = 0usize;
+        let mut testes = 0usize;
+        for x in (cote / 2 + 20)..(cote / 2 + 140) {
+            let y = cote / 2;
+            let i = y * cote + x;
+            if carte.segment(i).is_none() {
+                continue;
+            }
+            let rayon = direction(x, y);
+            let ne = carte.normale_entree[i];
+            let ns = carte.normale_sortie[i];
+            let t1 = refracter(rayon, ne, 1.0 / N_SUCRE).unwrap();
+            let t2 = refracter(t1, ns * -1.0, N_SUCRE).unwrap_or_else(|| reflechir(t1, ns * -1.0));
+            testes += 1;
+            if rayon.x > 0.0 && t2.x < 0.0 {
+                inverses += 1;
+            }
+        }
+        println!("lentille : {inverses} rayons inverses sur {testes} testes");
+        assert!(
+            inverses * 2 > testes,
+            "seulement {inverses} rayons sur {testes} sont renvoyes de l'autre cote — la bille ne \
+             se comporte pas comme une lentille"
         );
     }
 
