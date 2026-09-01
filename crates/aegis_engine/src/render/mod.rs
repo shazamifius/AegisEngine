@@ -1,6 +1,7 @@
 pub mod cadre;
 pub mod cibles;
 pub mod ecran;
+pub mod epaisseur;
 pub mod file;
 pub mod instances;
 pub mod occlusion;
