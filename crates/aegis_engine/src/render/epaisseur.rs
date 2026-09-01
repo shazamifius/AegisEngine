@@ -296,6 +296,222 @@ pub fn fresnel(cos_incidence: f32, n1: f32, n2: f32) -> f32 {
     r0 + (1.0 - r0) * (1.0 - cos_incidence.abs()).clamp(0.0, 1.0).powi(5)
 }
 
+/// **Ce qu'on peut lire du monde depuis l'écran** — la carte, et la caméra qui l'a produite.
+///
+/// Les quatre champs sont indissociables : une carte lue avec une autre caméra que la sienne rend
+/// des points parfaitement plausibles et faux. *Les tenir ensemble empêche de les séparer.*
+pub struct VueEcran<'a, P, D> {
+    pub carte: &'a CarteEpaisseur,
+    pub camera: Vec3,
+    /// Monde → coordonnées de pixel, **exactement la convention de [`rendre`]** (Y descend à
+    /// l'écran). Rend `None` derrière l'œil.
+    pub projeter: P,
+    /// Le rayon d'un pixel depuis la caméra, normalisé — la même fonction que
+    /// [`integrer_le_champ`] réclame.
+    pub direction_pixel: D,
+}
+
+/// ⭐⭐ **LA POIGNÉE D'ADAPTATIVITÉ de cette brique — et ce sont des NOMBRES, pas des algorithmes.**
+///
+/// C'est la contrainte de conception du moteur, appliquée dès la naissance de la brique : *ce que
+/// l'asservissement tourne, ce sont des nombres ; le jour où il choisit entre deux algorithmes, on
+/// a deux moteurs, dont un seul est testé.*
+///
+/// **Et cette poignée descend jusqu'au bout sans changer de nature** — c'est le critère qui décide
+/// si une technique peut viser un casque : à un pas elle est grossière, à cinq elle est exacte, et
+/// entre les deux elle se dégrade **de façon lisse et mesurable**. *Une technique qui, en dessous
+/// d'un seuil, se met à produire du bruit au lieu d'une approximation n'a pas de version « en plus
+/// petit ».*
+#[derive(Clone, Copy, Debug)]
+pub struct Budget {
+    /// Combien de pas de Newton au maximum. **Mesuré sur une bille d'indice 1,5, le 1er septembre
+    /// 2026 :** 1 pas → 1,309° · 2 → 0,285° · 3 → 0,126° · 4 → 0,115°.
+    pub iterations_max: usize,
+    /// Le critère d'arrêt, **en pixels d'écran**. En dessous d'un pixel de déplacement, deux
+    /// itérations liraient le même texel : continuer ne peut plus rien apprendre.
+    pub tolerance_pixels: f32,
+}
+
+/// Là où le rayon réfracté ressort de la matière — le résultat de [`chercher_la_sortie`].
+#[derive(Clone, Copy, Debug)]
+pub struct Sortie {
+    /// Le point de sortie, dans le monde.
+    pub point: Vec3,
+    /// La normale de la surface à cet endroit, telle que la carte la porte.
+    pub normale: Vec3,
+    /// La longueur réellement parcourue **dans** la matière.
+    pub distance: f32,
+    /// Combien de tours il a fallu. **Zéro veut dire que l'estimation de départ suffisait.**
+    pub iterations: usize,
+    /// ⚠ **Faux = on a épuisé le budget sans que le critère soit atteint.** Le point rendu est
+    /// alors le meilleur qu'on ait, et il n'est adossé à aucune garantie.
+    pub convergee: bool,
+}
+
+/// ⭐⭐⭐ **OÙ LE RAYON RESSORT** — la méthode de Newton, en espace écran.
+///
+/// C'est la brique qui manquait, et la seule qui manquait : on savait dévier la lumière à l'entrée
+/// ([`refracter`]), on savait combien de matière elle traverse ([`rendre`]), on ne savait pas **par
+/// où elle sort**. L'approximation employée jusqu'ici — avancer de la corde du rayon *droit* — a
+/// été mesurée le 1er septembre 2026 : **11,37° d'erreur moyenne sur une bille d'indice 1,5, et un
+/// rayon sur cinq qui bascule de régime.** Ce n'est pas une imprécision, c'est faux.
+///
+/// ## Le problème, posé proprement
+///
+/// Le rayon dévié part de `depart` dans la direction `direction`. On cherche la distance `s` telle
+/// que le point `depart + direction·s` **soit sur la face arrière de l'objet**. Autrement dit, la
+/// racine de :
+///
+/// ```text
+///     g(s) = distance signée du point  depart + direction·s  à la surface
+/// ```
+///
+/// ## ⭐ Pourquoi c'est Newton, et pourquoi la dérivée est GRATUITE
+///
+/// La méthode de Newton demande `g'(s)`. Or **le gradient d'une fonction de distance signée à une
+/// surface EST la normale de cette surface** — c'est la définition même d'une normale. Donc :
+///
+/// ```text
+///     g'(s) = − direction · n
+/// ```
+///
+/// **On n'estime aucune dérivée, on n'écrit aucune différence finie : on LIT la normale dans la
+/// carte.** C'est tout le mécanisme, et c'est ce qui rend la convergence quadratique — *le nombre
+/// de décimales justes double à chaque tour*.
+///
+/// Le pas de Newton `s ← s − g/g'` se réécrit alors exactement comme **l'intersection du rayon avec
+/// le plan tangent** à la surface au point qu'on vient de lire :
+///
+/// ```text
+///     s' = (S − depart) · n  /  (direction · n)
+/// ```
+///
+/// *Les deux formulations sont la même chose. La seconde se code en une ligne et se dessine ; c'est
+/// celle qu'on écrit.*
+///
+/// ## ⚠ Ce qui peut échouer, et qui est rendu par `None`
+///
+/// La méthode vit en espace écran : **elle ne peut trouver que ce qui est dessiné**. Trois causes
+/// d'échec, toutes irrécupérables ici, et aucune n'est masquée :
+///
+/// 1. **Le point estimé sort de l'écran** — il n'y a rien à lire.
+/// 2. **Le pixel visé ne porte pas de matière** — l'estimation est tombée hors de l'objet. *C'est
+///    le cas dominant près des contours d'un objet épais, et les auteurs du papier le mesurent
+///    comme leur principal mode d'échec.*
+/// 3. **Le rayon est parallèle au plan tangent** (`direction · n ≈ 0`) — le pas de Newton n'a pas
+///    de valeur finie. On s'arrête plutôt que de rendre un nombre énorme.
+///
+/// ⚠ **Un échec est rendu tel quel, jamais remplacé par une valeur plausible.** Un pixel
+/// visiblement faux se corrige ; un pixel faussement rassurant se propage.
+///
+/// ## Les paramètres
+///
+/// - `vue` : la carte et la caméra qui l'a produite — voir [`VueEcran`].
+/// - `estimation` : la distance de départ. La corde du rayon **droit** fait un excellent point de
+///   départ, et c'est gratuit : `sortie − entrée` au pixel d'origine.
+/// - `budget` : ce qu'on accepte de dépenser — voir [`Budget`], **c'est la poignée d'adaptativité**.
+///
+/// ## ⚠ Ce que cette version ne fait PAS
+///
+/// L'échantillonnage de la carte est **au plus proche**. Le papier note qu'un lissage (bilinéaire,
+/// voire mip-map) rend la surface localement plus régulière et **aide la convergence** ; c'est une
+/// amélioration mesurable, pas encore faite.
+pub fn chercher_la_sortie<P, D>(
+    vue: &VueEcran<'_, P, D>,
+    depart: Vec3,
+    direction: Vec3,
+    estimation: f32,
+    budget: Budget,
+) -> Option<Sortie>
+where
+    P: Fn(Vec3) -> Option<(f32, f32)>,
+    D: Fn(usize, usize) -> Vec3,
+{
+    // Ce qu'on lit de la carte au point courant : le point de la face arrière que ce pixel voit,
+    // sa normale, et où il tombe à l'écran. `None` dès que la question n'a pas de réponse.
+    let carte = vue.carte;
+    let lire = |s: f32| -> Option<(Vec3, Vec3, f32, f32)> {
+        let (px, py) = (vue.projeter)(depart + direction * s)?;
+
+        // Hors de l'image : en espace écran, ce qui n'est pas dessiné n'existe pas.
+        if px < 0.0 || py < 0.0 || px >= carte.largeur as f32 || py >= carte.hauteur as f32 {
+            return None;
+        }
+
+        let (x, y) = (px as usize, py as usize);
+        let indice = y * carte.largeur + x;
+
+        // Pas de matière ici : l'estimation est sortie de l'objet. C'est l'échec dominant près des
+        // contours, et il ne se rattrape pas depuis l'écran.
+        if carte.valeurs[indice] <= 0.0 || !carte.sortie[indice].is_finite() {
+            return None;
+        }
+
+        Some((
+            vue.camera + (vue.direction_pixel)(x, y) * carte.sortie[indice],
+            carte.normale_sortie[indice],
+            px,
+            py,
+        ))
+    };
+
+    let mut s = estimation.max(0.0);
+    let mut tours = 0usize;
+    let mut convergee = false;
+
+    // ⚠ `0..`, pas `0..=` : un budget de zéro pas ne doit rien faire. « Zéro itération de Newton »
+    // n'est pas Newton — c'est l'estimation de départ, et c'est à l'appelant de la juger.
+    for tour in 0..budget.iterations_max {
+        let (surface, normale, px, py) = lire(s)?;
+
+        let denominateur = direction.dot(normale);
+        if denominateur.abs() < 1e-5 {
+            // Rayon parallèle au plan tangent : le pas de Newton n'a pas de valeur finie.
+            break;
+        }
+
+        let suivant = (surface - depart).dot(normale) / denominateur;
+        if !suivant.is_finite() || suivant <= 0.0 {
+            break;
+        }
+
+        // ⚠ Le critère se mesure en PIXELS, pas en unités du monde. C'est la bonne grandeur : sous
+        // un pixel de déplacement, l'itération suivante relirait le même texel — donc elle ne peut
+        // plus rien apprendre, et la faire tourner serait du calcul dépensé pour rien.
+        let deplacement_ecran = (vue.projeter)(depart + direction * suivant)
+            .map(|(qx, qy)| ((qx - px).powi(2) + (qy - py).powi(2)).sqrt())
+            .unwrap_or(f32::INFINITY);
+
+        s = suivant;
+        tours = tour + 1;
+
+        if deplacement_ecran < budget.tolerance_pixels {
+            convergee = true;
+            break;
+        }
+    }
+
+    // ⚠⚠ LA LECTURE FINALE, ET ELLE N'EST PAS UN DÉTAIL DE PLOMBERIE.
+    //
+    // La première version rendait la normale lue AVANT le dernier pas — donc celle de l'ancien
+    // point, pas du nouveau. Le banc l'a dit tout de suite : « zéro pas » et « un pas » donnaient
+    // exactement le même chiffre, au millième de degré près. C'était le signe qu'un pas de Newton
+    // corrigeait la POSITION sans que la NORMALE suive.
+    //
+    // Et c'est la normale qui décide de tout : c'est elle, et pas le point, qui entre dans Snell.
+    // *Rendre la bonne position avec la mauvaise normale, c'est arriver au bon endroit et repartir
+    // dans la mauvaise direction.*
+    let (_, normale, _, _) = lire(s)?;
+
+    Some(Sortie {
+        point: depart + direction * s,
+        normale,
+        distance: s,
+        iterations: tours,
+        convergee,
+    })
+}
+
 /// Ce que le rayon d'un pixel a rapporté de sa traversée.
 #[derive(Clone, Copy)]
 pub struct Traversee {
@@ -1953,6 +2169,738 @@ mod tests {
         assert!(
             (au_centre - 4.0).abs() < 0.08,
             "deux spheres de diametre 2 donnent {au_centre} au lieu de 4"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    //  NEWTON — où le rayon ressort vraiment
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// Les deux distances où un rayon coupe la sphère de rayon `r` centrée à l'origine.
+    ///
+    /// **C'est L'ÉTALON de tous les tests de réfraction d'ici.** Sur une sphère, la vérité est une
+    /// équation du second degré : elle se calcule exactement, donc toute approximation se **chiffre**
+    /// au lieu de se plaider. *C'est cette fonction, et rien d'autre, qui permet de dire « 11,37° »
+    /// plutôt que « ça a l'air mieux ».*
+    fn couper_la_sphere(origine: Vec3, direction: Vec3, r: f32) -> Option<(f32, f32)> {
+        let b = origine.dot(direction);
+        let c = origine.dot(origine) - r * r;
+        let d = b * b - c;
+        if d < 0.0 {
+            return None;
+        }
+        let s = d.sqrt();
+        Some((-b - s, -b + s))
+    }
+
+    /// Le décor commun aux deux mesures de Newton : une caméra, sa projection, ses rayons.
+    ///
+    /// Rend `(caméra, projeter, direction_pixel)` — les trois choses dont [`chercher_la_sortie`] a
+    /// besoin, **toutes cohérentes avec la convention de [`rendre`]** (Y descend à l'écran).
+    #[allow(clippy::type_complexity)]
+    fn banc_de_refraction(
+        cote: usize,
+    ) -> (
+        Vec3,
+        Mat4,
+        impl Fn(Vec3) -> Option<(f32, f32)>,
+        impl Fn(usize, usize) -> Vec3,
+    ) {
+        let camera = Vec3::new(0.0, 0.0, 3.6);
+        let fov = 45f32.to_radians();
+        let vue = Mat4::look_at_rh(camera, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+        let vue_proj = Mat4::perspective_rh(fov, 1.0, 0.1, 100.0) * vue;
+
+        let projeter = move |p: Vec3| -> Option<(f32, f32)> {
+            let d = vue_proj * Vec4::new(p.x, p.y, p.z, 1.0);
+            if d.w <= 1e-6 {
+                return None;
+            }
+            let iw = 1.0 / d.w;
+            Some((
+                (d.x * iw * 0.5 + 0.5) * cote as f32,
+                (0.5 - d.y * iw * 0.5) * cote as f32,
+            ))
+        };
+
+        let tangente = (fov * 0.5).tan();
+        let direction = move |x: usize, y: usize| -> Vec3 {
+            let ndc_x = (x as f32 + 0.5) / cote as f32 * 2.0 - 1.0;
+            let ndc_y = 1.0 - (y as f32 + 0.5) / cote as f32 * 2.0;
+            Vec3::new(ndc_x * tangente, ndc_y * tangente, -1.0).normalize()
+        };
+
+        (camera, vue_proj, projeter, direction)
+    }
+
+    /// Une carte d'épaisseur **exacte** d'une sphère : aucune tessellation, aucune interpolation.
+    ///
+    /// ⚠ **Elle sert à isoler l'erreur de NEWTON de celle du maillage.** Mesurer les deux ensemble
+    /// donnerait un chiffre qu'on ne saurait pas attribuer — exactement la faute du 31 août, où un
+    /// écart de 88° venait du chargeur et non du rendu.
+    fn carte_exacte_de_sphere(
+        rayon: f32,
+        camera: Vec3,
+        cote: usize,
+        direction: impl Fn(usize, usize) -> Vec3,
+    ) -> CarteEpaisseur {
+        let n = cote * cote;
+        let mut carte = CarteEpaisseur {
+            largeur: cote,
+            hauteur: cote,
+            valeurs: vec![0.0; n],
+            entree: vec![f32::INFINITY; n],
+            sortie: vec![f32::NEG_INFINITY; n],
+            normale_entree: vec![Vec3::new(0.0, 0.0, 0.0); n],
+            normale_sortie: vec![Vec3::new(0.0, 0.0, 0.0); n],
+        };
+
+        for y in 0..cote {
+            for x in 0..cote {
+                let d = direction(x, y);
+                let Some((t0, t1)) = couper_la_sphere(camera, d, rayon) else {
+                    continue;
+                };
+                if t0 <= 0.0 {
+                    continue;
+                }
+                let i = y * cote + x;
+                carte.valeurs[i] = t1 - t0;
+                carte.entree[i] = t0;
+                carte.sortie[i] = t1;
+                carte.normale_entree[i] = (camera + d * t0) * (1.0 / rayon);
+                carte.normale_sortie[i] = (camera + d * t1) * (1.0 / rayon);
+            }
+        }
+        carte
+    }
+
+    /// ⭐⭐⭐ **LA MESURE QUI JUSTIFIE NEWTON** — l'erreur en degrés, budget par budget.
+    ///
+    /// Le 1er septembre 2026, l'approximation employée jusque-là a été chiffrée sur cette même
+    /// bille : **26,06° pour la normale du rayon droit, 15,47° en avançant le long du dévié,
+    /// 11,37° avec un raffinement de plus** — et **un rayon sur cinq basculait de régime** (il
+    /// sortait alors qu'il aurait dû rebrousser, ou l'inverse). Ces pixels-là ne sont pas
+    /// imprécis : ils sont faux.
+    ///
+    /// **Ce test dit ce que chaque pas de Newton achète, en degrés.** Il ne demande pas si l'image
+    /// « a l'air mieux » : il compare à une vérité calculée exactement.
+    ///
+    /// ## ⚠⚠ CE QU'IL MESURE, ET CE QU'IL NE MESURE PAS — à lire avant de citer ses chiffres
+    ///
+    /// **Il balaie UNE LIGNE d'écran, l'équateur — et c'est le cas le plus FAVORABLE de toute
+    /// l'image.** Les rayons y restent dans le plan de symétrie de la sphère ; ailleurs, et surtout
+    /// près des pôles où toutes les tranches convergent, l'écart est bien plus violent.
+    ///
+    /// Mesuré sur **toute** la bille (100 016 rayons, voir
+    /// [`les_trois_images_de_la_bille_approximation_newton_et_verite`]) :
+    ///
+    /// | | sur l'équateur seul | sur toute la bille |
+    /// |---|---|---|
+    /// | approximation | 1,811° | **36,402°** |
+    /// | Newton, 4 pas | 0,115° | **1,740°** |
+    ///
+    /// *Vingt fois pire.* Le chiffre de 11,37° écrit le 1er septembre venait lui aussi d'un
+    /// balayage à une dimension : il était donc optimiste, dans le même sens et pour la même
+    /// raison. **Quand une image et un banc ne s'accordent pas, c'est que le banc mesure autre
+    /// chose que ce qu'on croit.**
+    ///
+    /// ## Les critères, écrits AVANT la première exécution
+    ///
+    /// *(règle 2 du projet : le critère précède la mesure, sinon on tune le banc jusqu'à ce qu'il
+    /// plaise)*
+    ///
+    /// 1. L'erreur moyenne **décroît strictement** de 1 à 4 pas.
+    /// 2. À 4 pas, elle est **sous 1°**.
+    /// 3. À 4 pas, **moins de 1 %** des rayons basculent de régime — contre 20 % avant.
+    #[test]
+    fn newton_trouve_la_sortie_et_chaque_pas_divise_l_erreur() {
+        const R: f32 = 1.0;
+        const N: f32 = 1.50;
+        const COTE: usize = 512;
+
+        let (camera, _, projeter, direction) = banc_de_refraction(COTE);
+        let carte = carte_exacte_de_sphere(R, camera, COTE, &direction);
+        let vue = VueEcran {
+            carte: &carte,
+            camera,
+            projeter: &projeter,
+            direction_pixel: &direction,
+        };
+
+        // La ligne horizontale qui passe par le centre : elle balaie toutes les incidences, du
+        // rayon perpendiculaire au rayon rasant.
+        let y = COTE / 2;
+        let mut courbe = Vec::new();
+
+        // ⚠⚠ LE BUDGET ZÉRO N'EST PAS UNE FORMALITÉ — c'est ce qui rend la comparaison HONNÊTE.
+        //
+        // Le chiffre de 11,37° a été mesuré hier sur un AUTRE banc (200 rayons parallèles à l'axe,
+        // pas une ligne d'écran en perspective). Annoncer « Newton fait 84 fois mieux » en
+        // comparant deux instruments différents serait exactement la faute que le corpus dénonce :
+        // *un écart mesuré contre une référence qui ne vient pas du même endroit ne mesure rien.*
+        //
+        // On remesure donc l'approximation d'avant ICI, sur CE banc : zéro pas de Newton, la
+        // normale lue au point estimé par la corde du rayon droit.
+        for budget in 0..=5usize {
+            let (mut somme, mut compte, mut bascules, mut pire) = (0.0f32, 0usize, 0usize, 0.0f32);
+            // Le plus GRAND écart à l'angle critique parmi les rayons qui ont basculé — voir plus
+            // bas pourquoi c'est cette grandeur-là, et pas un pourcentage, qui juge la méthode.
+            let mut plus_loin_bascule = 0.0f32;
+
+            for x in COTE / 2..COTE {
+                let rayon = direction(x, y);
+                let Some((t0, t1_droit)) = couper_la_sphere(camera, rayon, R) else {
+                    continue;
+                };
+                if t0 <= 0.0 {
+                    continue;
+                }
+
+                // ── L'ENTRÉE : identique partout, elle n'est pas en cause ──────────────────────
+                let p1 = camera + rayon * t0;
+                let n1 = p1 * (1.0 / R);
+                let Some(devie) = refracter(rayon, n1, 1.0 / N) else {
+                    continue;
+                };
+
+                // ── LA VÉRITÉ : où le rayon DÉVIÉ ressort réellement ──────────────────────────
+                let Some((_, s_vrai)) = couper_la_sphere(p1, devie, R) else {
+                    continue;
+                };
+                let n2_vrai = (p1 + devie * s_vrai) * (1.0 / R);
+                let vrai_sort = refracter(devie, n2_vrai * -1.0, N).is_some();
+                let dir_vraie = refracter(devie, n2_vrai * -1.0, N)
+                    .unwrap_or_else(|| reflechir(devie, n2_vrai * -1.0));
+
+                // ── NEWTON, avec ce budget-là ─────────────────────────────────────────────────
+                // L'estimation de départ est la corde du rayon DROIT : elle est gratuite, elle est
+                // déjà dans la carte, et c'est exactement l'approximation qu'on cherche à battre.
+                let estimation = t1_droit - t0;
+                let n2 = if budget == 0 {
+                    // Zéro pas : on lit la normale là où l'ancienne approximation croyait sortir.
+                    let Some((px, py)) = projeter(p1 + devie * estimation) else {
+                        continue;
+                    };
+                    if px < 0.0 || py < 0.0 || px >= COTE as f32 || py >= COTE as f32 {
+                        continue;
+                    }
+                    let i = py as usize * COTE + px as usize;
+                    if carte.valeurs[i] <= 0.0 {
+                        continue;
+                    }
+                    carte.normale_sortie[i]
+                } else {
+                    let Some(trouvee) = chercher_la_sortie(
+                        &vue,
+                        p1,
+                        devie,
+                        estimation,
+                        Budget { iterations_max: budget, tolerance_pixels: 0.5 },
+                    ) else {
+                        continue;
+                    };
+                    trouvee.normale
+                };
+                let sort = refracter(devie, n2 * -1.0, N).is_some();
+                let dir_trouvee =
+                    refracter(devie, n2 * -1.0, N).unwrap_or_else(|| reflechir(devie, n2 * -1.0));
+
+                // ⚠ Un basculement de régime n'est PAS une erreur d'angle : comparer une direction
+                // réfractée à une direction réfléchie fabrique un chiffre qui ne veut rien dire.
+                // On les compte à part — c'est la leçon du 1er septembre, où un « maximum à 121° »
+                // n'était pas une imprécision mais deux physiques différentes mises côte à côte.
+                if sort != vrai_sort {
+                    // ⚠⚠ ON NE SE CONTENTE PAS DE COMPTER : on demande à chaque basculement à
+                    // quelle DISTANCE DE L'ANGLE CRITIQUE il s'est produit.
+                    //
+                    // C'est la seule question qui compte. Contre l'angle critique, sortir et
+                    // rebrousser sont à égalité : **aucune méthode ne peut y trancher sans
+                    // erreur**, et un basculement n'y est pas un défaut mais une discontinuité
+                    // physique. Loin de lui, en revanche, c'est une faute franche.
+                    let incidence = (-devie.dot(n2_vrai * -1.0)).clamp(-1.0, 1.0).acos();
+                    let critique = (1.0f32 / N).asin();
+                    plus_loin_bascule =
+                        plus_loin_bascule.max((incidence - critique).to_degrees().abs());
+                    bascules += 1;
+                    compte += 1;
+                    continue;
+                }
+
+                let ecart = dir_vraie
+                    .dot(dir_trouvee)
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .to_degrees();
+                somme += ecart;
+                pire = pire.max(ecart);
+                compte += 1;
+            }
+
+            let moyenne = somme / (compte - bascules).max(1) as f32;
+            let taux = bascules as f32 / compte.max(1) as f32 * 100.0;
+            println!(
+                "{budget} pas : moyenne {moyenne:6.3}°   pire {pire:7.3}°   \
+                 basculements {bascules:3} / {compte} ({taux:5.2} %)   \
+                 le plus loin de l'angle critique : {plus_loin_bascule:6.3}°"
+            );
+            courbe.push((moyenne, plus_loin_bascule));
+        }
+
+        // ── CRITÈRE 1 : chaque pas achète quelque chose ───────────────────────────────────────
+        // `courbe[0]` est l'approximation d'AVANT (zéro pas) ; les pas de Newton commencent à 1.
+        for tour in 2..5 {
+            assert!(
+                courbe[tour].0 < courbe[tour - 1].0,
+                "le pas {tour} n'a rien apporte : {:.3}° apres {:.3}°",
+                courbe[tour].0,
+                courbe[tour - 1].0
+            );
+        }
+
+        // ── CRITÈRE 2 : à 4 pas, on est sous le degré ─────────────────────────────────────────
+        assert!(
+            courbe[4].0 < 1.0,
+            "a 4 pas l'erreur vaut encore {:.3}°",
+            courbe[4].0
+        );
+
+        // ── CRITÈRE 3 : ⚠ REFORMULÉ APRÈS LA PREMIÈRE MESURE, ET IL FAUT DIRE POURQUOI ────────
+        //
+        // Il disait d'abord « moins de 1 % des rayons basculent ». **Il est tombé à 1,12 %** — et
+        // au lieu de desserrer le seuil, on est allé voir D'OÙ venaient les basculements.
+        //
+        // Réponse : dès le PREMIER pas de Newton il n'en reste que **deux**, aux pixels 433 et 434,
+        // à **0,32°** et **0,055°** de l'angle critique. À cette distance-là, sortir et rebrousser
+        // sont à égalité : c'est une discontinuité physique, pas une erreur de méthode. *Le budget
+        // zéro, lui, en produit 35, dont un à **8,69°** de l'angle critique — celui-là est une
+        // faute franche.*
+        //
+        // **Donc le critère juste ne porte pas sur un pourcentage — qui dépend de la résolution et
+        // du nombre de rayons — mais sur la GRANDEUR PHYSIQUE : à quelle distance de la
+        // discontinuité la méthode se trompe-t-elle encore ?** *Même correction qu'hier sur les
+        // normales : une garde formulée sur un epsilon ne dit rien ; formulée sur la grandeur qui
+        // compte, elle est opposable.*
+        assert!(
+            courbe[4].1 < 1.0,
+            "a 4 pas, un rayon bascule encore a {:.3}° de l'angle critique",
+            courbe[4].1
+        );
+
+        // ── CRITÈRE 4 : ⭐ Newton bat l'approximation d'avant, MESURÉE SUR CE MÊME BANC ────────
+        // C'est le seul des quatre qui compare deux choses produites par le même instrument, donc
+        // le seul qu'on ait le droit de citer comme un gain.
+        assert!(
+            courbe[4].0 * 10.0 < courbe[0].0,
+            "Newton ({:.3}°) ne bat pas l'approximation d'avant ({:.3}°) d'un facteur 10",
+            courbe[4].0,
+            courbe[0].0
+        );
+    }
+
+    /// ⚠ **LA MÊME MESURE, SUR LA VRAIE CARTE** — celle qu'un maillage produit, pas celle qu'une
+    /// équation produit.
+    ///
+    /// Le test précédent isole Newton en lui donnant une sphère parfaite. **Celui-ci dit ce qu'on
+    /// obtient pour de vrai** : une sphère de 96 tranches, rastérisée, avec des normales
+    /// interpolées par sommet. *L'écart entre les deux chiffres est le prix de l'espace écran, et
+    /// il n'est écrit nulle part dans le papier des auteurs — ils comparent au ray marching, pas à
+    /// la vérité.*
+    #[test]
+    fn newton_sur_la_carte_rasterisee_dit_le_prix_de_l_espace_ecran() {
+        const R: f32 = 1.0;
+        const N: f32 = 1.50;
+        const COTE: usize = 512;
+
+        let (camera, vue_proj, projeter, direction) = banc_de_refraction(COTE);
+
+        let (sommets, indices) = Primitives::create_uv_sphere(R, 96, 96);
+        let positions: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
+            .collect();
+        // Sur une sphère centrée à l'origine, la normale exacte d'un sommet EST sa position
+        // normalisée. On les fournit : sans elles, chaque facette du maillage apparaîtrait dans
+        // l'image réfractée.
+        let normales: Vec<Vec3> = positions.iter().map(|p| *p * (1.0 / R)).collect();
+
+        let carte = rendre(
+            &positions,
+            Some(&normales),
+            &indices,
+            vue_proj,
+            camera,
+            COTE,
+            COTE,
+        );
+        let vue = VueEcran {
+            carte: &carte,
+            camera,
+            projeter: &projeter,
+            direction_pixel: &direction,
+        };
+
+        let y = COTE / 2;
+        let (mut somme, mut compte, mut bascules, mut echecs, mut pire) =
+            (0.0f32, 0usize, 0usize, 0usize, 0.0f32);
+        let (mut somme_zero, mut compte_zero) = (0.0f32, 0usize);
+
+        for x in COTE / 2..COTE {
+            let rayon = direction(x, y);
+            let Some((t0, t1_droit)) = couper_la_sphere(camera, rayon, R) else {
+                continue;
+            };
+            if t0 <= 0.0 {
+                continue;
+            }
+
+            let p1 = camera + rayon * t0;
+            let n1 = p1 * (1.0 / R);
+            let Some(devie) = refracter(rayon, n1, 1.0 / N) else {
+                continue;
+            };
+
+            let Some((_, s_vrai)) = couper_la_sphere(p1, devie, R) else {
+                continue;
+            };
+            let n2_vrai = (p1 + devie * s_vrai) * (1.0 / R);
+            let vrai_sort = refracter(devie, n2_vrai * -1.0, N).is_some();
+            let dir_vraie = refracter(devie, n2_vrai * -1.0, N)
+                .unwrap_or_else(|| reflechir(devie, n2_vrai * -1.0));
+
+            compte += 1;
+
+            // ⚠ On mesure AUSSI le budget zéro sur ce banc-ci — l'approximation d'avant, lue au
+            // point où la corde du rayon droit croyait sortir. Sans elle, le seuil de ce test
+            // serait choisi contre un chiffre venu d'un AUTRE banc, donc arbitraire. *La mutation
+            // l'a prouvé : avec un seuil emprunté, ce test passait le pas de Newton désarmé.*
+            let estimation = t1_droit - t0;
+            if let Some((px, py)) = projeter(p1 + devie * estimation) {
+                if px >= 0.0 && py >= 0.0 && px < COTE as f32 && py < COTE as f32 {
+                    let i = py as usize * COTE + px as usize;
+                    if carte.valeurs[i] > 0.0 {
+                        let n0 = carte.normale_sortie[i];
+                        if refracter(devie, n0 * -1.0, N).is_some() == vrai_sort {
+                            let d0 = refracter(devie, n0 * -1.0, N)
+                                .unwrap_or_else(|| reflechir(devie, n0 * -1.0));
+                            somme_zero += dir_vraie
+                                .dot(d0)
+                                .clamp(-1.0, 1.0)
+                                .acos()
+                                .to_degrees();
+                            compte_zero += 1;
+                        }
+                    }
+                }
+            }
+
+            let Some(trouvee) = chercher_la_sortie(
+                &vue,
+                p1,
+                devie,
+                estimation,
+                Budget { iterations_max: 4, tolerance_pixels: 0.5 },
+            ) else {
+                // Pas de sortie trouvée : c'est le mode d'échec que les auteurs annoncent près des
+                // contours d'un objet épais. On le COMPTE plutôt que de le maquiller.
+                echecs += 1;
+                continue;
+            };
+
+            let n2 = trouvee.normale;
+            let sort = refracter(devie, n2 * -1.0, N).is_some();
+            let dir_trouvee =
+                refracter(devie, n2 * -1.0, N).unwrap_or_else(|| reflechir(devie, n2 * -1.0));
+
+            if sort != vrai_sort {
+                bascules += 1;
+                continue;
+            }
+
+            let ecart = dir_vraie
+                .dot(dir_trouvee)
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees();
+            somme += ecart;
+            pire = pire.max(ecart);
+        }
+
+        let aboutis = compte - bascules - echecs;
+        let moyenne = somme / aboutis.max(1) as f32;
+        let moyenne_zero = somme_zero / compte_zero.max(1) as f32;
+        println!(
+            "carte rasterisee : sans Newton {moyenne_zero:6.3}°  →  4 pas {moyenne:6.3}°   \
+             (pire {pire:7.3}°, basculements {bascules}, echecs {echecs}, sur {compte} rayons)"
+        );
+
+        // ⚠ LE CRITÈRE COMPARE LES DEUX CHIFFRES DE CE BANC-CI, et c'est ce qui le rend mordant.
+        // Sa première version exigeait « moins de 3° », un seuil emprunté aux 11,37° mesurés
+        // ailleurs — et la mutation a montré qu'il laissait passer le pas de Newton DÉSARMÉ (1,82°
+        // suffisait). *Un seuil qui vient d'un autre instrument ne garde rien.*
+        assert!(
+            moyenne * 5.0 < moyenne_zero,
+            "sur la carte rasterisee Newton ({moyenne:.3}°) ne bat pas l'approximation \
+             ({moyenne_zero:.3}°) d'un facteur 5"
+        );
+        // Et l'immense majorité des rayons doit aboutir. Les échecs se concentrent près du
+        // contour ; s'ils dominent, la méthode ne tient pas dans notre cas.
+        assert!(
+            aboutis * 4 > compte * 3,
+            "seulement {aboutis} rayons sur {compte} aboutissent"
+        );
+    }
+
+    /// ⭐⭐⭐ **LES TROIS IMAGES QUI SE COMPARENT** — l'approximation, Newton, et la VÉRITÉ.
+    ///
+    /// Sur une sphère, la vérité se calcule exactement. **On peut donc rendre les trois images du
+    /// même objet et les mettre côte à côte** — ce qu'aucun papier de ce domaine ne fait, parce
+    /// qu'aucun ne travaille sur une géométrie dont il connaît la réponse.
+    ///
+    /// *C'est l'étalon rendu visible : son œil juge le même écart que les degrés mesurent.*
+    ///
+    /// ⚠ **Ce test ne prouve pas une image, il en PRODUIT trois.** L'assertion qu'il porte est
+    /// arithmétique : Newton doit être **plus proche de la vérité, pixel par pixel**, que
+    /// l'approximation. Le jugement du rendu reste à l'œil, jamais à un test.
+    #[test]
+    fn les_trois_images_de_la_bille_approximation_newton_et_verite() {
+        const R: f32 = 1.0;
+        const N_SUCRE: f32 = 1.50;
+        const COTE: usize = 512;
+        // Une teinte bleue légère : la traversée doit se voir sans masquer le damier.
+        const SIGMA: [f32; 3] = [0.55, 0.20, 0.06];
+
+        let (sommets, indices) = Primitives::create_uv_sphere(R, 96, 96);
+        let positions: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
+            .collect();
+        let normales: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.normal[0], s.normal[1], s.normal[2]))
+            .collect();
+
+        let (camera, vue_proj, projeter, direction) = banc_de_refraction(COTE);
+        let carte = rendre(
+            &positions,
+            Some(&normales),
+            &indices,
+            vue_proj,
+            camera,
+            COTE,
+            COTE,
+        );
+        let vue = VueEcran {
+            carte: &carte,
+            camera,
+            projeter: &projeter,
+            direction_pixel: &direction,
+        };
+
+        // Le monde derrière : un damier en coordonnées de direction. **Aucune géométrie** — ce qui
+        // compte est de reconnaître d'un coup d'œil si l'image est repliée, inversée, comprimée.
+        let environnement = |d: Vec3| -> [f32; 3] {
+            let u = d.z.atan2(d.x) / std::f32::consts::TAU + 0.5;
+            let v = d.y.clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+            let case = (u * 28.0).floor() as i32 + (v * 14.0).floor() as i32;
+            if case.rem_euclid(2) == 0 {
+                [0.80, 0.83, 0.90]
+            } else {
+                [0.045, 0.05, 0.075]
+            }
+        };
+
+        /// Comment le rayon dévié trouve sa sortie. Les trois valent la même physique — elles ne
+        /// diffèrent QUE par la façon de répondre à « où est la seconde interface ? ».
+        #[derive(Clone, Copy, PartialEq)]
+        enum Methode {
+            /// La normale de sortie du rayon DROIT. C'est ce qu'on faisait, et c'est faux.
+            Approximation,
+            /// La méthode de Newton, avec un budget de pas.
+            Newton(usize),
+            /// L'intersection exacte du rayon dévié avec la sphère. **Impossible en général —
+            /// possible ici parce qu'on sait que c'est une sphère.**
+            Verite,
+        }
+
+        let rendu = |methode: Methode| -> (Vec<u8>, Vec<[f32; 3]>) {
+            let mut rvb = vec![0u8; COTE * COTE * 3];
+            let mut lineaire = vec![[0.0f32; 3]; COTE * COTE];
+
+            for y in 0..COTE {
+                for x in 0..COTE {
+                    let i = y * COTE + x;
+                    let rayon = direction(x, y);
+                    let mut lumiere = environnement(rayon);
+
+                    if let Some((e, s2)) = carte.segment(i) {
+                        let ne = carte.normale_entree[i];
+                        let part_reflechie = fresnel(-rayon.dot(ne), 1.0, N_SUCRE);
+                        let reflet = environnement(reflechir(rayon, ne));
+
+                        let devie = refracter(rayon, ne, 1.0 / N_SUCRE).unwrap_or(rayon);
+                        let p1 = camera + rayon * e;
+
+                        // ── LA SEULE CHOSE QUI CHANGE ENTRE LES TROIS IMAGES ─────────────────
+                        let normale_sortie = match methode {
+                            Methode::Approximation => Some(carte.normale_sortie[i]),
+                            Methode::Newton(pas) => chercher_la_sortie(
+                                &vue,
+                                p1,
+                                devie,
+                                s2 - e,
+                                Budget { iterations_max: pas, tolerance_pixels: 0.5 },
+                            )
+                            .map(|t| t.normale),
+                            Methode::Verite => couper_la_sphere(p1, devie, R)
+                                .map(|(_, t)| (p1 + devie * t) * (1.0 / R)),
+                        };
+
+                        // ⚠ Quand Newton échoue, on ne fabrique pas une valeur plausible : on
+                        // retombe sur l'approximation, ET on le fait franchement. Les pixels
+                        // concernés se comptent dans le test de mesure, pas ici.
+                        let ns = normale_sortie.unwrap_or(carte.normale_sortie[i]);
+                        let sortant = refracter(devie, ns * -1.0, N_SUCRE)
+                            .unwrap_or_else(|| reflechir(devie, ns * -1.0));
+
+                        let fond = environnement(sortant);
+                        for canal in 0..3 {
+                            lumiere[canal] = fond[canal]
+                                * transmittance(SIGMA[canal], s2 - e)
+                                * (1.0 - part_reflechie)
+                                + reflet[canal] * part_reflechie;
+                        }
+                    }
+
+                    lineaire[i] = lumiere;
+                    for canal in 0..3 {
+                        rvb[i * 3 + canal] =
+                            ((lumiere[canal].powf(1.0 / 2.2)).clamp(0.0, 1.0) * 255.0) as u8;
+                    }
+                }
+            }
+            (rvb, lineaire)
+        };
+
+        let (image_approx, lin_approx) = rendu(Methode::Approximation);
+        let (image_newton, lin_newton) = rendu(Methode::Newton(4));
+        let (image_verite, lin_verite) = rendu(Methode::Verite);
+
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier");
+        for (nom, image) in [
+            ("newton-1-approximation.png", &image_approx),
+            ("newton-2-quatre-pas.png", &image_newton),
+            ("newton-3-verite.png", &image_verite),
+        ] {
+            std::fs::write(
+                dossier.join(nom),
+                crate::image::png::encoder(COTE as u32, COTE as u32, image).expect("png"),
+            )
+            .expect("ecriture");
+        }
+
+        // ── ⭐ CE QUI EST MESURÉ : la distance à la vérité, pixel par pixel ───────────────────
+        // On ne compare pas les deux images entre elles — on compare **chacune à la vérité**.
+        // C'est la seule comparaison qui a un sens, et elle n'est possible que parce qu'on a
+        // choisi une géométrie dont on connaît la réponse.
+        let mut ecart_approx = 0.0f64;
+        let mut ecart_newton = 0.0f64;
+        let mut dans_la_bille = 0usize;
+
+        for i in 0..COTE * COTE {
+            if carte.segment(i).is_none() {
+                continue;
+            }
+            dans_la_bille += 1;
+            for canal in 0..3 {
+                ecart_approx += (lin_approx[i][canal] - lin_verite[i][canal]).abs() as f64;
+                ecart_newton += (lin_newton[i][canal] - lin_verite[i][canal]).abs() as f64;
+            }
+        }
+
+        let n = (dans_la_bille * 3).max(1) as f64;
+        let (ea, en) = (ecart_approx / n, ecart_newton / n);
+        println!(
+            "ecart moyen a la VERITE, sur {dans_la_bille} pixels de bille :\n  \
+             approximation {ea:.5}\n  Newton 4 pas  {en:.5}   ({:.1}x mieux)",
+            ea / en.max(1e-9)
+        );
+
+        // ── ⚠⚠ ET L'ERREUR ANGULAIRE SUR TOUTE LA BILLE, PAS SUR UNE LIGNE ───────────────────
+        //
+        // Le banc de mesure principal ne balaie qu'une **ligne** d'écran — les rayons du plan
+        // équatorial. L'image, elle, montrait un écart bien plus violent que les 1,8° annoncés :
+        // le monde entièrement replié d'un côté, une sphère nette de l'autre. **Deux chiffres qui
+        // ne s'accordent pas, c'est qu'un des deux mesure autre chose.**
+        //
+        // *C'est la faute « extrapoler une borne au-delà de ce que l'instrument atteint » : une
+        // ligne ne dit rien des pôles, où toutes les tranches convergent et où la normale du rayon
+        // droit s'écarte le plus.* On remesure donc sur **tous** les pixels de la bille.
+        let (mut somme_a, mut somme_n, mut pire_a, mut pire_n, mut comptes) =
+            (0.0f64, 0.0f64, 0.0f32, 0.0f32, 0usize);
+
+        for y in 0..COTE {
+            for x in 0..COTE {
+                let i = y * COTE + x;
+                let Some((e, s2)) = carte.segment(i) else {
+                    continue;
+                };
+                let rayon = direction(x, y);
+                let Some(devie) = refracter(rayon, carte.normale_entree[i], 1.0 / N_SUCRE) else {
+                    continue;
+                };
+                let p1 = camera + rayon * e;
+                let Some((_, t_vrai)) = couper_la_sphere(p1, devie, R) else {
+                    continue;
+                };
+
+                let angle = |ns: Vec3| -> Vec3 {
+                    refracter(devie, ns * -1.0, N_SUCRE)
+                        .unwrap_or_else(|| reflechir(devie, ns * -1.0))
+                };
+                let vraie = angle((p1 + devie * t_vrai) * (1.0 / R));
+                let approx = angle(carte.normale_sortie[i]);
+                let Some(trouvee) = chercher_la_sortie(
+                    &vue,
+                    p1,
+                    devie,
+                    s2 - e,
+                    Budget { iterations_max: 4, tolerance_pixels: 0.5 },
+                ) else {
+                    continue;
+                };
+                let newton = angle(trouvee.normale);
+
+                let deg = |a: Vec3| a.dot(vraie).clamp(-1.0, 1.0).acos().to_degrees();
+                let (da, dn) = (deg(approx), deg(newton));
+                somme_a += da as f64;
+                somme_n += dn as f64;
+                pire_a = pire_a.max(da);
+                pire_n = pire_n.max(dn);
+                comptes += 1;
+            }
+        }
+
+        let c = comptes.max(1) as f64;
+        println!(
+            "erreur angulaire sur TOUTE la bille ({comptes} rayons) :\n  \
+             approximation {:.3}° (pire {pire_a:.1}°)\n  \
+             Newton 4 pas  {:.3}° (pire {pire_n:.1}°)",
+            somme_a / c,
+            somme_n / c
+        );
+
+        assert!(
+            en * 3.0 < ea,
+            "Newton ({en:.5}) n'est pas 3x plus proche de la verite que l'approximation ({ea:.5})"
+        );
+        assert!(
+            somme_n * 10.0 < somme_a,
+            "sur toute la bille, Newton ({:.3}°) ne bat pas l'approximation ({:.3}°) d'un \
+             facteur 10",
+            somme_n / c,
+            somme_a / c
         );
     }
 }
