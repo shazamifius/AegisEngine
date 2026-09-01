@@ -194,13 +194,13 @@ pub fn integrer_le_champ<D, S>(
     direction: D,
     pas: usize,
     sigma: S,
-) -> Vec<[f32; 3]>
+) -> Vec<Traversee>
 where
     D: Fn(usize, usize) -> Vec3,
-    S: Fn(Vec3, f32, f32) -> [f32; 3],
+    S: Fn(Vec3, f32, f32) -> Matiere,
 {
     let pas = pas.max(1);
-    let mut transmittance = vec![[1.0f32; 3]; carte.largeur * carte.hauteur];
+    let mut resultat = vec![Traversee { transmittance: [1.0; 3], emise: [0.0; 3] }; carte.largeur * carte.hauteur];
 
     for y in 0..carte.hauteur {
         for x in 0..carte.largeur {
@@ -211,7 +211,14 @@ where
 
             let rayon = direction(x, y);
             let dl = (sortie - entree) / pas as f32;
-            let mut integrale = [0.0f32; 3];
+            // On marche de l'ŒIL vers le fond : `t` accumule ce qui sépare le point de l'œil, donc
+            // la lumière émise en un point est atténuée par ce qu'on a DÉJÀ traversé. Marcher dans
+            // l'autre sens donnerait une image où les bulles du fond brillent autant que celles de
+            // devant — faux, et joli, donc dangereux.
+            // ⚠ `restant`, pas `t` : `t` est déjà la position sur le rayon. Les confondre compilait
+            // presque, et aurait donné une image plausible et fausse.
+            let mut restant = [1.0f32; 3];
+            let mut emise = [0.0f32; 3];
 
             for k in 0..pas {
                 // Le milieu de chaque tranche : c'est la règle du point médian, deux fois plus
@@ -220,19 +227,67 @@ where
                 let point = camera + rayon * t;
                 let depuis_la_surface = (t - entree).min(sortie - t);
 
-                let s = sigma(point, depuis_la_surface, dl);
+                let m = sigma(point, depuis_la_surface, dl);
                 for canal in 0..3 {
-                    integrale[canal] += s[canal] * dl;
+                    emise[canal] += m.source[canal] * restant[canal] * dl;
+                    restant[canal] *= (-m.sigma[canal] * dl).exp();
                 }
             }
 
-            for canal in 0..3 {
-                transmittance[indice][canal] = (-integrale[canal]).exp();
-            }
+            resultat[indice] = Traversee { transmittance: restant, emise };
         }
     }
 
-    transmittance
+    resultat
+}
+
+/// Ce que le rayon d'un pixel a rapporté de sa traversée.
+#[derive(Clone, Copy)]
+pub struct Traversee {
+    /// Ce qui survit de ce qui venait de DERRIÈRE l'objet.
+    pub transmittance: [f32; 3],
+    /// Ce que la matière elle-même a renvoyé vers l'œil, déjà atténué par ce qui la sépare de lui.
+    pub emise: [f32; 3],
+}
+
+/// Ce qu'un point de matière fait à la lumière — et il y a **deux** verbes, pas un.
+///
+/// ## ⚠ Pourquoi `sigma` seul ne suffisait pas, et ce que l'image d'une sucette a montré
+///
+/// Un champ purement absorbant ne sait dire qu'une chose : *combien de lumière meurt ici*. Il rend
+/// donc les objets qui **filtrent** — un fruit, du verre teinté, de la brume vue à contre-jour.
+///
+/// **Il est incapable de rendre une bulle d'air.** Or une bulle dans du sucre n'est pas un trou :
+/// l'air a un indice de 1,0 dans un milieu à 1,5, donc **tout rayon qui la frappe au-delà de 41,8°
+/// est réfléchi en totalité**. Une bulle se comporte comme une bille de mercure — un éclat argenté,
+/// pas une tache sombre. Et sa lumière **n'a pas traversé la masse colorée**, ce qui explique qu'on
+/// la voie blanche sur un fond bleu profond.
+///
+/// ⭐⭐ **Dans une intégrale de transport, ça ne s'écrit pas comme une absorption : ça s'écrit comme
+/// une SOURCE.** Le terme manquant était là depuis le début — l'équation du transport radiatif en a
+/// toujours eu deux, et je n'en avais implémenté qu'un.
+///
+/// ```text
+///     L = ∫ source(p) · T(œil → p) dl   +   fond · T(œil → sortie)
+/// ```
+///
+/// *Et il tombe gratuitement, avec lui : une bulle profonde est plus bleue qu'une bulle proche —
+/// parce que sa lumière doit encore traverser le sucre pour sortir. Aucune ligne n'a été écrite
+/// pour ça ; c'est la `T` de la formule qui le fait.*
+#[derive(Clone, Copy)]
+pub struct Matiere {
+    /// Combien de lumière est retirée par unité de longueur, canal par canal.
+    pub sigma: [f32; 3],
+    /// Combien de lumière est **rendue** par unité de longueur — une bulle qui réfléchit
+    /// l'ambiante, une brume qui renvoie le soleil, une matière qui rougeoie.
+    pub source: [f32; 3],
+}
+
+impl Matiere {
+    /// Une matière qui ne fait qu'absorber — le cas d'avant, écrit une fois.
+    pub fn absorbante(sigma: [f32; 3]) -> Self {
+        Self { sigma, source: [0.0; 3] }
+    }
 }
 
 /// Un sommet projeté, prêt à être rastérisé.
@@ -306,7 +361,11 @@ pub fn rendre(
 
             sommets[k] = SommetProjete {
                 x: (ndc_x * 0.5 + 0.5) * largeur as f32,
-                y: (ndc_y * 0.5 + 0.5) * hauteur as f32,
+                // ⚠ Y DESCEND dans une image et MONTE dans le monde. Sans ce retournement, tout
+                // champ qui parle de « haut » sort à l'envers — et l'image reste jolie, donc le
+                // défaut ne se signale pas. *Trouvé sur les bulles d'une sucette : je les avais
+                // écrites plus grosses en haut, elles sortaient en bas.*
+                y: (0.5 - ndc_y * 0.5) * hauteur as f32,
                 distance_sur_w: distance * inverse_w,
                 inverse_w,
             };
@@ -400,7 +459,11 @@ fn accumuler_triangle(
             // ⭐ Le geste entier tient dans cette ligne : on entre, on retranche ; on sort, on
             // ajoute. Une face avant a une aire signée négative à l'écran.
             let indice = py * largeur + px;
-            if aire < 0.0 {
+            // ⚠ **Le sens dépend du retournement de Y**, et c'est un piège qui s'est refermé sur
+            // moi : corriger l'orientation de l'image a inversé l'orientation apparente de TOUS les
+            // triangles, donc échangé les entrées et les sorties. Six tests sont tombés d'un coup —
+            // et c'est la seule raison pour laquelle je l'ai su.
+            if aire > 0.0 {
                 valeurs[indice] -= distance;
                 // On entre : la première entrée est la plus proche.
                 entree[indice] = entree[indice].min(distance);
@@ -417,6 +480,26 @@ fn accumuler_triangle(
 mod tests {
     use super::*;
     use crate::geometry::primitives::Primitives;
+
+    /// Un nombre entre 0 et 1, tiré d'une cellule de grille — **déterministe et sans état**.
+    ///
+    /// C'est ce qui permet de semer des milliers de bulles sans en stocker une seule : on ne
+    /// *place* pas les bulles, on *demande* à un point s'il est dans une. *Rien à modéliser, rien à
+    /// charger, rien à faire tenir en mémoire — et la même graine redonne exactement la même
+    /// sucette, ce qui rend un rendu reproductible.*
+    fn alea(cx: i32, cy: i32, cz: i32, graine: u32) -> f32 {
+        let mut h = (cx as u32)
+            .wrapping_mul(0x9E37_79B1)
+            ^ (cy as u32).wrapping_mul(0x85EB_CA77)
+            ^ (cz as u32).wrapping_mul(0xC2B2_AE3D)
+            ^ graine.wrapping_mul(0x27D4_EB2F);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2C1B_3C6D);
+        h ^= h >> 12;
+        h = h.wrapping_mul(0x297A_2D39);
+        h ^= h >> 15;
+        h as f32 / u32::MAX as f32
+    }
 
     /// Un passage doux de 0 à 1 entre deux bornes — la courbe d'Hermite `3t² − 2t³`.
     ///
@@ -758,7 +841,9 @@ mod tests {
         let tangente = (fov * 0.5).tan();
         let direction = move |x: usize, y: usize| -> Vec3 {
             let ndc_x = (x as f32 + 0.5) / cote as f32 * 2.0 - 1.0;
-            let ndc_y = (y as f32 + 0.5) / cote as f32 * 2.0 - 1.0;
+            // Le retournement de `rendre`, à l'identique — les deux ne peuvent pas diverger sans
+            // que le champ se retrouve décalé de haut en bas.
+            let ndc_y = 1.0 - (y as f32 + 0.5) / cote as f32 * 2.0;
             Vec3::new(ndc_x * tangente, ndc_y * tangente, -1.0).normalize()
         };
 
@@ -777,7 +862,7 @@ mod tests {
         const EPAISSEUR_PEAU: f32 = 0.042;
         const NOYAU: f32 = 0.33;
 
-        let champ = |p: Vec3, depuis_la_surface: f32, dl: f32| -> [f32; 3] {
+        let champ = |p: Vec3, depuis_la_surface: f32, dl: f32| -> Matiere {
             let r = p.length();
 
             // ⚠ AUCUN SEUIL FRANC ICI, et c'est toute la leçon de la première image. Elle portait
@@ -828,7 +913,7 @@ mod tests {
                 let c = chair[canal] * (1.0 - dans_la_peau) + PEAU[canal] * dans_la_peau;
                 sigma[canal] = c * (1.0 - dedans_le_noyau) + 90.0 * dedans_le_noyau;
             }
-            sigma
+            Matiere::absorbante(sigma)
         };
 
         const SOLEIL: f32 = 6.0;
@@ -836,13 +921,13 @@ mod tests {
         let dossier = std::path::Path::new("target/preuves");
         std::fs::create_dir_all(dossier).expect("dossier de preuves");
 
-        let peindre = |transmittance: &[[f32; 3]]| -> Vec<u8> {
+        let peindre = |transmittance: &[Traversee]| -> Vec<u8> {
             let mut rvb = vec![0u8; cote * cote * 3];
             for i in 0..cote * cote {
                 let dans_la_matiere = carte.valeurs[i] > 0.0;
                 for canal in 0..3 {
                     let lumiere = if dans_la_matiere {
-                        SOLEIL * transmittance[i][canal]
+                        SOLEIL * transmittance[i].transmittance[canal] + transmittance[i].emise[canal]
                     } else {
                         FOND[canal]
                     };
@@ -873,9 +958,9 @@ mod tests {
 
         // ── Ce que ce test contrôle vraiment ─────────────────────────────────────────────────
         // 1. Le champ CHANGE l'image. Sans ça, tout ce fichier serait décoratif.
-        let homogene = integrer_le_champ(&carte, camera, direction, 48, |_, _, _| CHAIR);
+        let homogene = integrer_le_champ(&carte, camera, direction, 48, |_, _, _| Matiere::absorbante(CHAIR));
         let ecart: f32 = (0..cote * cote)
-            .map(|i| (fine[i][0] - homogene[i][0]).abs())
+            .map(|i| (fine[i].transmittance[0] - homogene[i].transmittance[0]).abs())
             .sum::<f32>()
             / (cote * cote) as f32;
         assert!(ecart > 0.004, "le champ ne change presque rien ({ecart}) — il n'est pas lu");
@@ -906,6 +991,176 @@ mod tests {
         assert!(
             rg <= rf,
             "quatre pas AGITENT l'image ({rg:.3} contre {rf:.3}) — ce sont des artefacts, pas une degradation"
+        );
+    }
+
+    /// ⭐⭐⭐ **LA SUCETTE** — et c'est elle qui a exigé le terme de source.
+    ///
+    /// Il a proposé cette image comme cible : une boule de sucre bleu à contre-jour, pleine de
+    /// bulles. **Elle demande quatre choses que la nectarine ne demandait pas**, et une seule
+    /// manquait vraiment.
+    ///
+    /// | Ce que l'image montre | Ce qu'il a fallu |
+    /// |---|---|
+    /// | La teinte qui **change** avec l'épaisseur (cyan au bord, outremer au cœur) | rien — c'est déjà `σ` par canal |
+    /// | La **bande verticale** nette (un feuillet de colorant mal mélangé) | rien — c'est un champ inhomogène |
+    /// | Les **bulles argentées** | ⭐ le terme de SOURCE, qui n'existait pas |
+    /// | Le fond replié par la sphère-lentille, le reflet de la vitre | ⛔ **rien : on ne dévie aucun rayon** |
+    ///
+    /// ⚠ **Ce test ne rend donc PAS la sucette de la photo.** Il rend ce qu'un milieu inhomogène à
+    /// inclusions peut donner sans jamais faire tourner un rayon. *La différence entre les deux est
+    /// exactement la liste du chantier suivant, et elle est écrite plutôt que devinée.*
+    #[test]
+    fn une_sucette_bleue_et_ses_bulles() {
+        let (sommets, indices) = Primitives::create_uv_sphere(1.0, 96, 96);
+        let positions: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
+            .collect();
+
+        let cote = 512usize;
+        let camera = Vec3::new(0.0, 0.0, 3.6);
+        let fov = 36f32.to_radians();
+        let vue = Mat4::look_at_rh(camera, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+        let projection = Mat4::perspective_rh(fov, 1.0, 0.1, 100.0);
+        let carte = rendre(&positions, &indices, projection * vue, camera, cote, cote);
+
+        let tangente = (fov * 0.5).tan();
+        let direction = move |x: usize, y: usize| -> Vec3 {
+            let ndc_x = (x as f32 + 0.5) / cote as f32 * 2.0 - 1.0;
+            // Le retournement de `rendre`, à l'identique — les deux ne peuvent pas diverger sans
+            // que le champ se retrouve décalé de haut en bas.
+            let ndc_y = 1.0 - (y as f32 + 0.5) / cote as f32 * 2.0;
+            Vec3::new(ndc_x * tangente, ndc_y * tangente, -1.0).normalize()
+        };
+
+        // ── LE SUCRE BLEU ────────────────────────────────────────────────────────────────────
+        // Le colorant absorbe dans une bande étroite du ROUGE : c'est pourquoi la teinte ne fait
+        // pas que s'assombrir avec l'épaisseur, elle **vire** — cyan sur un trajet court, outremer
+        // sur un trajet long. Trois nombres suffisent à dire ça.
+        const SUCRE: [f32; 3] = [3.4, 1.15, 0.30];
+        const CELLULE: f32 = 0.155;
+
+        let champ = |p: Vec3, _depuis_la_surface: f32, dl: f32| -> Matiere {
+            // ── Le feuillet de colorant, gelé par l'écoulement ───────────────────────────────
+            // À 150 °C le sirop est cent mille fois plus visqueux que l'eau : deux volumes qui se
+            // rencontrent ne se mélangent pas, ils se collent. La frontière est donc quasi nette —
+            // la diffusion moléculaire n'a eu que quelques secondes avant le figeage.
+            let cote_droit = fondu(-0.17, -0.11, p.x);
+            let concentration = 0.70 + 0.58 * cote_droit;
+            let mut sigma = [
+                SUCRE[0] * concentration,
+                SUCRE[1] * concentration,
+                SUCRE[2] * concentration,
+            ];
+            let mut source = [0.0f32; 3];
+
+            // ── LES BULLES ───────────────────────────────────────────────────────────────────
+            // Aucune n'est modélisée : on demande au point s'il est dans une.
+            let cx = (p.x / CELLULE).floor() as i32;
+            let cy = (p.y / CELLULE).floor() as i32;
+            let cz = (p.z / CELLULE).floor() as i32;
+            let presence = alea(cx, cy, cz, 7);
+
+            if presence > 0.42 {
+                let centre = Vec3::new(
+                    (cx as f32 + alea(cx, cy, cz, 11)) * CELLULE,
+                    (cy as f32 + alea(cx, cy, cz, 13)) * CELLULE,
+                    (cz as f32 + alea(cx, cy, cz, 17)) * CELLULE,
+                );
+                // Stratification : les grosses remontent (poussée ∝ r³, frottement ∝ r), les fines
+                // restent piégées. Le haut est donc plus grossier que le bas.
+                let haut = fondu(-0.6, 0.85, p.y);
+                let rayon = (0.016 + 0.030 * haut) * (0.40 + 0.60 * alea(cx, cy, cz, 23));
+                // Et là où la matière a été tirée, la viscosité a figé les bulles en fuseau avant
+                // que la tension superficielle ait pu les rendre rondes.
+                let etirement = 1.0 + 1.7 * haut;
+                let d = p - centre;
+                let d = Vec3::new(d.x, d.y / etirement, d.z);
+
+                // ⚠ Même règle que pour les fibres : une bulle plus fine que le pas ne s'échantillonne
+                // pas, elle se devine — donc elle s'efface au lieu de scintiller.
+                let nettete = fondu(rayon * 1.6, rayon * 0.5, dl);
+                let dedans = fondu(rayon, rayon * 0.55, d.length()) * nettete;
+
+                // ⭐ **Une bulle n'est pas un trou : c'est un miroir.** Air (n = 1,0) dans du sucre
+                // (n ≈ 1,5) : au-delà de 41,8° d'incidence, la réflexion est TOTALE — donc sur la
+                // plus grande part d'une sphère. Elle renvoie l'ambiante **sans qu'elle ait traversé
+                // le bleu**, ce qui explique qu'on la voie blanche sur fond outremer.
+                for canal in 0..3 {
+                    source[canal] += [30.0, 33.0, 38.0][canal] * dedans;
+                    // Elle bloque aussi ce qui vient de derrière elle.
+                    sigma[canal] += 26.0 * dedans;
+                }
+            }
+
+            Matiere { sigma, source }
+        };
+
+        const SOLEIL: f32 = 7.0;
+        const FOND: [f32; 3] = [0.10, 0.115, 0.14];
+
+        let peindre = |t: &[Traversee]| -> Vec<u8> {
+            let mut rvb = vec![0u8; cote * cote * 3];
+            for i in 0..cote * cote {
+                for canal in 0..3 {
+                    let lumiere = if carte.valeurs[i] > 0.0 {
+                        SOLEIL * t[i].transmittance[canal] + t[i].emise[canal]
+                    } else {
+                        FOND[canal]
+                    };
+                    let affiche = (lumiere / (1.0 + lumiere)).powf(1.0 / 2.2);
+                    rvb[i * 3 + canal] = (affiche.clamp(0.0, 1.0) * 255.0) as u8;
+                }
+            }
+            rvb
+        };
+
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier");
+
+        let fine = integrer_le_champ(&carte, camera, direction, 96, champ);
+        let image = peindre(&fine);
+        std::fs::write(
+            dossier.join("sucette.png"),
+            crate::image::png::encoder(cote as u32, cote as u32, &image).expect("png"),
+        )
+        .expect("ecriture");
+
+        // Le même sucre SANS bulles : pour voir ce que le terme de source apporte, et le mesurer.
+        let sans = integrer_le_champ(&carte, camera, direction, 96, |p, d, dl| {
+            let mut m = champ(p, d, dl);
+            m.source = [0.0; 3];
+            m
+        });
+        let image_sans = peindre(&sans);
+        std::fs::write(
+            dossier.join("sucette-sans-bulles.png"),
+            crate::image::png::encoder(cote as u32, cote as u32, &image_sans).expect("png"),
+        )
+        .expect("ecriture");
+
+        // ⭐ CE QUE CE TEST CONTRÔLE : les bulles ÉCLAIRENT au lieu d'assombrir. C'est toute la
+        // différence entre une inclusion réfléchissante et un trou — et c'est ce qu'un champ
+        // purement absorbant était incapable de produire.
+        let mut plus_clair = 0usize;
+        let mut plus_sombre = 0usize;
+        for i in 0..cote * cote {
+            if carte.valeurs[i] <= 0.0 {
+                continue;
+            }
+            let (a, b) = (image[i * 3] as i32, image_sans[i * 3] as i32);
+            if a > b + 3 {
+                plus_clair += 1;
+            } else if b > a + 3 {
+                plus_sombre += 1;
+            }
+        }
+        println!("bulles : {plus_clair} pixels eclaircis, {plus_sombre} assombris");
+        assert!(
+            plus_clair > plus_sombre * 3,
+            "les bulles assombrissent ({plus_sombre}) plus qu'elles n'eclairent ({plus_clair}) — \
+             elles se comportent en trous, pas en miroirs"
         );
     }
 
