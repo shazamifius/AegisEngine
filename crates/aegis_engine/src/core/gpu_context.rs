@@ -84,7 +84,21 @@ impl GpuContext {
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(app_name)
             .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::make_api_version(0, 1, 4, 0)); // VULKAN 1.4 CORE !
+            // ⚠⚠ 1.3, ET SURTOUT PAS 1.4 — cette ligne annonçait « VULKAN 1.4 CORE ! » jusqu'au
+            // 1er septembre 2026, et c'était une prétention **gratuite** : le moteur ne demande que
+            // des fonctionnalités 1.3 (`dynamic_rendering`, `synchronization2` — voir plus bas) et
+            // n'appelle **aucune** fonction propre à 1.4.
+            //
+            // **Le prix de cette ligne se paie ailleurs que sur cette machine.** Une RTX 4070
+            // annonce 1.4, donc rien ne se voyait ici. Mais un GPU mobile n'y est pas :
+            // l'IMG BXM-8-256 d'un Motorola G54 s'arrête à **Vulkan 1.3**, et le Snapdragon XR2
+            // d'un Meta Quest 2 — la machine de référence du projet — est en dessous. *Déclarer une
+            // version qu'on n'utilise pas, c'est risquer de se faire refuser la toute première
+            // fonction Vulkan du programme, pour rien.*
+            //
+            // ⚠ Ce que ça ne prouve pas : que le moteur démarre sur mobile. Rien n'a jamais tourné
+            // sur un téléphone. Ça retire **un** obstacle certain, pas tous les obstacles.
+            .api_version(vk::make_api_version(0, 1, 3, 0));
 
         let instance_create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
@@ -341,7 +355,10 @@ impl GpuContext {
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(app_name)
             .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::make_api_version(0, 1, 4, 0));
+            // 1.3 pour la même raison que dans `new` — voir le commentaire là-haut. Les deux
+            // chemins doivent déclarer la MÊME version : un banc qui tournerait sous une version
+            // différente du jeu ne mesurerait pas le jeu.
+            .api_version(vk::make_api_version(0, 1, 3, 0));
 
         // Aucune extension d'instance : c'est la différence de fond avec `new`. Rien ici ne sait
         // ce qu'est un écran.
