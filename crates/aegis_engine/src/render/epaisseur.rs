@@ -1748,6 +1748,184 @@ mod tests {
         );
     }
 
+    /// ⭐⭐⭐ **DE COMBIEN L'APPROXIMATION SE TROMPE — mesuré contre une vérité analytique.**
+    ///
+    /// La réfraction à deux interfaces contient **une** approximation, et une seule : pour redresser
+    /// le rayon à la sortie, on emploie la normale de sortie du rayon **DROIT**. Or le rayon dévié
+    /// ne ressort pas au même endroit — donc pas sous la même normale.
+    ///
+    /// **Sur une sphère, la vérité se calcule exactement** (l'intersection rayon-sphère est une
+    /// équation du second degré). On peut donc chiffrer l'erreur au lieu d'en parler.
+    ///
+    /// *L'image précédente était convaincante. Convaincante n'est pas juste, et c'est précisément
+    /// le genre de chose que ce projet refuse de laisser dans le flou.*
+    #[test]
+    fn l_erreur_de_l_approximation_a_deux_interfaces() {
+        const R: f32 = 1.0;
+        const N: f32 = 1.50;
+
+        /// Les deux distances où un rayon coupe la sphère de rayon `R` centrée à l'origine.
+        fn couper(origine: Vec3, direction: Vec3, r: f32) -> Option<(f32, f32)> {
+            let b = origine.dot(direction);
+            let c = origine.dot(origine) - r * r;
+            let d = b * b - c;
+            if d < 0.0 {
+                return None;
+            }
+            let s = d.sqrt();
+            Some((-b - s, -b + s))
+        }
+
+        let camera = Vec3::new(0.0, 0.0, 3.6);
+        let mut erreur_max = 0.0f32;
+        let mut somme = 0.0f32;
+        let mut somme_avance = 0.0f32;
+        let mut somme_itere = 0.0f32;
+        let mut max_avance = 0.0f32;
+        let mut max_itere = 0.0f32;
+        let mut comptes = 0usize;
+        let mut pire_hauteur = 0.0f32;
+        let mut bascules = 0usize;
+        let mut max_itere_meme_regime = 0.0f32;
+        let mut somme_ponderee = 0.0f32;
+        let mut poids = 0.0f32;
+
+        // On balaie des rayons parallèles à l'axe, de plus en plus loin du centre.
+        for k in 0..200 {
+            let hauteur = (k as f32 + 0.5) / 200.0 * R * 0.995;
+            let origine = Vec3::new(hauteur, 0.0, camera.z);
+            let rayon = Vec3::new(0.0, 0.0, -1.0);
+
+            let Some((entree, sortie_droite)) = couper(origine, rayon, R) else {
+                continue;
+            };
+
+            // ── L'entrée : identique dans les deux cas, elle n'est pas en cause ──────────────
+            let p1 = origine + rayon * entree;
+            let n1 = p1 * (1.0 / R);
+            let t1 = refracter(rayon, n1, 1.0 / N).expect("entrer dans le sucre reussit toujours");
+
+            // ── LA VÉRITÉ : où le rayon DÉVIÉ ressort réellement ────────────────────────────
+            let (_, sortie_vraie) = couper(p1, t1, R).expect("un rayon parti de la surface ressort");
+            let p2_vrai = p1 + t1 * sortie_vraie;
+            let n2_vrai = p2_vrai * (1.0 / R);
+            let t2_vrai = refracter(t1, n2_vrai * -1.0, N).unwrap_or_else(|| reflechir(t1, n2_vrai * -1.0));
+
+            // ⚠ On note AUSSI si les deux rayons sont dans le même régime. Au-delà de l'angle
+            // critique la lumière ne sort pas, elle rebrousse : comparer une direction réfractée à
+            // une direction réfléchie n'est pas mesurer une erreur d'approximation, c'est constater
+            // un basculement. **Les mélanger fabriquerait un chiffre qui ne veut rien dire.**
+            let vrai_sort = refracter(t1, n2_vrai * -1.0, N).is_some();
+            let mesurer = |n2: Vec3| -> (f32, bool) {
+                let sort = refracter(t1, n2 * -1.0, N).is_some();
+                let t2 = refracter(t1, n2 * -1.0, N).unwrap_or_else(|| reflechir(t1, n2 * -1.0));
+                (t2_vrai.dot(t2).clamp(-1.0, 1.0).acos().to_degrees(), sort == vrai_sort)
+            };
+
+            // ── ① NAÏVE : la normale de sortie du rayon DROIT ────────────────────────────────
+            let (naive, meme_regime) = mesurer((origine + rayon * sortie_droite) * (1.0 / R));
+
+            // ── ② AVANCER LE LONG DU RAYON DÉVIÉ ─────────────────────────────────────────────
+            // On ne connaît pas la corde du rayon dévié, mais on connaît celle du rayon droit :
+            // on avance de cette longueur-là depuis l'entrée, EN SUIVANT t1. Le point tombe près de
+            // la surface sans être dessus ; sur une sphère, le ramener dessus est une
+            // normalisation. **Dans le cas général, ce serait une lecture de la carte au pixel où
+            // ce point se projette** — la même idée, une texture au lieu d'une formule.
+            let corde = sortie_droite - entree;
+            let (avance, _) = mesurer((p1 + t1 * corde).normalize());
+
+            // ── ③ UNE ITÉRATION DE PLUS ──────────────────────────────────────────────────────
+            // Le point trouvé donne une meilleure corde ; on recommence une fois avec elle.
+            let p_est = (p1 + t1 * corde).normalize() * R;
+            let corde2 = (p_est - p1).length();
+            let (itere, itere_meme_regime) = mesurer((p1 + t1 * corde2).normalize());
+
+            // ⭐ Et l'erreur PONDÉRÉE : près du bord, Fresnel réfléchit presque tout, donc ce qui
+            // traverse ne pèse presque rien dans l'image. Une erreur là-bas coûte moins qu'au
+            // centre — et c'est mesurable plutôt que plaidable.
+            let part_transmise = 1.0 - fresnel(-rayon.dot(n1), 1.0, N);
+            somme_ponderee += itere * part_transmise;
+            poids += part_transmise;
+            if !itere_meme_regime {
+                bascules += 1;
+            } else {
+                max_itere_meme_regime = max_itere_meme_regime.max(itere);
+            }
+            let _ = meme_regime;
+
+            somme += naive;
+            somme_avance += avance;
+            somme_itere += itere;
+            comptes += 1;
+            if naive > erreur_max {
+                erreur_max = naive;
+                pire_hauteur = hauteur;
+            }
+            max_avance = max_avance.max(avance);
+            max_itere = max_itere.max(itere);
+        }
+
+        let n = comptes as f32;
+        println!("─── ERREUR SUR LA DIRECTION SORTANTE, contre la verite analytique ───");
+        println!(
+            "  ① normale du rayon DROIT      : moyenne {:6.2}°   max {:6.2}°  (a {:.0} % du rayon)",
+            somme / n,
+            erreur_max,
+            pire_hauteur / R * 100.0
+        );
+        println!(
+            "  ② avancer le long du devie    : moyenne {:6.2}°   max {:6.2}°",
+            somme_avance / n,
+            max_avance
+        );
+        println!(
+            "  ③ + une iteration             : moyenne {:6.2}°   max {:6.2}°",
+            somme_itere / n,
+            max_itere
+        );
+
+        // ⚠ Ce test ne DÉCIDE pas que l'approximation est acceptable — il enregistre ce qu'elle
+        // coûte, pour que la prochaine session ne le redécouvre pas, et pour qu'une amélioration se
+        // mesure contre un chiffre. **Le seuil est un garde-fou de non-régression, pas un verdict.**
+        println!(
+            "  ③ hors basculement de regime  : max {:6.2}°   ({bascules} rayons sur {comptes} basculent)",
+            max_itere_meme_regime
+        );
+        println!(
+            "  ③ ponderee par ce qui TRAVERSE : {:6.2}°   (Fresnel reflechit presque tout au bord)",
+            somme_ponderee / poids
+        );
+
+        // ── ⚠⚠ CE QUE CES CHIFFRES DISENT, ET IL FAUT LE DIRE FRANCHEMENT ────────────────────
+        //
+        // **L'approximation à deux interfaces est mauvaise sur une bille épaisse.** Dix degrés
+        // d'erreur moyenne sur la direction sortante, ça se voit. Et **un rayon sur cinq bascule de
+        // régime** — il réfracte là où il devrait réfléchir, ou l'inverse : ces pixels-là ne sont
+        // pas imprécis, ils sont faux.
+        //
+        // *L'image de la bille au damier était convaincante. Elle était fausse. C'est exactement ce
+        // qu'on cherchait à savoir, et on ne l'aurait jamais su en la regardant.*
+        //
+        // **Ce qui reste vrai malgré tout :** l'erreur décroît vite avec l'épaisseur traversée. Sur
+        // une vitre, une bulle de savon, une feuille, une paroi mince, la déviation est petite et
+        // l'approximation tient. C'est une bille pleine d'indice 1,5 qui est le pire cas possible.
+        let _ = max_itere;
+        assert!(
+            somme_itere < somme,
+            "la correction n'ameliore meme pas la moyenne : {} contre {}",
+            somme_itere / n,
+            somme / n
+        );
+        assert!(
+            max_itere_meme_regime < 25.0,
+            "hors basculement, l'erreur monte a {max_itere_meme_regime}° — la correction a regresse"
+        );
+        assert!(
+            bascules * 4 < comptes,
+            "{bascules} rayons sur {comptes} basculent de regime : plus du quart de l'image serait faux"
+        );
+    }
+
     /// Un maillage fermé non convexe donne la somme de ses segments de matière, sans un mot de code
     /// en plus. **On n'a rien fait pour : ça tombe de la signature.**
     ///
