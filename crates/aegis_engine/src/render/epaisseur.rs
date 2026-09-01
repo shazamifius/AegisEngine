@@ -313,6 +313,20 @@ struct SommetProjete {
     normale: Vec3,
 }
 
+/// Les quatre cartes qu'une passe remplit, tenues ensemble.
+///
+/// ⚠ **Elles ne sont pas regroupées pour faire plaisir à un lint** : elles décrivent toutes le même
+/// pixel et doivent rester cohérentes entre elles. *Une normale d'entrée qui ne viendrait pas du
+/// triangle ayant gagné la distance d'entrée serait un défaut invisible — les passer séparément
+/// rendait cette faute facile.*
+struct Sorties<'a> {
+    valeurs: &'a mut [f32],
+    entree: &'a mut [f32],
+    sortie: &'a mut [f32],
+    normale_entree: &'a mut [Vec3],
+    normale_sortie: &'a mut [Vec3],
+}
+
 /// Une arête « haut » ou « gauche » au sens de la règle de remplissage.
 ///
 /// ⚠ **C'est cette fonction qui rend le procédé étanche, et c'est tout ce qui sépare une épaisseur
@@ -413,11 +427,13 @@ pub fn rendre(
 
         accumuler_triangle(
             &sommets,
-            &mut valeurs,
-            &mut entree,
-            &mut sortie,
-            &mut normale_entree,
-            &mut normale_sortie,
+            &mut Sorties {
+                valeurs: &mut valeurs,
+                entree: &mut entree,
+                sortie: &mut sortie,
+                normale_entree: &mut normale_entree,
+                normale_sortie: &mut normale_sortie,
+            },
             largeur,
             hauteur,
         );
@@ -443,11 +459,7 @@ pub fn rendre(
 /// orientations opposées à l'écran.
 fn accumuler_triangle(
     sommets: &[SommetProjete; 3],
-    valeurs: &mut [f32],
-    entree: &mut [f32],
-    sortie: &mut [f32],
-    normale_entree: &mut [Vec3],
-    normale_sortie: &mut [Vec3],
+    out: &mut Sorties,
     largeur: usize,
     hauteur: usize,
 ) {
@@ -525,18 +537,18 @@ fn accumuler_triangle(
                 (a.normale * l0 + b.normale * l1 + c.normale * l2).normalize_or_zero();
 
             if aire > 0.0 {
-                valeurs[indice] -= distance;
+                out.valeurs[indice] -= distance;
                 // On entre : la première entrée est la plus proche.
-                if distance < entree[indice] {
-                    entree[indice] = distance;
-                    normale_entree[indice] = interpolee;
+                if distance < out.entree[indice] {
+                    out.entree[indice] = distance;
+                    out.normale_entree[indice] = interpolee;
                 }
             } else {
-                valeurs[indice] += distance;
+                out.valeurs[indice] += distance;
                 // On sort : la dernière sortie est la plus lointaine.
-                if distance > sortie[indice] {
-                    sortie[indice] = distance;
-                    normale_sortie[indice] = interpolee;
+                if distance > out.sortie[indice] {
+                    out.sortie[indice] = distance;
+                    out.normale_sortie[indice] = interpolee;
                 }
             }
         }
@@ -729,7 +741,18 @@ mod tests {
         let mut ne = vec![Vec3::new(0.0, 0.0, 0.0); 32 * 32];
         let mut ns = vec![Vec3::new(0.0, 0.0, 0.0); 32 * 32];
         let mut poser = |t: [SommetProjete; 3], v: &mut Vec<f32>| {
-            accumuler_triangle(&t, v, &mut entree, &mut sortie, &mut ne, &mut ns, 32, 32)
+            accumuler_triangle(
+                &t,
+                &mut Sorties {
+                    valeurs: v,
+                    entree: &mut entree,
+                    sortie: &mut sortie,
+                    normale_entree: &mut ne,
+                    normale_sortie: &mut ns,
+                },
+                32,
+                32,
+            )
         };
         poser([s(10.0, 10.0), s(20.0, 20.0), s(10.0, 20.0)], &mut valeurs);
         poser([s(10.0, 10.0), s(20.0, 10.0), s(20.0, 20.0)], &mut valeurs);
