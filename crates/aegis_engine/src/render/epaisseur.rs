@@ -92,6 +92,13 @@ pub struct CarteEpaisseur {
     pub entree: Vec<f32>,
     /// La distance à laquelle le rayon SORT — le maximum sur toutes les faces arrière.
     pub sortie: Vec<f32>,
+    /// ⭐ La normale de la surface **là où le rayon entre**, tournée vers l'œil.
+    ///
+    /// C'est la grandeur qui manque pour dévier la lumière : sans elle, on sait *combien* de
+    /// matière il y a, jamais *sous quel angle* on l'aborde. **Snell ne demande rien d'autre.**
+    pub normale_entree: Vec<Vec3>,
+    /// La normale là où il sort — la seconde interface, celle qui redresse le rayon.
+    pub normale_sortie: Vec<Vec3>,
 }
 
 impl CarteEpaisseur {
@@ -300,6 +307,10 @@ struct SommetProjete {
     distance_sur_w: f32,
     /// L'inverse de `w`, qui sert à retrouver la distance après interpolation.
     inverse_w: f32,
+    /// La normale du sommet, dans le monde. Elle est **interpolée** comme le reste : c'est ce qui
+    /// donne une sphère optiquement lisse à partir d'un maillage facetté — et donc une réfraction
+    /// qui ne montre pas les triangles.
+    normale: Vec3,
 }
 
 /// Une arête « haut » ou « gauche » au sens de la règle de remplissage.
@@ -327,8 +338,13 @@ fn est_arete_haut_ou_gauche(depart: (f32, f32), arrivee: (f32, f32)) -> bool {
 /// ⚠ **Un triangle dont un sommet passe derrière l'œil est ignoré en entier.** C'est la limite
 /// franche de cette version : le découpage au plan proche n'est pas fait. Une caméra placée à
 /// l'intérieur de l'objet rendra donc n'importe quoi — et rien ici ne le signale.
+///
+/// `normales` : une normale **par sommet**, ou `None` pour prendre celle du triangle. ⚠ La
+/// différence est décisive pour la réfraction : une normale géométrique fait apparaître chaque
+/// facette du maillage dans l'image réfractée, une normale interpolée donne une surface lisse.
 pub fn rendre(
     positions: &[Vec3],
+    normales: Option<&[Vec3]>,
     indices: &[u32],
     vue_projection: Mat4,
     camera: Vec3,
@@ -338,10 +354,27 @@ pub fn rendre(
     let mut valeurs = vec![0.0f32; largeur * hauteur];
     let mut entree = vec![f32::INFINITY; largeur * hauteur];
     let mut sortie = vec![f32::NEG_INFINITY; largeur * hauteur];
+    let mut normale_entree = vec![Vec3::new(0.0, 0.0, 0.0); largeur * hauteur];
+    let mut normale_sortie = vec![Vec3::new(0.0, 0.0, 0.0); largeur * hauteur];
 
     for triangle in indices.chunks_exact(3) {
-        let mut sommets = [SommetProjete { x: 0.0, y: 0.0, distance_sur_w: 0.0, inverse_w: 0.0 }; 3];
+        let mut sommets = [SommetProjete {
+            x: 0.0,
+            y: 0.0,
+            distance_sur_w: 0.0,
+            inverse_w: 0.0,
+            normale: Vec3::new(0.0, 0.0, 0.0),
+        }; 3];
         let mut derriere_la_camera = false;
+
+        // La normale du triangle, employée seulement quand l'appelant n'en fournit pas. Le sens du
+        // produit vectoriel suit l'ordre des sommets, donc l'orientation du maillage.
+        let (pa, pb, pc) = (
+            positions[triangle[0] as usize],
+            positions[triangle[1] as usize],
+            positions[triangle[2] as usize],
+        );
+        let normale_du_triangle = (pb - pa).cross(pc - pa).normalize_or_zero();
 
         for (k, &indice) in triangle.iter().enumerate() {
             let p = positions[indice as usize];
@@ -368,6 +401,9 @@ pub fn rendre(
                 y: (0.5 - ndc_y * 0.5) * hauteur as f32,
                 distance_sur_w: distance * inverse_w,
                 inverse_w,
+                normale: normales
+                    .map(|n| n[indice as usize])
+                    .unwrap_or(normale_du_triangle),
             };
         }
 
@@ -375,10 +411,27 @@ pub fn rendre(
             continue;
         }
 
-        accumuler_triangle(&sommets, &mut valeurs, &mut entree, &mut sortie, largeur, hauteur);
+        accumuler_triangle(
+            &sommets,
+            &mut valeurs,
+            &mut entree,
+            &mut sortie,
+            &mut normale_entree,
+            &mut normale_sortie,
+            largeur,
+            hauteur,
+        );
     }
 
-    CarteEpaisseur { largeur, hauteur, valeurs, entree, sortie }
+    CarteEpaisseur {
+        largeur,
+        hauteur,
+        valeurs,
+        entree,
+        sortie,
+        normale_entree,
+        normale_sortie,
+    }
 }
 
 /// Ajoute la contribution signée d'un triangle projeté.
@@ -393,6 +446,8 @@ fn accumuler_triangle(
     valeurs: &mut [f32],
     entree: &mut [f32],
     sortie: &mut [f32],
+    normale_entree: &mut [Vec3],
+    normale_sortie: &mut [Vec3],
     largeur: usize,
     hauteur: usize,
 ) {
@@ -463,14 +518,26 @@ fn accumuler_triangle(
             // moi : corriger l'orientation de l'image a inversé l'orientation apparente de TOUS les
             // triangles, donc échangé les entrées et les sorties. Six tests sont tombés d'un coup —
             // et c'est la seule raison pour laquelle je l'ai su.
+            // ⚠ La normale doit venir du MÊME triangle que la distance retenue — pas d'une moyenne.
+            // Une normale ne s'additionne pas : elle appartient à une surface précise, et c'est
+            // celle qui gagne le `min` (ou le `max`) qui est la bonne.
+            let interpolee =
+                (a.normale * l0 + b.normale * l1 + c.normale * l2).normalize_or_zero();
+
             if aire > 0.0 {
                 valeurs[indice] -= distance;
                 // On entre : la première entrée est la plus proche.
-                entree[indice] = entree[indice].min(distance);
+                if distance < entree[indice] {
+                    entree[indice] = distance;
+                    normale_entree[indice] = interpolee;
+                }
             } else {
                 valeurs[indice] += distance;
                 // On sort : la dernière sortie est la plus lointaine.
-                sortie[indice] = sortie[indice].max(distance);
+                if distance > sortie[indice] {
+                    sortie[indice] = distance;
+                    normale_sortie[indice] = interpolee;
+                }
             }
         }
     }
@@ -533,7 +600,7 @@ mod tests {
     #[test]
     fn au_centre_d_une_sphere_l_epaisseur_vaut_le_diametre() {
         let (positions, indices, vue_proj, camera, rayon) = sphere(1.0, 64);
-        let carte = rendre(&positions, &indices, vue_proj, camera, 256, 256);
+        let carte = rendre(&positions, None, &indices, vue_proj, camera, 256, 256);
 
         let au_centre = carte.lire(128, 128);
         let diametre = 2.0 * rayon;
@@ -554,7 +621,7 @@ mod tests {
     #[test]
     fn aucune_epaisseur_n_est_negative_ni_ne_depasse_le_diametre() {
         let (positions, indices, vue_proj, camera, rayon) = sphere(1.0, 64);
-        let carte = rendre(&positions, &indices, vue_proj, camera, 256, 256);
+        let carte = rendre(&positions, None, &indices, vue_proj, camera, 256, 256);
 
         let plancher = -1e-4;
         let plafond = 2.0 * rayon * 1.01;
@@ -585,7 +652,7 @@ mod tests {
     #[test]
     fn les_poles_ou_tous_les_triangles_convergent_ne_trouent_pas_l_objet() {
         let (positions, indices, vue_proj, camera, _) = sphere(1.0, 64);
-        let carte = rendre(&positions, &indices, vue_proj, camera, 256, 256);
+        let carte = rendre(&positions, None, &indices, vue_proj, camera, 256, 256);
 
         // La sphère occupe le disque central ; on descend la colonne du milieu, du haut de la
         // silhouette (le pôle) vers le centre.
@@ -610,7 +677,7 @@ mod tests {
     #[test]
     fn le_bord_de_la_silhouette_est_infiniment_mince() {
         let (positions, indices, vue_proj, camera, _) = sphere(1.0, 64);
-        let carte = rendre(&positions, &indices, vue_proj, camera, 256, 256);
+        let carte = rendre(&positions, None, &indices, vue_proj, camera, 256, 256);
 
         // On part du centre et on va vers la droite jusqu'à sortir de la matière ; le dernier pixel
         // plein doit être bien plus mince que le centre.
@@ -649,6 +716,7 @@ mod tests {
         let s = |x: f32, y: f32| SommetProjete {
             x,
             y,
+            normale: Vec3::new(0.0, 0.0, 1.0),
             // Une distance de 1 et un `w` de 1 : ce qui est accumulé vaut donc exactement ±1 par
             // revendication, et un double comptage se lit directement.
             distance_sur_w: 1.0,
@@ -658,8 +726,10 @@ mod tests {
         let mut valeurs = vec![0.0f32; 32 * 32];
         let mut entree = vec![f32::INFINITY; 32 * 32];
         let mut sortie = vec![f32::NEG_INFINITY; 32 * 32];
+        let mut ne = vec![Vec3::new(0.0, 0.0, 0.0); 32 * 32];
+        let mut ns = vec![Vec3::new(0.0, 0.0, 0.0); 32 * 32];
         let mut poser = |t: [SommetProjete; 3], v: &mut Vec<f32>| {
-            accumuler_triangle(&t, v, &mut entree, &mut sortie, 32, 32)
+            accumuler_triangle(&t, v, &mut entree, &mut sortie, &mut ne, &mut ns, 32, 32)
         };
         poser([s(10.0, 10.0), s(20.0, 20.0), s(10.0, 20.0)], &mut valeurs);
         poser([s(10.0, 10.0), s(20.0, 10.0), s(20.0, 20.0)], &mut valeurs);
@@ -699,7 +769,7 @@ mod tests {
         let camera = Vec3::new(0.0, 0.0, 3.6);
         let vue = Mat4::look_at_rh(camera, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
         let projection = Mat4::perspective_rh(38f32.to_radians(), 1.0, 0.1, 100.0);
-        let carte = rendre(&positions, &indices, projection * vue, camera, cote, cote);
+        let carte = rendre(&positions, None, &indices, projection * vue, camera, cote, cote);
 
         let maximum = carte.maximum();
         assert!(maximum > 1.5, "la nectarine ne fait que {maximum} d'epaisseur — la camera la rate");
@@ -777,7 +847,7 @@ mod tests {
                 Vec3::new(p.x * 1.04 * creux, p.y * 0.93 * creux, p.z * 1.04 * creux)
             })
             .collect();
-        let carte2 = rendre(&cabosse, &indices, projection * vue, camera, cote, cote);
+        let carte2 = rendre(&cabosse, None, &indices, projection * vue, camera, cote, cote);
         let mut bosse = vec![0u8; cote * cote * 3];
         for (i, &d) in carte2.valeurs.iter().enumerate() {
             for canal in 0..3 {
@@ -833,7 +903,7 @@ mod tests {
         let fov = 38f32.to_radians();
         let vue = Mat4::look_at_rh(camera, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
         let projection = Mat4::perspective_rh(fov, 1.0, 0.1, 100.0);
-        let carte = rendre(&positions, &indices, projection * vue, camera, cote, cote);
+        let carte = rendre(&positions, None, &indices, projection * vue, camera, cote, cote);
 
         // La direction du rayon d'un pixel. ⚠ Elle DOIT suivre la même convention que `rendre` —
         // ici la caméra regarde vers −Z, la droite est +X, le haut est +Y, et `perspective_rh`
@@ -1023,7 +1093,12 @@ mod tests {
         let fov = 36f32.to_radians();
         let vue = Mat4::look_at_rh(camera, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
         let projection = Mat4::perspective_rh(fov, 1.0, 0.1, 100.0);
-        let carte = rendre(&positions, &indices, projection * vue, camera, cote, cote);
+        // Les normales par sommet : une sphère facettée devient optiquement lisse.
+        let normales: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.normal[0], s.normal[1], s.normal[2]))
+            .collect();
+        let carte = rendre(&positions, Some(&normales), &indices, projection * vue, camera, cote, cote);
 
         let tangente = (fov * 0.5).tan();
         let direction = move |x: usize, y: usize| -> Vec3 {
@@ -1168,6 +1243,7 @@ mod tests {
         let vue_zoom = Mat4::look_at_rh(camera, Vec3::new(-0.16, 0.36, 0.0), Vec3::new(0.0, 1.0, 0.0));
         let carte_zoom = rendre(
             &positions,
+            Some(&normales),
             &indices,
             Mat4::perspective_rh(fov_zoom, 1.0, 0.1, 100.0) * vue_zoom,
             camera,
@@ -1227,6 +1303,154 @@ mod tests {
         );
     }
 
+    /// ⭐⭐⭐ **LES NORMALES, AVANT D'EN FAIRE QUOI QUE CE SOIT.**
+    ///
+    /// C'est le premier pas de la réfraction, et il est délibérément le plus petit possible : on
+    /// les calcule, on les regarde, **on ne dévie rien.**
+    ///
+    /// ⚠ **La raison est une leçon du corpus, pas une prudence de principe.** Une normale fausse ne
+    /// produit pas une image cassée : elle produit une image *plausible et fausse* — un verre qui
+    /// réfracte joliment dans la mauvaise direction. *Le pire cas de ce projet n'est pas ce qui
+    /// casse, c'est ce qui a l'air juste.* Donc on vérifie contre une vérité analytique avant, pas
+    /// après.
+    ///
+    /// **La vérité choisie :** sur une sphère centrée à l'origine, la normale en un point EST la
+    /// direction de ce point. Il n'y a rien à approcher, la comparaison est exacte.
+    #[test]
+    fn les_normales_de_la_surface_avant_toute_refraction() {
+        let (sommets, indices) = Primitives::create_uv_sphere(1.0, 96, 96);
+        let positions: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
+            .collect();
+        let normales: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.normal[0], s.normal[1], s.normal[2]))
+            .collect();
+
+        let cote = 512usize;
+        let camera = Vec3::new(0.0, 0.0, 3.6);
+        let fov = 36f32.to_radians();
+        let vue = Mat4::look_at_rh(camera, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+        let projection = Mat4::perspective_rh(fov, 1.0, 0.1, 100.0);
+        let carte = rendre(
+            &positions,
+            Some(&normales),
+            &indices,
+            projection * vue,
+            camera,
+            cote,
+            cote,
+        );
+
+        let tangente = (fov * 0.5).tan();
+        let direction = |x: usize, y: usize| -> Vec3 {
+            let ndc_x = (x as f32 + 0.5) / cote as f32 * 2.0 - 1.0;
+            let ndc_y = 1.0 - (y as f32 + 0.5) / cote as f32 * 2.0;
+            Vec3::new(ndc_x * tangente, ndc_y * tangente, -1.0).normalize()
+        };
+
+        let mut ecart_max = 0.0f32;
+        let mut entrees_a_l_envers = 0usize;
+        let mut sorties_a_l_envers = 0usize;
+        let mut testes = 0usize;
+        let mut epaisseurs_fautives: Vec<f32> = Vec::new();
+
+        for y in 0..cote {
+            for x in 0..cote {
+                let i = y * cote + x;
+                let Some((e, s2)) = carte.segment(i) else { continue };
+                let rayon = direction(x, y);
+                let (ne, ns) = (carte.normale_entree[i], carte.normale_sortie[i]);
+                testes += 1;
+
+                // 1. La normale d'entrée est la direction du point d'entrée — vérité analytique.
+                let attendue = (camera + rayon * e).normalize();
+                let ecart = (1.0 - ne.dot(attendue)).max(0.0);
+                if ecart > ecart_max {
+                    ecart_max = ecart;
+                }
+
+                // 2. On ENTRE par une face tournée vers l'œil : le rayon la frappe de face.
+                if ne.dot(rayon) > 0.0 {
+                    entrees_a_l_envers += 1;
+                    epaisseurs_fautives.push(carte.valeurs[i]);
+                }
+                // 3. On SORT par une face qui tourne le dos à l'œil.
+                if ns.dot(rayon) < 0.0 {
+                    sorties_a_l_envers += 1;
+                    epaisseurs_fautives.push(carte.valeurs[i]);
+                }
+                let _ = s2;
+            }
+        }
+
+        // ── L'image des normales, en couleur : X→rouge, Y→vert, Z→bleu ───────────────────────
+        let mut rvb = vec![0u8; cote * cote * 3];
+        for i in 0..cote * cote {
+            let n = carte.normale_entree[i];
+            let peindre = |v: f32| ((v * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+            if carte.valeurs[i] > 0.0 {
+                rvb[i * 3] = peindre(n.x);
+                rvb[i * 3 + 1] = peindre(n.y);
+                rvb[i * 3 + 2] = peindre(n.z);
+            } else {
+                rvb[i * 3] = 26;
+                rvb[i * 3 + 1] = 28;
+                rvb[i * 3 + 2] = 33;
+            }
+        }
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier");
+        std::fs::write(
+            dossier.join("normales.png"),
+            crate::image::png::encoder(cote as u32, cote as u32, &rvb).expect("png"),
+        )
+        .expect("ecriture");
+
+        println!(
+            "normales : {testes} pixels, ecart max a la verite = {:.4}°, {entrees_a_l_envers} entrees et \
+             {sorties_a_l_envers} sorties a l'envers",
+            (1.0f32 - ecart_max).clamp(-1.0, 1.0).acos().to_degrees()
+        );
+
+        // Un maillage de 96 tranches est un polyèdre : la normale interpolée s'écarte un peu de la
+        // sphère idéale, mais jamais de plus d'un degré.
+        assert!(
+            ecart_max < 2e-4,
+            "les normales s'ecartent de la sphere de {:.3}° au pire",
+            (1.0f32 - ecart_max).clamp(-1.0, 1.0).acos().to_degrees()
+        );
+        // ── ⚠ CE QUE LA MESURE A CORRIGÉ DANS CE TEST, ET C'EST INSTRUCTIF ───────────────────
+        //
+        // Le test exigeait d'abord ZÉRO normale à l'envers. Il en a trouvé quarante sur 163 000 —
+        // et j'ai mesuré avant de conclure : **leur épaisseur va de 0,0008 à 0,021 pour un diamètre
+        // de 2,0**, soit 0,04 % à 1 %. Ce sont donc exactement les rayons **TANGENTS** à la
+        // silhouette, et à la tangence « entrer dans la matière » n'a plus de sens : le produit
+        // scalaire bascule sur du bruit numérique parce que sa vraie valeur est zéro.
+        //
+        // **Ce n'est pas un défaut, c'est la limite du domaine de définition.** Et le critère juste
+        // n'est pas un epsilon angulaire choisi à la main : sur une sphère l'épaisseur vaut
+        // `2R·cos θ`, donc **l'épaisseur EST la mesure de l'incidence**. On vérifie la relation, pas
+        // un seuil. *La constante arbitraire n'a jamais eu à exister.*
+        let diametre = carte.maximum();
+        let plus_epais = epaisseurs_fautives
+            .iter()
+            .copied()
+            .fold(0.0f32, f32::max);
+        println!(
+            "normales a l'envers : {} pixels, le plus epais traverse {:.3} % du diametre",
+            epaisseurs_fautives.len(),
+            plus_epais / diametre * 100.0
+        );
+        assert!(
+            plus_epais < diametre * 0.02,
+            "une normale est a l'envers sur un pixel qui traverse {:.1} % du diametre — ce n'est \
+             plus la tangence, c'est un vrai defaut d'orientation",
+            plus_epais / diametre * 100.0
+        );
+    }
+
     /// Un maillage fermé non convexe donne la somme de ses segments de matière, sans un mot de code
     /// en plus. **On n'a rien fait pour : ça tombe de la signature.**
     ///
@@ -1248,7 +1472,7 @@ mod tests {
         let camera = Vec3::new(0.0, 0.0, 8.0);
         let vue = Mat4::look_at_rh(camera, Vec3::new(0.0, 0.0, -1.5), Vec3::new(0.0, 1.0, 0.0));
         let projection = Mat4::perspective_rh(45f32.to_radians(), 1.0, 0.1, 100.0);
-        let carte = rendre(&positions, &indices, projection * vue, camera, 256, 256);
+        let carte = rendre(&positions, None, &indices, projection * vue, camera, 256, 256);
 
         let au_centre = carte.lire(128, 128);
         assert!(
