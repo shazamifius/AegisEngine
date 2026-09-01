@@ -343,6 +343,13 @@ pub struct Sortie {
     pub distance: f32,
     /// Combien de tours il a fallu. **Zéro veut dire que l'estimation de départ suffisait.**
     pub iterations: usize,
+    /// ⭐⭐ **Combien de fois la carte a été LUE** — et c'est la grandeur qui décide du budget.
+    ///
+    /// Sur un GPU mobile, la ressource rare n'est pas le calcul mais la **bande passante** : le
+    /// Quest 2 dispose d'environ **87 octets par pixel pour toute l'image**. Un pas de Newton, lui,
+    /// ne coûte presque aucun calcul — il coûte **une lecture de texture**. *C'est donc ce compteur,
+    /// et pas le temps de cette machine-ci, qui se transpose à une machine qu'on n'a pas.*
+    pub lectures: usize,
     /// ⚠ **Faux = on a épuisé le budget sans que le critère soit atteint.** Le point rendu est
     /// alors le meilleur qu'on ait, et il n'est adossé à aucune garantie.
     pub convergee: bool,
@@ -430,7 +437,14 @@ where
     // Ce qu'on lit de la carte au point courant : le point de la face arrière que ce pixel voit,
     // sa normale, et où il tombe à l'écran. `None` dès que la question n'a pas de réponse.
     let carte = vue.carte;
+    // ⚠ Compté ici et nulle part ailleurs : une lecture ratée (hors écran, pas de matière) coûte
+    // la même bande passante qu'une lecture réussie. **Ne compter que les succès mentirait sur le
+    // budget**, et dans le sens agréable.
+    // `Cell` plutôt qu'un `mut` capturé : la fermeture reste `Fn`, donc elle peut être appelée dans
+    // la boucle **et** relue à la fin sans que l'emprunt gêne.
+    let lectures = std::cell::Cell::new(0usize);
     let lire = |s: f32| -> Option<(Vec3, Vec3, f32, f32)> {
+        lectures.set(lectures.get() + 1);
         let (px, py) = (vue.projeter)(depart + direction * s)?;
 
         // Hors de l'image : en espace écran, ce qui n'est pas dessiné n'existe pas.
@@ -508,6 +522,7 @@ where
         normale,
         distance: s,
         iterations: tours,
+        lectures: lectures.get(),
         convergee,
     })
 }
@@ -2901,6 +2916,201 @@ mod tests {
              facteur 10",
             somme_n / c,
             somme_a / c
+        );
+    }
+
+    /// ⭐⭐⭐ **CE QUE ÇA COÛTE SUR UNE MACHINE QU'ON N'A PAS** — le compteur de travail portable.
+    ///
+    /// ## ⚠⚠ Le problème, posé franchement : il n'y a pas de Quest 2 dans cette maison
+    ///
+    /// Tout le budget du projet — **13,9 ms pour deux yeux à 72 Hz** — est **calculé** à partir de
+    /// specs publiées reprises de seconde main, et **jamais mesuré**. Aucun Quest 2 n'a jamais fait
+    /// tourner Aegis, et il n'existe ni portage Android, ni OpenXR, ni rendu stéréo. *Donc même
+    /// avec un casque sous la main, on ne pourrait rien mesurer aujourd'hui.*
+    ///
+    /// **Mesurer des millisecondes ici serait donc une fausse certitude** : le temps de CETTE
+    /// machine ne dit rien de ce que coûte le programme sur une machine modeste. *C'est son
+    /// intuition à lui, formulée le 9 août 2026 sur le globe, et elle était juste — le compteur de
+    /// travail portable est né de là.*
+    ///
+    /// ## Ce qu'on mesure à la place, et qui se transpose
+    ///
+    /// **Le nombre de LECTURES DE CARTE par pixel.** Sur un GPU mobile, un pas de Newton ne coûte
+    /// presque aucun calcul : il coûte **une lecture de texture**, et la bande passante est la
+    /// ressource rare — *87 octets par pixel pour toute l'image*, G-buffer et post-traitement
+    /// compris. **Ce compteur-là ne dépend d'aucune machine.**
+    ///
+    /// ## ⭐ Et le chiffre qui compte n'est pas le budget, c'est la MOYENNE
+    ///
+    /// Newton s'arrête dès qu'il a convergé. Un budget de 8 pas ne veut donc pas dire 8 lectures
+    /// par pixel — il dit *au plus* 8. **C'est la distribution réelle qui décide du coût**, et
+    /// c'est elle que ce test rend.
+    #[test]
+    fn le_cout_de_newton_se_compte_en_lectures_pas_en_millisecondes() {
+        const R: f32 = 1.0;
+        const N_SUCRE: f32 = 1.50;
+        const COTE: usize = 512;
+
+        let (sommets, indices) = Primitives::create_uv_sphere(R, 96, 96);
+        let positions: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
+            .collect();
+        let normales: Vec<Vec3> = sommets
+            .iter()
+            .map(|s| Vec3::new(s.normal[0], s.normal[1], s.normal[2]))
+            .collect();
+
+        let (camera, vue_proj, projeter, direction) = banc_de_refraction(COTE);
+        let carte = rendre(
+            &positions,
+            Some(&normales),
+            &indices,
+            vue_proj,
+            camera,
+            COTE,
+            COTE,
+        );
+        let vue = VueEcran {
+            carte: &carte,
+            camera,
+            projeter: &projeter,
+            direction_pixel: &direction,
+        };
+
+        // Un budget large : on veut voir où Newton s'arrête TOUT SEUL, pas où on l'arrête.
+        let mut histogramme = [0usize; 12];
+        let mut total_lectures = 0usize;
+        let mut pixels = 0usize;
+        let mut convergés = 0usize;
+        let mut somme_erreur = 0.0f64;
+
+        for y in 0..COTE {
+            for x in 0..COTE {
+                let i = y * COTE + x;
+                let Some((e, s2)) = carte.segment(i) else {
+                    continue;
+                };
+                let rayon = direction(x, y);
+                let Some(devie) = refracter(rayon, carte.normale_entree[i], 1.0 / N_SUCRE) else {
+                    continue;
+                };
+                let p1 = camera + rayon * e;
+
+                pixels += 1;
+                let Some(t) = chercher_la_sortie(
+                    &vue,
+                    p1,
+                    devie,
+                    s2 - e,
+                    Budget { iterations_max: 8, tolerance_pixels: 0.5 },
+                ) else {
+                    // Un échec a quand même coûté ses lectures — on ne peut pas les compter ici
+                    // (la fonction ne rend rien), et c'est une limite honnête de ce banc.
+                    continue;
+                };
+
+                total_lectures += t.lectures;
+                histogramme[t.lectures.min(11)] += 1;
+                if t.convergee {
+                    convergés += 1;
+                }
+
+                // L'erreur atteinte quand Newton décide lui-même de s'arrêter.
+                if let Some((_, t_vrai)) = couper_la_sphere(p1, devie, R) {
+                    let angle = |ns: Vec3| -> Vec3 {
+                        refracter(devie, ns * -1.0, N_SUCRE)
+                            .unwrap_or_else(|| reflechir(devie, ns * -1.0))
+                    };
+                    let vraie = angle((p1 + devie * t_vrai) * (1.0 / R));
+                    somme_erreur +=
+                        angle(t.normale).dot(vraie).clamp(-1.0, 1.0).acos().to_degrees() as f64;
+                }
+            }
+        }
+
+        let moyenne_lectures = total_lectures as f64 / pixels.max(1) as f64;
+        println!("\n  ── LE TRAVAIL, compté en lectures de carte ──");
+        println!("  {pixels} pixels de bille · budget 8 pas · tolerance 0,5 px");
+        println!(
+            "  convergence spontanee : {:.1} % des pixels",
+            convergés as f64 / pixels.max(1) as f64 * 100.0
+        );
+        println!("  erreur atteinte      : {:.3}°", somme_erreur / pixels.max(1) as f64);
+        println!("  LECTURES PAR PIXEL   : {moyenne_lectures:.2} en moyenne\n");
+
+        let mut cumul = 0usize;
+        for (n, &compte) in histogramme.iter().enumerate() {
+            if compte == 0 {
+                continue;
+            }
+            cumul += compte;
+            println!(
+                "    {n:2} lecture(s) : {compte:6} pixels  ({:5.1} % · cumul {:5.1} %)",
+                compte as f64 / pixels as f64 * 100.0,
+                cumul as f64 / pixels as f64 * 100.0
+            );
+        }
+
+        // ── ⭐ CE QUE ÇA DONNE EN OCTETS, ET LA COMPARAISON AU BUDGET QUEST 2 ─────────────────
+        //
+        // ⚠ Ce calcul suppose un format, et le format n'est pas encore choisi. Les trois lignes
+        // disent donc ce que CHAQUE choix coûterait — c'est un cadrage, pas une mesure.
+        // ── ⭐ CE QUE ÇA DONNE EN OCTETS, ET LA VRAIE QUESTION QUE ÇA POSE ────────────────────
+        //
+        // ⚠⚠ LE PIÈGE QUE CE BLOC ÉVITE : « 26 octets par pixel » ne veut rien dire tant qu'on n'a
+        // pas dit **par pixel de QUOI**. Newton ne tourne que sur les pixels de VERRE — le reste de
+        // l'écran ne le paie pas. *Rapporter le coût à l'écran entier le divise par la surface de
+        // verre, et c'est cette fraction-là qui décide si ça tient.*
+        //
+        // Ici la bille occupe une part énorme de l'image (un gros plan) : c'est le pire cas, et
+        // c'est volontaire.
+        let fraction = pixels as f64 / (COTE * COTE) as f64;
+        println!("\n  ── CE QUE ÇA COÛTE EN BANDE PASSANTE ──");
+        println!(
+            "  budget d'une image sur Quest 2 : ~87 o/pixel  ⚠ CALCULE, jamais mesure — \
+             aucun Quest 2 n'a fait tourner Aegis"
+        );
+        println!("  le verre couvre ici {:.0} % de l'ecran (gros plan = pire cas)", fraction * 100.0);
+        for (format, octets) in [
+            ("distance + normale en RGBA16F", 8.0),
+            ("RGBA8, normale octaedrique", 4.0),
+        ] {
+            let par_pixel_de_verre = moyenne_lectures * octets;
+            let par_pixel_d_ecran = par_pixel_de_verre * fraction;
+            // ⭐ Et la question renversée, qui est la seule vraiment utile : en s'accordant 10 % du
+            // budget pour la réfraction, quelle part de l'écran peut être en verre ?
+            let part_max = 8.7 / par_pixel_de_verre * 100.0;
+            println!(
+                "    {format:30} → {par_pixel_de_verre:5.1} o par pixel de verre \
+                 · {par_pixel_d_ecran:4.1} o par pixel d'ecran ici \
+                 · tient jusqu'a {part_max:4.0} % d'ecran en verre"
+            );
+        }
+        println!(
+            "\n  ⚠ Ce calcul ne compte QUE les lectures de Newton. Il ne compte pas la production\n  \
+             de la carte des faces arriere (une passe de plus), ni le reste de l'image."
+        );
+
+        // ── LES CRITÈRES, écrits d'avance ─────────────────────────────────────────────────────
+        // 1. Newton doit s'arrêter tout seul bien avant son budget : sinon la tolérance ne sert à
+        //    rien et le coût serait celui du pire cas pour tout le monde.
+        assert!(
+            moyenne_lectures < 5.0,
+            "Newton lit {moyenne_lectures:.2} fois la carte par pixel — trop pour un budget mobile"
+        );
+        // ⚠ ET LA BORNE INFÉRIEURE, qui n'est pas une formalité : sans elle, un compteur cassé à
+        // zéro ferait passer le critère ci-dessus **haut la main**, et on annoncerait un coût nul.
+        // *Un seuil qui n'a qu'un côté ne garde que la moitié de ce qu'on croit.* Deux lectures est
+        // le plancher physique : un pas de Newton, plus la lecture finale de la normale.
+        assert!(
+            moyenne_lectures >= 2.0,
+            "moins de 2 lectures par pixel est impossible — le compteur ment ({moyenne_lectures:.2})"
+        );
+        // 2. Et l'immense majorité doit converger d'elle-même, pas être coupée par le budget.
+        assert!(
+            convergés * 10 > pixels * 9,
+            "seulement {convergés} pixels sur {pixels} convergent d'eux-memes"
         );
     }
 }
