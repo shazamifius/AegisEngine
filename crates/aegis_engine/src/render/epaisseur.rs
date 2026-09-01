@@ -1039,7 +1039,17 @@ mod tests {
         // pas que s'assombrir avec l'épaisseur, elle **vire** — cyan sur un trajet court, outremer
         // sur un trajet long. Trois nombres suffisent à dire ça.
         const SUCRE: [f32; 3] = [3.4, 1.15, 0.30];
-        const CELLULE: f32 = 0.155;
+        // ⚠⚠ LA CELLULE EST ANISOTROPE, ET C'EST UNE CORRECTION, PAS UN RÉGLAGE.
+        //
+        // La première version semait les bulles dans une grille CUBIQUE de 0,155. Une bulle étirée
+        // par l'écoulement atteignait 0,124 de demi-longueur pour une demi-cellule de 0,0775 :
+        // **elle débordait, donc elle était tranchée net par les faces du cube.** D'où les carrés
+        // qu'il a vus en zoomant — ce n'était pas un phénomène de rendu, c'était ma grille.
+        //
+        // *La règle qui en sort, et elle vaut pour tout champ semé sur une grille : une inclusion
+        // ne doit JAMAIS pouvoir sortir de sa cellule, sinon la grille se voit.* Ici la cellule
+        // s'allonge comme les bulles, ce qui est aussi ce que fait la matière étirée.
+        const CELLULE: [f32; 3] = [0.150, 0.360, 0.150];
 
         let champ = |p: Vec3, _depuis_la_surface: f32, dl: f32| -> Matiere {
             // ── Le feuillet de colorant, gelé par l'écoulement ───────────────────────────────
@@ -1057,16 +1067,19 @@ mod tests {
 
             // ── LES BULLES ───────────────────────────────────────────────────────────────────
             // Aucune n'est modélisée : on demande au point s'il est dans une.
-            let cx = (p.x / CELLULE).floor() as i32;
-            let cy = (p.y / CELLULE).floor() as i32;
-            let cz = (p.z / CELLULE).floor() as i32;
+            let cx = (p.x / CELLULE[0]).floor() as i32;
+            let cy = (p.y / CELLULE[1]).floor() as i32;
+            let cz = (p.z / CELLULE[2]).floor() as i32;
             let presence = alea(cx, cy, cz, 7);
 
-            if presence > 0.42 {
+            if presence > 0.18 {
+                // La bulle reste au CŒUR de sa cellule : les 20 % de bord lui sont interdits, ce
+                // qui garantit qu'elle ne peut pas la franchir même à sa taille maximale.
+                let place = |g: u32, axe: usize| (0.2 + 0.6 * alea(cx, cy, cz, g)) * CELLULE[axe];
                 let centre = Vec3::new(
-                    (cx as f32 + alea(cx, cy, cz, 11)) * CELLULE,
-                    (cy as f32 + alea(cx, cy, cz, 13)) * CELLULE,
-                    (cz as f32 + alea(cx, cy, cz, 17)) * CELLULE,
+                    cx as f32 * CELLULE[0] + place(11, 0),
+                    cy as f32 * CELLULE[1] + place(13, 1),
+                    cz as f32 * CELLULE[2] + place(17, 2),
                 );
                 // Stratification : les grosses remontent (poussée ∝ r³, frottement ∝ r), les fines
                 // restent piégées. Le haut est donc plus grossier que le bas.
@@ -1078,9 +1091,15 @@ mod tests {
                 let d = p - centre;
                 let d = Vec3::new(d.x, d.y / etirement, d.z);
 
-                // ⚠ Même règle que pour les fibres : une bulle plus fine que le pas ne s'échantillonne
-                // pas, elle se devine — donc elle s'efface au lieu de scintiller.
-                let nettete = fondu(rayon * 1.6, rayon * 0.5, dl);
+                // ⚠⚠ LE SECOND DÉFAUT QU'IL A VU : le grain, les hachures dans les bulles. Ce n'est
+                // pas la grille, c'est du **crénelage d'échantillonnage** — le même phénomène que
+                // les taches de la nectarine à quatre pas, en plus fin. Mesuré : 4,4 échantillons
+                // par bulle, là où il en faut au moins huit pour qu'une sphère cesse de scintiller.
+                //
+                // Mon seuil précédent (`rayon × 1,6`) était bien trop permissif : il laissait
+                // passer des bulles vues par quatre points. Celui-ci exige un pas quatre fois plus
+                // fin que le rayon — et à ce prix, il FAUT payer les pas.
+                let nettete = fondu(rayon * 0.55, rayon * 0.22, dl);
                 let dedans = fondu(rayon, rayon * 0.55, d.length()) * nettete;
 
                 // ⭐ **Une bulle n'est pas un trou : c'est un miroir.** Air (n = 1,0) dans du sucre
@@ -1119,7 +1138,7 @@ mod tests {
         let dossier = std::path::Path::new("target/preuves");
         std::fs::create_dir_all(dossier).expect("dossier");
 
-        let fine = integrer_le_champ(&carte, camera, direction, 96, champ);
+        let fine = integrer_le_champ(&carte, camera, direction, 224, champ);
         let image = peindre(&fine);
         std::fs::write(
             dossier.join("sucette.png"),
@@ -1128,7 +1147,7 @@ mod tests {
         .expect("ecriture");
 
         // Le même sucre SANS bulles : pour voir ce que le terme de source apporte, et le mesurer.
-        let sans = integrer_le_champ(&carte, camera, direction, 96, |p, d, dl| {
+        let sans = integrer_le_champ(&carte, camera, direction, 224, |p, d, dl| {
             let mut m = champ(p, d, dl);
             m.source = [0.0; 3];
             m
@@ -1137,6 +1156,50 @@ mod tests {
         std::fs::write(
             dossier.join("sucette-sans-bulles.png"),
             crate::image::png::encoder(cote as u32, cote as u32, &image_sans).expect("png"),
+        )
+        .expect("ecriture");
+
+        // ── LE GROS PLAN — parce qu'il juge en zoomant, et il a raison ────────────────────────
+        // ⚠ Agrandir une image de 512 ne montre que ses pixels ; ça donne l'illusion d'un défaut
+        // là où il n'y en a pas, et ça en cache d'autres. **Un gros plan se RECALCULE**, avec un
+        // champ de vision plus étroit — c'est la même scène, vue de plus près, à pleine résolution.
+        // *C'est ce qui a permis de voir que les bulles étaient tranchées par leur cellule.*
+        let fov_zoom = 9f32.to_radians();
+        let vue_zoom = Mat4::look_at_rh(camera, Vec3::new(-0.16, 0.36, 0.0), Vec3::new(0.0, 1.0, 0.0));
+        let carte_zoom = rendre(
+            &positions,
+            &indices,
+            Mat4::perspective_rh(fov_zoom, 1.0, 0.1, 100.0) * vue_zoom,
+            camera,
+            cote,
+            cote,
+        );
+        // La direction doit suivre la MÊME caméra : elle est tournée, donc ses axes le sont aussi.
+        let avant = (Vec3::new(-0.16, 0.36, 0.0) - camera).normalize();
+        let droite = avant.cross(Vec3::new(0.0, 1.0, 0.0)).normalize();
+        let dessus = droite.cross(avant).normalize();
+        let tan_zoom = (fov_zoom * 0.5).tan();
+        let direction_zoom = move |x: usize, y: usize| -> Vec3 {
+            let ndc_x = (x as f32 + 0.5) / cote as f32 * 2.0 - 1.0;
+            let ndc_y = 1.0 - (y as f32 + 0.5) / cote as f32 * 2.0;
+            (avant + droite * (ndc_x * tan_zoom) + dessus * (ndc_y * tan_zoom)).normalize()
+        };
+        let zoom = integrer_le_champ(&carte_zoom, camera, direction_zoom, 224, champ);
+        let mut rvb_zoom = vec![0u8; cote * cote * 3];
+        for i in 0..cote * cote {
+            for canal in 0..3 {
+                let lumiere = if carte_zoom.valeurs[i] > 0.0 {
+                    SOLEIL * zoom[i].transmittance[canal] + zoom[i].emise[canal]
+                } else {
+                    FOND[canal]
+                };
+                rvb_zoom[i * 3 + canal] =
+                    (((lumiere / (1.0 + lumiere)).powf(1.0 / 2.2)).clamp(0.0, 1.0) * 255.0) as u8;
+            }
+        }
+        std::fs::write(
+            dossier.join("sucette-gros-plan.png"),
+            crate::image::png::encoder(cote as u32, cote as u32, &rvb_zoom).expect("png"),
         )
         .expect("ecriture");
 
