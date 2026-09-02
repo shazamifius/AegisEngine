@@ -1,0 +1,286 @@
+// ── LA RÉFRACTION — où le rayon ressort vraiment ────────────────────────────────────────────
+//
+// Le premier shader du moteur qui fasse de la physique de la MATIÈRE. Jusqu'ici le moteur savait
+// simuler une caméra qui regarde (halo, courbe de tonalité, intégration sur le photosite) et rien
+// de ce qu'elle regarde : sur les dix-huit phénomènes de l'étalon, il en exprimait trois, tous du
+// côté de l'objectif.
+//
+// ## Ce que ce shader calcule, et dans quel ordre
+//
+//   1. le rayon entre dans la matière  → Snell dévie sa direction ;
+//   2. **où ressort-il ?** — la question difficile, et c'est la méthode de Newton qui répond ;
+//   3. le rayon ressort               → Snell le dévie une seconde fois ;
+//   4. ce qui a survécu du fond       → Beer-Lambert sur la longueur RÉELLEMENT traversée.
+//
+// ## ⭐⭐ POURQUOI NEWTON, ET POURQUOI SA DÉRIVÉE EST GRATUITE
+//
+// Une fois dévié à l'entrée, le rayon ne va plus vers le pixel qu'on est en train de calculer : il
+// part de travers. Il faut donc trouver **où il perce la face arrière**, alors qu'on ne connaît
+// cette face qu'à travers une carte indexée par l'écran. C'est chercher la racine de
+//
+//     g(s) = profondeur de la surface vue en projetant (départ + s·direction)
+//          − s
+//
+// et Newton exige la dérivée de `g`. **C'est là que la géométrie fait un cadeau : le gradient de
+// cette fonction EST la normale de la surface** (JCGT vol. 15 n° 1, 2026). La dérivée ne s'estime
+// donc pas par différences finies — elle **se lit** dans la carte, à côté de la profondeur, sans
+// une seule lecture supplémentaire. Le pas de Newton se réécrit alors comme l'intersection du
+// rayon avec le **plan tangent** au point courant.
+//
+// Convergence quadratique, **une lecture de carte par tour** : le nombre d'erreurs est divisé
+// par lui-même à chaque pas.
+//
+// ## ⚠⚠ LA LECTURE FINALE N'EST PAS UN DÉTAIL
+//
+// Sans elle, la normale rendue est celle d'AVANT le dernier pas : Newton corrige la position sans
+// que la normale suive — or c'est la normale, pas la position, qui entre dans Snell à la sortie.
+// *Mesuré sur le banc : « zéro pas » et « un pas » donnaient exactement le même angle, au millième
+// près. Le mécanisme avait l'air de tourner et ne servait à rien.*
+//
+// ## ⚠ CE QUE CE SHADER NE FAIT PAS ENCORE, ET IL FAUT LE LIRE AVANT DE S'EN SERVIR
+//
+// **La carte de la face arrière est calculée ANALYTIQUEMENT** (`carte_arriere`), pour une sphère
+// dont le centre et le rayon arrivent par constantes poussées. Ce n'est pas un jouet et ce n'est
+// pas non plus le moteur fini : c'est ce qui **isole l'erreur**. Avec une vraie rastérisation, un
+// écart peut venir de la rastérisation *ou* de la physique ; avec une carte exacte, l'écart mesuré
+// est celui du shader et de rien d'autre. Le jour où les vraies cartes arrivent, **une seule
+// fonction change** — tout le reste, Newton compris, est déjà le code définitif.
+//
+// ## ⚠ AUCUNE COULEUR N'EST ÉCRITE ICI, et un test le garde
+//
+// Le fond d'essai est en **niveaux de gris** ; l'absorption `sigma` arrive par canal depuis
+// l'appelant. *Le moteur fournit ce qui est VRAI, le jeu fournit ce qui est BEAU* — et sur une
+// mesure, un fond achromatique a un second mérite : aucune teinte ne peut masquer un canal faux.
+
+struct Constantes {
+    // La caméra décrite par sa base, et non par une matrice : la même description sert à
+    // PROJETER (monde → pixel, ce dont Newton a besoin) et à DÉ-PROJETER (pixel → direction).
+    // Deux matrices auraient coûté 128 octets à elles seules — tout le budget garanti.
+    position: vec4<f32>,   // xyz = l'œil
+    droite: vec4<f32>,     // xyz = axe droit,  w = tangente du demi-champ horizontal
+    haut: vec4<f32>,       // xyz = axe haut,   w = tangente du demi-champ vertical
+    avant: vec4<f32>,      // xyz = axe de visée
+    sphere: vec4<f32>,     // xyz = centre,     w = rayon
+    matiere: vec4<f32>,    // xyz = sigma par canal, w = rapport des indices n1/n2
+    reglages: vec4<f32>,   // xy = taille en pixels, z = mode, w = nombre de tours de Newton
+};
+var<push_constant> k: Constantes;
+
+struct Sortie {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) sommet: u32) -> Sortie {
+    var out: Sortie;
+    // Un seul triangle plus grand que l'écran : aucune diagonale au milieu de l'image, donc
+    // aucune couture où les deux moitiés pourraient être calculées différemment.
+    out.uv = vec2<f32>(f32((sommet << 1u) & 2u), f32(sommet & 2u));
+    let ndc = out.uv * 2.0 - vec2<f32>(1.0);
+    // ⚠ Y inversé à l'avance : naga compile avec ADJUST_COORDINATE_SPACE et retourne le Y de la
+    // position de clip en sortie de vertex. L'oublier retourne l'image entière — ce qui saute aux
+    // yeux sur une scène et ne se voit PAS sur une mesure.
+    out.position = vec4<f32>(ndc.x, -ndc.y, 0.0, 1.0);
+    return out;
+}
+
+// ── LA CAMÉRA, DANS LES DEUX SENS ────────────────────────────────────────────────────────────
+
+/// Pixel → direction du rayon, normalisée.
+fn direction_du_pixel(pixel: vec2<f32>) -> vec3<f32> {
+    let sx = (pixel.x / k.reglages.x) * 2.0 - 1.0;
+    // Y descend dans une image et monte dans le monde. Le retournement est ici, une seule fois.
+    let sy = 1.0 - (pixel.y / k.reglages.y) * 2.0;
+    return normalize(
+        k.avant.xyz
+            + k.droite.xyz * (sx * k.droite.w)
+            + k.haut.xyz * (sy * k.haut.w)
+    );
+}
+
+/// Monde → pixel. `w` vaut 0 quand le point est derrière l'œil : la projection n'a alors aucun
+/// sens géométrique, et il faut le dire plutôt que de rendre un pixel plausible.
+fn projeter(p: vec3<f32>) -> vec3<f32> {
+    let v = p - k.position.xyz;
+    let z = dot(v, k.avant.xyz);
+    if (z <= 1e-6) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let sx = (dot(v, k.droite.xyz) / z) / k.droite.w;
+    let sy = (dot(v, k.haut.xyz) / z) / k.haut.w;
+    return vec3<f32>(
+        (sx * 0.5 + 0.5) * k.reglages.x,
+        (0.5 - sy * 0.5) * k.reglages.y,
+        1.0
+    );
+}
+
+// ── LA CARTE ─────────────────────────────────────────────────────────────────────────────────
+
+/// Ce qu'un pixel voit de la matière : `x` = distance d'entrée, `y` = distance de sortie.
+/// `x < 0` veut dire « rien ici », et c'est la seule façon de le dire.
+fn couper_la_sphere(origine: vec3<f32>, direction: vec3<f32>) -> vec2<f32> {
+    let oc = origine - k.sphere.xyz;
+    let b = dot(oc, direction);
+    let c = dot(oc, oc) - k.sphere.w * k.sphere.w;
+    let discriminant = b * b - c;
+    if (discriminant < 0.0) {
+        return vec2<f32>(-1.0, -1.0);
+    }
+    let racine = sqrt(discriminant);
+    return vec2<f32>(-b - racine, -b + racine);
+}
+
+/// La face ARRIÈRE vue depuis un pixel : `xyz` = le point, `w` = la distance. `w < 0` = rien.
+///
+/// ⚠ **C'est la seule fonction à remplacer** le jour où les cartes viendront d'une rastérisation.
+/// Tout ce qui l'entoure — Newton, la projection, Snell — est déjà le code définitif.
+fn carte_arriere(pixel: vec2<f32>) -> vec4<f32> {
+    let d = direction_du_pixel(pixel);
+    let t = couper_la_sphere(k.position.xyz, d);
+    if (t.y < 0.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+    }
+    return vec4<f32>(k.position.xyz + d * t.y, t.y);
+}
+
+// ── LA PHYSIQUE ──────────────────────────────────────────────────────────────────────────────
+
+/// Snell, sous forme vectorielle.
+///
+/// ⭐ **La réflexion totale interne n'est pas un cas à coder** : c'est ce qui reste quand la racine
+/// n'existe pas. L'angle critique — 41,81° pour un indice de 1,5 — tombe de l'équation, et n'est
+/// écrit nulle part. Un `if angle > 41.81` aurait été une constante arbitraire à justifier pour
+/// toujours, et fausse dès le premier matériau différent.
+fn refracter(incident: vec3<f32>, normale: vec3<f32>, eta: f32) -> vec4<f32> {
+    let cos_i = -dot(normale, incident);
+    let reste = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
+    if (reste < 0.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0); // pas de racine → réflexion totale
+    }
+    return vec4<f32>(eta * incident + (eta * cos_i - sqrt(reste)) * normale, 1.0);
+}
+
+/// Un fond d'essai **achromatique**, contrasté et directionnel : sans structure visible, une
+/// réfraction juste et une réfraction fausse donnent la même image plate.
+/// ⚠ L'azimut se prend en `atan2(x, z)`, pas `atan2(z, x)` : autour de l'axe de visée, le premier
+/// varie comme `x` et couvre bien le champ, le second est coincé près de π/2 et ne bouge presque
+/// pas. *Écrit à l'envers en premier jet, l'image sortait en dégradé lisse — juste, et incapable
+/// de montrer la moindre déviation. Un fond sans structure rend une réfraction fausse et une
+/// réfraction juste identiques à l'œil.*
+fn fond(direction: vec3<f32>) -> vec3<f32> {
+    let u = atan2(direction.x, direction.z) * 20.0;
+    let v = asin(clamp(direction.y, -1.0, 1.0)) * 20.0;
+    let damier = sin(u) * sin(v);
+    let clair = 0.5 + 0.45 * sign(damier) * pow(abs(damier), 0.25);
+    return vec3<f32>(clair);
+}
+
+// ── LE CŒUR : CHERCHER LA SORTIE ─────────────────────────────────────────────────────────────
+
+/// Renvoie `xyz` = la normale de la face arrière au point de sortie, `w` = la distance parcourue
+/// DANS la matière. `w < 0` quand la recherche échoue.
+fn chercher_la_sortie(depart: vec3<f32>, direction: vec3<f32>, estimation: f32) -> vec4<f32> {
+    var s = estimation;
+    let tours = i32(k.reglages.w);
+
+    for (var tour = 0; tour < tours; tour = tour + 1) {
+        let point = depart + direction * s;
+        let ecran = projeter(point);
+        if (ecran.z == 0.0) { break; }
+
+        let surface = carte_arriere(ecran.xy);
+        if (surface.w < 0.0) { break; }
+
+        // La normale de la sphère au point trouvé — c'est ELLE, le gradient de `g`, et c'est
+        // pourquoi Newton ne coûte aucune lecture de plus.
+        let normale = normalize(surface.xyz - k.sphere.xyz);
+
+        let denominateur = dot(direction, normale);
+        if (abs(denominateur) < 1e-5) { break; }
+
+        // Le pas de Newton, réécrit : l'intersection du rayon avec le plan tangent.
+        let suivant = dot(surface.xyz - depart, normale) / denominateur;
+        if (suivant <= 0.0) { break; }
+
+        // Converger, c'est cesser de bouger À L'ÉCRAN — la seule grandeur que la carte connaisse.
+        let apres = projeter(depart + direction * suivant);
+        s = suivant;
+        if (apres.z != 0.0 && distance(apres.xy, ecran.xy) < 0.05) { break; }
+    }
+
+    // ⚠⚠ LA LECTURE FINALE. Sans elle, la normale rendue est celle d'avant le dernier pas — et
+    // c'est la normale qui entre dans Snell, pas la position.
+    let point = depart + direction * s;
+    let ecran = projeter(point);
+    if (ecran.z == 0.0) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    let surface = carte_arriere(ecran.xy);
+    if (surface.w < 0.0) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+
+    return vec4<f32>(normalize(surface.xyz - k.sphere.xyz), s);
+}
+
+@fragment
+fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
+    let pixel = entree.position.xy;
+    let regard = direction_du_pixel(pixel);
+    let mode_direction = k.reglages.z > 0.5;
+
+    let t = couper_la_sphere(k.position.xyz, regard);
+    // Rien à cet endroit : on voit le fond directement. En mode direction, la direction du regard
+    // est ce qui sort — un rayon qui ne traverse rien n'est pas dévié, et c'est la bonne réponse.
+    if (t.x < 0.0 || t.y < 0.0) {
+        if (mode_direction) {
+            return vec4<f32>(regard * 0.5 + vec3<f32>(0.5), 1.0);
+        }
+        return vec4<f32>(fond(regard), 1.0);
+    }
+
+    let entree_point = k.position.xyz + regard * t.x;
+    let normale_entree = normalize(entree_point - k.sphere.xyz);
+
+    // ── 1. Snell à l'entrée ──
+    let dedans = refracter(regard, normale_entree, k.matiere.w);
+    if (dedans.w < 0.5) {
+        // Réflexion totale dès l'entrée : géométriquement impossible en venant du vide, mais on
+        // ne suppose pas — on répond.
+        if (mode_direction) {
+            return vec4<f32>(regard * 0.5 + vec3<f32>(0.5), 1.0);
+        }
+        return vec4<f32>(fond(regard), 1.0);
+    }
+
+    // ── 2. Où ressort-il ? ──
+    // L'estimation de départ est la corde vue de face : c'est ce que donnerait l'approximation
+    // naïve « le rayon ne dévie pas », et Newton part de là.
+    let sortie = chercher_la_sortie(entree_point, dedans.xyz, t.y - t.x);
+    if (sortie.w < 0.0) {
+        if (mode_direction) {
+            return vec4<f32>(dedans.xyz * 0.5 + vec3<f32>(0.5), 1.0);
+        }
+        return vec4<f32>(fond(dedans.xyz), 1.0);
+    }
+    let distance_traversee = sortie.w;
+
+    // ── 3. Snell à la sortie ──
+    // La normale pointe vers l'extérieur ; en sortant on la retourne, et le rapport d'indices
+    // s'inverse. La réflexion totale, elle, arrive VRAIMENT ici : c'est ce qui allume les tranches
+    // d'une plaque de verre.
+    let dehors = refracter(dedans.xyz, -sortie.xyz, 1.0 / k.matiere.w);
+    var direction_finale = dehors.xyz;
+    if (dehors.w < 0.5) {
+        // Réflexion totale interne : le rayon rebondit à l'intérieur au lieu de sortir.
+        direction_finale = reflect(dedans.xyz, -sortie.xyz);
+    }
+
+    if (mode_direction) {
+        return vec4<f32>(direction_finale * 0.5 + vec3<f32>(0.5), 1.0);
+    }
+
+    // ── 4. Ce qui a survécu — Beer-Lambert sur la longueur RÉELLEMENT traversée ──
+    // Par canal : c'est la seule façon d'obtenir un verre qui colore, et la longueur vient de
+    // Newton, pas d'une épaisseur supposée constante.
+    let survie = exp(-k.matiere.xyz * distance_traversee);
+    return vec4<f32>(fond(direction_finale) * survie, 1.0);
+}

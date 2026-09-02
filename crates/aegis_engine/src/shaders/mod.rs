@@ -23,3 +23,5 @@ pub const HALO_DESCENTE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/h
 pub const HALO_MONTEE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/halo_montee.vert.spv"));
 pub const OCCLUSION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/occlusion.vert.spv"));
 pub const COPIE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/copie.vert.spv"));
+/// La refraction — le premier shader du moteur qui fasse de la physique de la MATIERE.
+pub const REFRACTION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/refraction.vert.spv"));

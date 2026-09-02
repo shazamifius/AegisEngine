@@ -360,10 +360,25 @@ impl GpuContext {
     /// ⚠ Ce qu'il ne prouve pas : le comportement de la présentation elle-même (déchirure,
     /// intervalle de rafraîchissement, `OUT_OF_DATE`). Un banc sans écran mesure le coût du
     /// rendu, jamais le confort de l'affichage.
-    pub fn sans_ecran(
+    ///
+    /// # ⭐ Pourquoi le FORMAT est un paramètre depuis le 2 septembre 2026
+    ///
+    /// Il était fixé à `B8G8R8A8_SRGB` — « celui qu'un écran nous donnerait », et cette raison
+    /// reste juste **pour mesurer une couleur** : un banc qui rendrait dans un autre espace ne
+    /// mesurerait pas l'image qu'on regarde.
+    ///
+    /// **Mais tout ce qu'une image transporte n'est pas une couleur.** Une carte de directions,
+    /// de normales ou de distances passée par une courbe sRGB est quantifiée de façon **non
+    /// uniforme** : autour de 0,5 la pente vaut 0,66, donc un pas de 1/255 en sortie vaut 1/168 en
+    /// valeur réelle — trois fois le bruit qu'on croit avoir. *Une sonde qui mesure une direction
+    /// à travers une courbe de gamma mesure la courbe autant que la direction.*
+    ///
+    /// Le défaut reste `B8G8R8A8_SRGB` : la couleur passe par le même chemin qu'avant.
+    pub fn sans_ecran_format(
         largeur: u32,
         hauteur: u32,
         combien_d_images: usize,
+        format: vk::Format,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Contexte Vulkan SANS ECRAN — aucune fenetre, aucun compositeur dans la mesure");
 
@@ -452,9 +467,6 @@ impl GpuContext {
             }
         };
 
-        // Le format est celui qu'un écran nous donnerait : la chaîne de couleur doit être la même,
-        // sinon le banc mesurerait un autre rendu que celui qu'on regarde.
-        let format = vk::Format::B8G8R8A8_SRGB;
         let extent = vk::Extent2D { width: largeur, height: hauteur };
 
         let memory_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
@@ -750,6 +762,35 @@ impl GpuContext {
         Ok(())
     }
 
+    /// Un contexte sans écran dans le format d'un écran — le cas de loin le plus courant.
+    ///
+    /// *Séparé de `sans_ecran_format` pour que « je veux mesurer une couleur » n'ait pas à écrire
+    /// le nom d'un format : un appel qui doit choisir finit toujours par choisir mal une fois.*
+    pub fn sans_ecran(
+        largeur: u32,
+        hauteur: u32,
+        combien_d_images: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::sans_ecran_format(largeur, hauteur, combien_d_images, vk::Format::B8G8R8A8_SRGB)
+    }
+
+    /// Les octets **bruts** de l'image, tels que la carte les range — quatre par pixel, sans
+    /// réordonner les canaux et sans retirer l'alpha.
+    ///
+    /// ⚠ **À n'employer que quand l'image ne transporte pas une couleur** : une carte de
+    /// directions, de normales, de distances. Pour une couleur, `relire_image` fait le travail
+    /// (échange B↔R, retrait de l'alpha) et c'est ce qu'on veut.
+    pub fn relire_image_brute(
+        &self,
+        image: vk::Image,
+        layout_actuel: vk::ImageLayout,
+        extent: vk::Extent2D,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        // `UNDEFINED` n'est le format d'aucune image réelle : il ne peut donc déclencher aucun des
+        // échanges de canaux, ce qui est exactement le sens de « brut ».
+        self.transfert(image, layout_actuel, extent, vk::Format::UNDEFINED, true)
+    }
+
     /// ⭐⭐ **Rapatrie une image de la carte vers la mémoire, en RVB (trois octets par pixel).**
     ///
     /// # Pourquoi cette fonction a déménagé ici, et c'est le fond du sujet
@@ -796,6 +837,18 @@ impl GpuContext {
         layout_actuel: vk::ImageLayout,
         extent: vk::Extent2D,
         format: vk::Format,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        self.transfert(image, layout_actuel, extent, format, false)
+    }
+
+    /// Le transfert lui-même. `brut` garde les quatre canaux dans l'ordre de la carte.
+    fn transfert(
+        &self,
+        image: vk::Image,
+        layout_actuel: vk::ImageLayout,
+        extent: vk::Extent2D,
+        format: vk::Format,
+        brut: bool,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let octets = (extent.width as vk::DeviceSize) * (extent.height as vk::DeviceSize) * 4;
         let memory_props =
@@ -899,6 +952,10 @@ impl GpuContext {
             self.device.unmap_memory(memoire);
             self.device.destroy_buffer(tampon, None);
             self.device.free_memory(memoire, None);
+        }
+
+        if brut {
+            return Ok(bruts);
         }
 
         // Les formats en `B8G8R8A8` rangent le bleu en premier : sans cet échange, une capture

@@ -71,6 +71,7 @@ fn main() {
         ("halo_montee.wgsl", "halo_montee.vert.spv", "halo_montee.frag.spv"),
         ("occlusion.wgsl", "occlusion.vert.spv", "occlusion.frag.spv"),
         ("copie.wgsl", "copie.vert.spv", "copie.frag.spv"),
+        ("refraction.wgsl", "refraction.vert.spv", "refraction.frag.spv"),
     ];
 
     for (src_file, vert_out, frag_out) in shaders {

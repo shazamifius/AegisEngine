@@ -9,3 +9,4 @@ pub mod ombre;
 pub mod pipeline;
 pub mod push_constants;
 pub mod texture;
+pub mod verre;
