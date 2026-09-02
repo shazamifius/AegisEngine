@@ -53,6 +53,17 @@ fn heure_utc(secondes: u64) -> String {
     format!("{:02}:{:02}:{:02} UTC", jour / 3600, (jour % 3600) / 60, jour % 60)
 }
 
+/// Une image de preuve : son nom, sa date, sa taille, ses dimensions.
+///
+/// ⚠ Nommée plutôt que laissée en quadruplet anonyme — clippy le demandait, et il avait raison :
+/// `(String, u64, u64, Option<(u32, u32)>)` ne dit pas lequel des deux `u64` est la date.
+struct Preuve {
+    nom: String,
+    modifie: u64,
+    taille: u64,
+    dims: Option<(u32, u32)>,
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let dossier = args.next().unwrap_or_else(|| {
@@ -62,7 +73,7 @@ fn main() {
     let sortie = args.next().unwrap_or_else(|| "/tmp/aegis-voir.html".into());
 
     let chemin = Path::new(&dossier);
-    let mut images: Vec<(String, u64, u64, Option<(u32, u32)>)> = Vec::new();
+    let mut images: Vec<Preuve> = Vec::new();
     let entrees = fs::read_dir(chemin).unwrap_or_else(|e| {
         eprintln!("{dossier} : {e}");
         std::process::exit(1);
@@ -83,7 +94,7 @@ fn main() {
         // et que la simplicité vaut plus ici que l'économie.
         let taille = meta.len();
         let dims = fs::read(entree.path()).ok().and_then(|o| dimensions(&o));
-        images.push((nom, modifie, taille, dims));
+        images.push(Preuve { nom, modifie, taille, dims });
     }
 
     if images.is_empty() {
@@ -91,11 +102,11 @@ fn main() {
         std::process::exit(1);
     }
     // Le plus récent d'abord : ce qu'on vient de produire est ce qu'on veut voir.
-    images.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    images.sort_by(|a, b| b.modifie.cmp(&a.modifie).then(a.nom.cmp(&b.nom)));
 
     let absolu = fs::canonicalize(chemin).unwrap_or_else(|_| chemin.to_path_buf());
     let mut figures = String::new();
-    for (nom, modifie, taille, dims) in &images {
+    for Preuve { nom, modifie, taille, dims } in &images {
         let taille_lisible = if *taille >= 1024 {
             format!("{} Ko", taille / 1024)
         } else {
@@ -168,7 +179,7 @@ setInterval(() => {{
         std::process::exit(1);
     });
     println!("{} image(s) → {sortie}", images.len());
-    for (nom, _, _, dims) in images.iter().take(4) {
+    for Preuve { nom, dims, .. } in images.iter().take(4) {
         match dims {
             Some((l, h)) => println!("  {nom}  {l}×{h}"),
             None => println!("  {nom}  (en-tête PNG illisible)"),

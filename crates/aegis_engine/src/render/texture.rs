@@ -24,7 +24,35 @@ impl Texture2D {
         Self::create_from_rgba8(gpu, memory_props, 1, 1, &color)
     }
 
-    /// Charge ou crée une texture VRAM à partir de données RGBA8 brutes.
+    /// Rend à la carte tout ce que cette texture lui a pris.
+    ///
+    /// ⚠⚠ **Cette fonction n'existait pas avant le 2 septembre 2026, et personne ne libérait une
+    /// `Texture2D` — ni `Drop`, ni geste explicite.** Sur un programme qui charge ses textures une
+    /// fois au démarrage, ça ne se voit jamais : le pilote nettoie à la sortie du processus. Ça se
+    /// voit dès qu'une texture est créée **par image ou par test**, et c'est exactement ce que fait
+    /// la passe de verre.
+    ///
+    /// *Aucun warning ne pouvait le dire : construire un objet et l'oublier est un usage valide.*
+    /// C'est la même famille que la fuite des images du contexte sans écran, trouvée la veille au
+    /// même endroit — **une ressource Vulkan qui n'a pas de geste de libération n'en aura jamais**.
+    ///
+    /// Un `Drop` aurait été plus sûr encore, et il n'est **pas** posé volontairement : l'ordre de
+    /// destruction compte en Vulkan, et une texture libérée après son `Device` planterait. Le
+    /// moteur libère explicitement partout ailleurs ; une exception ici serait un piège.
+    ///
+    /// # Sûreté
+    ///
+    /// L'appelant garantit que plus aucune commande en vol ne lit cette texture.
+    pub fn detruire(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_sampler(self.sampler, None);
+            device.destroy_image_view(self.view, None);
+            device.destroy_image(self.image, None);
+            device.free_memory(self.memory, None);
+        }
+    }
+
+    /// Charge une texture VRAM à partir de données RGBA8 brutes.
     pub fn create_from_rgba8(
         gpu: &GpuContext,
         memory_props: &vk::PhysicalDeviceMemoryProperties,
@@ -32,7 +60,37 @@ impl Texture2D {
         height: u32,
         pixels: &[u8],
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let image_size = (width * height * 4) as vk::DeviceSize;
+        Self::create_from_bytes(
+            gpu,
+            memory_props,
+            width,
+            height,
+            vk::Format::R8G8B8A8_SRGB,
+            4,
+            pixels,
+        )
+    }
+
+    /// Charge une texture VRAM à partir d'octets bruts, dans le format qu'on lui donne.
+    ///
+    /// ⚠ **Le format était en dur (`R8G8B8A8_SRGB`) jusqu'au 2 septembre 2026**, ce qui rendait
+    /// cette fonction incapable de porter autre chose qu'une couleur. Or une carte de géométrie —
+    /// une normale et une distance par pixel — a besoin de **flottants** : sur huit bits, des
+    /// distances qui vont de 3 à 5 dans une scène deviennent des marches d'escalier, et la mesure
+    /// porterait sur les marches plutôt que sur la géométrie.
+    ///
+    /// *Le sampler reste en `NEAREST`, et c'est essentiel ici : interpoler deux normales de part
+    /// et d'autre d'une silhouette fabrique une normale qui n'existe sur aucune surface.*
+    pub fn create_from_bytes(
+        gpu: &GpuContext,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        octets_par_pixel: u32,
+        pixels: &[u8],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let image_size = (width * height * octets_par_pixel) as vk::DeviceSize;
 
         // 1. Staging Buffer
         let (staging_buffer, staging_memory) = MemoryManager::create_buffer(
@@ -52,7 +110,7 @@ impl Texture2D {
         // 2. Image Vulkan 1.4 (OPTIMAL Tiling)
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_SRGB)
+            .format(format)
             .extent(vk::Extent3D {
                 width,
                 height,
@@ -182,7 +240,7 @@ impl Texture2D {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_SRGB)
+            .format(format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,

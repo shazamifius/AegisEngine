@@ -24,7 +24,7 @@ use crate::core::gpu_context::GpuContext;
 use crate::render::pipeline::{Melange, PipelineFactory, Reglages};
 use ash::vk;
 
-/// Les 112 octets que le shader lit — sept vecteurs, et pas un de plus.
+/// Les 96 octets que le shader lit — six vecteurs, et pas un de plus.
 ///
 /// ⚠ **Vulkan ne garantit que 128 octets de constantes poussées**, et le projet a déjà payé pour
 /// l'avoir oublié : le moteur en poussait 160 et fonctionnait ici parce que cette machine en offre
@@ -44,8 +44,6 @@ pub struct ConstantesVerre {
     pub haut: [f32; 4],
     /// xyz = axe de visée.
     pub avant: [f32; 4],
-    /// xyz = centre de la sphère, w = son rayon.
-    pub sphere: [f32; 4],
     /// xyz = absorption par canal (Beer-Lambert), w = rapport des indices n₁/n₂.
     pub matiere: [f32; 4],
     /// xy = taille en pixels, z = mode (0 = couleur, 1 = direction), w = tours de Newton.
@@ -66,14 +64,18 @@ impl ConstantesVerre {
     }
 }
 
-/// La passe elle-même : un pipeline plein écran, **aucun descripteur**.
+/// La passe elle-même : un pipeline plein écran qui lit **deux cartes de géométrie**.
 ///
-/// ⭐ Le shader ne lit aucune texture — sa carte de face arrière est calculée. C'est ce qui rend
-/// cette passe si petite, et ce n'est pas un hasard de conception : *une mesure dont l'instrument
-/// tient en cent lignes est une mesure qu'on peut relire en entier avant de la croire.*
+/// ⭐ Elle ne connaît aucune forme. Toute la géométrie entre par `brancher`, sous forme de deux
+/// images « normale + distance ». *C'est ce qui rend cette passe indépendante de ce qu'on
+/// rend* — une sphère exacte aujourd'hui, un maillage venu de Blender demain, sans qu'une ligne
+/// d'ici ne bouge.
 pub struct Verre {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
+    descripteurs: vk::DescriptorSetLayout,
+    pool: vk::DescriptorPool,
+    ensemble: vk::DescriptorSet,
 }
 
 impl Verre {
@@ -81,12 +83,56 @@ impl Verre {
         gpu: &GpuContext,
         format_cible: vk::Format,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // ⭐ Deux images échantillonnées, et **aucun échantillonneur** : le shader lit par
+        // `textureLoad`, donc au texel exact. Ce n'est pas une économie de descripteur — c'est
+        // qu'une normale interpolée entre deux surfaces n'existe sur aucune des deux.
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
+        let descripteurs = unsafe {
+            gpu.device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                None,
+            )?
+        };
+        let tailles = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(2)];
+        let pool = unsafe {
+            gpu.device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .pool_sizes(&tailles)
+                    .max_sets(1),
+                None,
+            )?
+        };
+        let ensemble = unsafe {
+            gpu.device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(pool)
+                    .set_layouts(std::slice::from_ref(&descripteurs)),
+            )?[0]
+        };
+
         let plage = PipelineFactory::create_push_constant_range(
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             0,
             std::mem::size_of::<ConstantesVerre>() as u32,
         );
-        let layout = PipelineFactory::create_pipeline_layout(&gpu.device, &[], &[plage])?;
+        let layout = PipelineFactory::create_pipeline_layout(
+            &gpu.device,
+            std::slice::from_ref(&descripteurs),
+            &[plage],
+        )?;
 
         let module =
             PipelineFactory::create_shader_module_from_bytes(&gpu.device, crate::shaders::REFRACTION_SPV)?;
@@ -108,7 +154,36 @@ impl Verre {
         )?;
         unsafe { gpu.device.destroy_shader_module(module, None) };
 
-        Ok(Self { pipeline, layout })
+        Ok(Self { pipeline, layout, descripteurs, pool, ensemble })
+    }
+
+    /// Désigne les deux cartes que le shader lira. À rappeler dès qu'elles changent.
+    ///
+    /// `xyz` = la normale dans le monde, `w` = la distance depuis l'œil ; `w <= 0` = pas de
+    /// matière. **Les deux cartes décrivent le même pixel** — celle d'avant porte la face par
+    /// laquelle le rayon entre, celle d'arrière la face par laquelle il ressort.
+    pub fn brancher(&self, gpu: &GpuContext, avant: vk::ImageView, arriere: vk::ImageView) {
+        let images = [
+            vk::DescriptorImageInfo::default()
+                .image_view(avant)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            vk::DescriptorImageInfo::default()
+                .image_view(arriere)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+        ];
+        let ecritures = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.ensemble)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&images[..1]),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.ensemble)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&images[1..]),
+        ];
+        unsafe { gpu.device.update_descriptor_sets(&ecritures, &[]) };
     }
 
     /// Dessine dans l'attachement déjà ouvert par l'appelant.
@@ -116,6 +191,14 @@ impl Verre {
         unsafe {
             gpu.device
                 .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            gpu.device.cmd_bind_descriptor_sets(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.layout,
+                0,
+                std::slice::from_ref(&self.ensemble),
+                &[],
+            );
             gpu.device.cmd_push_constants(
                 cmd,
                 self.layout,
@@ -131,6 +214,9 @@ impl Verre {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
+            // Le pool emporte les ensembles qu'il a alloués ; il n'y a rien à libérer de plus.
+            device.destroy_descriptor_pool(self.pool, None);
+            device.destroy_descriptor_set_layout(self.descripteurs, None);
         }
     }
 }
@@ -152,22 +238,63 @@ mod tests {
     /// qui en valait 36.*
     const TANGENTE: f32 = 0.57735; // tan(30°)
 
-    fn constantes(mode: f32, tours: f32) -> ConstantesVerre {
+    fn constantes(mode: f32, tours: f32, cote: u32) -> ConstantesVerre {
         ConstantesVerre {
             position: [0.0, 0.0, -RECUL, 0.0],
             droite: [1.0, 0.0, 0.0, TANGENTE],
             haut: [0.0, 1.0, 0.0, TANGENTE],
             avant: [0.0, 0.0, 1.0, 0.0],
-            sphere: [0.0, 0.0, 0.0, RAYON],
             matiere: [0.0, 0.0, 0.0, ETA],
-            reglages: [COTE as f32, COTE as f32, mode, tours],
+            reglages: [cote as f32, cote as f32, mode, tours],
         }
     }
 
+    /// Les deux cartes de la bille, **exactes** : une intersection analytique par pixel.
+    ///
+    /// ⭐ Elles ne passent par aucune rastérisation et par aucun maillage. C'est ce qui rend la
+    /// mesure lisible : *l'écart obtenu avec ces cartes est celui de la DISCRÉTISATION EN PIXELS,
+    /// et de rien d'autre.* Quand une vraie rastérisation les remplira, tout écart supplémentaire
+    /// lui sera imputable — parce que ce chiffre-ci aura été mesuré seul.
+    ///
+    /// Format : `R32G32B32A32_SFLOAT`. Trente-deux bits, délibérément : sur seize, la précision
+    /// des distances entrerait dans la mesure et on ne saurait plus ce qu'on mesure.
+    fn cartes_exactes(cote: u32) -> (Vec<u8>, Vec<u8>) {
+        let mut avant = Vec::with_capacity((cote * cote) as usize * 16);
+        let mut arriere = Vec::with_capacity((cote * cote) as usize * 16);
+        let origine = Vec3::new(0.0, 0.0, -RECUL);
+        for y in 0..cote {
+            for x in 0..cote {
+                let d = direction_du_pixel(x, y, cote);
+                let b = origine.dot(d);
+                let c = origine.dot(origine) - RAYON * RAYON;
+                let disc = b * b - c;
+                let (t0, t1) = if disc < 0.0 {
+                    (-1.0, -1.0)
+                } else {
+                    (-b - disc.sqrt(), -b + disc.sqrt())
+                };
+                let poser = |sortie: &mut Vec<u8>, t: f32| {
+                    if t <= 0.0 {
+                        // `w <= 0` est la seule façon de dire « pas de matière ici ».
+                        sortie.extend_from_slice(&[0u8; 16]);
+                        return;
+                    }
+                    let n = (origine + d * t) * (1.0 / RAYON);
+                    for v in [n.x, n.y, n.z, t] {
+                        sortie.extend_from_slice(&v.to_le_bytes());
+                    }
+                };
+                poser(&mut avant, t0);
+                poser(&mut arriere, t1);
+            }
+        }
+        (avant, arriere)
+    }
+
     /// La direction du rayon d'un pixel — la même formule que le shader, écrite à part exprès.
-    fn direction_du_pixel(x: u32, y: u32) -> Vec3 {
-        let sx = ((x as f32 + 0.5) / COTE as f32) * 2.0 - 1.0;
-        let sy = 1.0 - ((y as f32 + 0.5) / COTE as f32) * 2.0;
+    fn direction_du_pixel(x: u32, y: u32, cote: u32) -> Vec3 {
+        let sx = ((x as f32 + 0.5) / cote as f32) * 2.0 - 1.0;
+        let sy = 1.0 - ((y as f32 + 0.5) / cote as f32) * 2.0;
         Vec3::new(sx * TANGENTE, sy * TANGENTE, 1.0).normalize_or_zero()
     }
 
@@ -227,9 +354,9 @@ mod tests {
     /// Rend l'image des directions de sortie et mesure l'écart à la vérité, pixel par pixel.
     ///
     /// Renvoie `(écart moyen en degrés, pire écart, pixels comparés)`.
-    fn mesurer(tours: f32) -> Option<Mesure> {
-        let bruts = rendre(&constantes(1.0, tours), vk::Format::B8G8R8A8_UNORM)?;
-        Some(depouiller(&bruts))
+    fn mesurer(tours: f32, cote: u32) -> Option<Mesure> {
+        let bruts = rendre(&constantes(1.0, tours, cote), vk::Format::B8G8R8A8_UNORM, cote)?;
+        Some(depouiller(&bruts, cote))
     }
 
     /// Lance la passe et rapporte les octets bruts de l'image.
@@ -237,8 +364,8 @@ mod tests {
     /// ⚠ **Le format se choisit à l'appel, et ce n'est pas un détail :** une direction se lit en
     /// `UNORM` (quantification uniforme), une couleur en `SRGB` (la chaîne du vrai rendu). *Lire
     /// une direction à travers une courbe de gamma mesurerait la courbe autant que la direction.*
-    fn rendre(k: &ConstantesVerre, format: vk::Format) -> Option<Vec<u8>> {
-        let ctx = match GpuContext::sans_ecran_format(COTE, COTE, 1, format) {
+    fn rendre(k: &ConstantesVerre, format: vk::Format, cote: u32) -> Option<Vec<u8>> {
+        let ctx = match GpuContext::sans_ecran_format(cote, cote, 1, format) {
             Ok(c) => c,
             Err(e) => {
                 println!("⚠ aucun Vulkan joignable : {e}");
@@ -246,6 +373,29 @@ mod tests {
             }
         };
         let verre = Verre::nouvelle(&ctx, ctx.swapchain_format).ok()?;
+
+        // Les cartes vivent jusqu'à la fin du rendu : les détruire avant que la file soit vide
+        // ferait lire au shader une image libérée — un défaut qui ne se voit pas toujours.
+        let memory_props = unsafe {
+            ctx.instance
+                .get_physical_device_memory_properties(ctx.physical_device)
+        };
+        let (octets_avant, octets_arriere) = cartes_exactes(cote);
+        let fabriquer = |octets: &[u8]| {
+            crate::render::texture::Texture2D::create_from_bytes(
+                &ctx,
+                &memory_props,
+                cote,
+                cote,
+                vk::Format::R32G32B32A32_SFLOAT,
+                16,
+                octets,
+            )
+        };
+        let tex_avant = fabriquer(&octets_avant).ok()?;
+        let tex_arriere = fabriquer(&octets_arriere).ok()?;
+        verre.brancher(&ctx, tex_avant.view, tex_arriere.view);
+
         let image = ctx.swapchain_images[0];
         let vue = ctx.swapchain_image_views[0];
         let etendue = ctx.swapchain_extent;
@@ -321,21 +471,23 @@ mod tests {
             .relire_image_brute(image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, etendue)
             .ok()?;
         verre.detruire(&ctx.device);
+        tex_avant.detruire(&ctx.device);
+        tex_arriere.detruire(&ctx.device);
         Some(bruts)
     }
 
     /// Compare l'image des directions à la vérité, pixel par pixel.
-    fn depouiller(bruts: &[u8]) -> Mesure {
+    fn depouiller(bruts: &[u8], cote: u32) -> Mesure {
         let mut somme = 0.0f64;
         let mut pire = 0.0f32;
         let mut compte = 0usize;
         let mut gros = 0usize;
         let mut pire_ecart_au_critique = f32::INFINITY;
-        for y in 0..COTE {
-            for x in 0..COTE {
-                let d = direction_du_pixel(x, y);
+        for y in 0..cote {
+            for x in 0..cote {
+                let d = direction_du_pixel(x, y, cote);
                 let Some(attendue) = verite(d) else { continue };
-                let i = ((y * COTE + x) * 4) as usize;
+                let i = ((y * cote + x) * 4) as usize;
                 // Le format est B8G8R8A8 : bleu en premier.
                 let lu = Vec3::new(
                     bruts[i + 2] as f32 / 255.0 * 2.0 - 1.0,
@@ -426,6 +578,58 @@ mod tests {
         compte: usize,
     }
 
+    /// ⭐⭐⭐ **CE QUE COÛTE DE PASSER PAR DES CARTES EN ESPACE ÉCRAN** — et c'est un chiffre que
+    /// le projet n'avait pas.
+    ///
+    /// # Pourquoi ce test existe
+    ///
+    /// Le shader ne calcule plus sa géométrie : il **lit deux cartes**, comme le fera le moteur
+    /// réel. L'erreur est passée de **1,789° à 2,132°** le jour de ce changement, et il serait
+    /// facile d'écrire « le surcoût de la discrétisation est de 0,34° ». **Ce serait une
+    /// hypothèse**, pas une mesure : rien ne dit que ce surcoût vient des pixels plutôt que d'une
+    /// faute d'indexation, d'un décalage d'un demi-texel ou d'un mauvais centre de pixel.
+    ///
+    /// ## La sonde qui tranche, et elle est simple
+    ///
+    /// Si le surcoût vient de la **taille des pixels**, alors il doit **rétrécir quand les pixels
+    /// rétrécissent**, et tendre vers l'erreur du calcul direct. S'il vient d'une faute
+    /// d'indexation, il ne bougera pas — une erreur de repère est indifférente à la résolution.
+    ///
+    /// *C'est la règle des trois N du projet, appliquée à une grandeur continue : jamais validé
+    /// sur une seule mesure, et c'est la TENDANCE qui décide.*
+    ///
+    /// ⚠ Ce test ne grave aucun chiffre : il exige une **décroissance**. Un seuil absolu se
+    /// périmerait à la première carte graphique différente ; une tendance, non.
+    #[test]
+    fn l_erreur_des_cartes_retrecit_avec_les_pixels_donc_c_est_bien_la_discretisation() {
+        let Some(petite) = mesurer(6.0, 128) else {
+            println!("  (le test est neutralise, PAS reussi — il n'a rien prouve)");
+            return;
+        };
+        let moyenne = mesurer(6.0, 256).expect("Vulkan etait la a l'instant");
+        let grande = mesurer(6.0, 512).expect("Vulkan etait la a l'instant");
+
+        println!("  128²  : {:.3}°  ({} pixels de verre)", petite.moyenne, petite.compte);
+        println!("  256²  : {:.3}°  ({} pixels de verre)", moyenne.moyenne, moyenne.compte);
+        println!("  512²  : {:.3}°  ({} pixels de verre)", grande.moyenne, grande.compte);
+        println!("  le calcul direct, sans carte, valait 1,789° — et le banc processeur 1,740°");
+
+        assert!(
+            moyenne.moyenne < petite.moyenne,
+            "doubler la résolution n'a pas réduit l'erreur ({:.3}° -> {:.3}°) : le surcoût ne vient \
+             donc PAS de la taille des pixels, et l'explication qu'on s'en donnait est fausse",
+            petite.moyenne,
+            moyenne.moyenne
+        );
+        assert!(
+            grande.moyenne < moyenne.moyenne,
+            "la décroissance s'arrête entre 256² et 512² ({:.3}° -> {:.3}°) : il reste alors une \
+             erreur de FOND que la résolution ne corrige pas — à trouver, pas à tolérer",
+            moyenne.moyenne,
+            grande.moyenne
+        );
+    }
+
     /// ⭐ **LES TROIS IMAGES DU VERRE** — écrites dans `target/preuves/`, pour son œil.
     ///
     /// Un chiffre dit qu'un calcul est juste ; il ne dit pas si l'image est belle, et sur ce
@@ -445,20 +649,20 @@ mod tests {
     #[test]
     fn les_trois_images_du_verre() {
         // Ici on regarde une COULEUR : c'est la chaîne du vrai rendu qu'il faut, sRGB comprise.
-        let Some(sans) = rendre(&constantes(0.0, 0.0), vk::Format::B8G8R8A8_SRGB) else {
+        let Some(sans) = rendre(&constantes(0.0, 0.0, COTE), vk::Format::B8G8R8A8_SRGB, COTE) else {
             println!("  (aucune image ecrite — pas de Vulkan)");
             return;
         };
-        let avec = rendre(&constantes(0.0, 6.0), vk::Format::B8G8R8A8_SRGB)
+        let avec = rendre(&constantes(0.0, 6.0, COTE), vk::Format::B8G8R8A8_SRGB, COTE)
             .expect("Vulkan etait la a l'instant");
 
         // Une absorption par canal : le rouge survit le mieux, le bleu meurt le plus vite. C'est
         // la longueur RÉELLEMENT traversée qui entre dans l'exponentielle, pas une épaisseur
         // supposée — donc le bord de la bille, plus épais en trajet, doit être plus sombre.
-        let mut teinte = constantes(0.0, 6.0);
+        let mut teinte = constantes(0.0, 6.0, COTE);
         teinte.matiere = [0.35, 0.9, 1.6, ETA];
         let colore =
-            rendre(&teinte, vk::Format::B8G8R8A8_SRGB).expect("Vulkan etait la a l'instant");
+            rendre(&teinte, vk::Format::B8G8R8A8_SRGB, COTE).expect("Vulkan etait la a l'instant");
 
         let dossier = std::path::Path::new("target/preuves");
         std::fs::create_dir_all(dossier).expect("dossier de preuves");
@@ -488,8 +692,11 @@ mod tests {
     #[test]
     fn les_constantes_tiennent_sous_le_plafond_garanti_de_vulkan() {
         let taille = std::mem::size_of::<ConstantesVerre>();
-        println!("  constantes de verre : {taille} octets");
-        assert_eq!(taille, 112, "la structure a changé de taille sans qu'on le décide");
+        println!("  constantes de verre : {taille} octets (plafond garanti : 128)");
+        // 112 jusqu'au 2 septembre 2026 : le centre et le rayon de la sphère y voyageaient encore.
+        // Ils sont partis le jour où la géométrie est passée par des cartes — *ce qui n'est plus
+        // lu n'a pas à être poussé.*
+        assert_eq!(taille, 96, "la structure a changé de taille sans qu'on le décide");
         assert!(
             taille <= 128,
             "Vulkan ne garantit que 128 octets de constantes poussées, et cette limite a déjà \
@@ -518,11 +725,11 @@ mod tests {
     /// la vérité, séparément.
     #[test]
     fn le_shader_trouve_la_sortie_du_rayon_aussi_bien_que_la_verite_analytique() {
-        let Some(sans) = mesurer(0.0) else {
+        let Some(sans) = mesurer(0.0, COTE) else {
             println!("  (le test est neutralise, PAS reussi — il n'a rien prouve)");
             return;
         };
-        let avec = mesurer(6.0).expect("Vulkan etait la a l'instant");
+        let avec = mesurer(6.0, COTE).expect("Vulkan etait la a l'instant");
 
         println!("  pixels de verre compares : {}", avec.compte);
         println!(

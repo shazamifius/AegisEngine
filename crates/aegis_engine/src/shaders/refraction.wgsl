@@ -37,20 +37,44 @@
 // *Mesuré sur le banc : « zéro pas » et « un pas » donnaient exactement le même angle, au millième
 // près. Le mécanisme avait l'air de tourner et ne servait à rien.*
 //
-// ## ⚠ CE QUE CE SHADER NE FAIT PAS ENCORE, ET IL FAUT LE LIRE AVANT DE S'EN SERVIR
+// ## ⭐ LA GÉOMÉTRIE ENTRE PAR DEUX CARTES, ET PAR ELLES SEULES
 //
-// **La carte de la face arrière est calculée ANALYTIQUEMENT** (`carte_arriere`), pour une sphère
-// dont le centre et le rayon arrivent par constantes poussées. Ce n'est pas un jouet et ce n'est
-// pas non plus le moteur fini : c'est ce qui **isole l'erreur**. Avec une vraie rastérisation, un
-// écart peut venir de la rastérisation *ou* de la physique ; avec une carte exacte, l'écart mesuré
-// est celui du shader et de rien d'autre. Le jour où les vraies cartes arrivent, **une seule
-// fonction change** — tout le reste, Newton compris, est déjà le code définitif.
+// Ce shader ne connaît **aucune forme**. Il lit deux images — une normale et une distance par
+// pixel — et tout ce qu'il calcule en découle. Que ces cartes viennent d'une intersection exacte,
+// d'un rastériseur logiciel ou d'une passe GPU sur un maillage venu de Blender, **pas une ligne
+// d'ici ne change**.
+//
+// *Il a d'abord calculé sa sphère lui-même, le 2 septembre 2026 au matin, et c'était délibéré :
+// une carte exacte ISOLE l'erreur.* On a ainsi mesuré la physique seule (**1,789°**), puis le prix
+// de la discrétisation en pixels (**2,132°** à 256², et la décroissance vers le calcul direct est
+// prouvée : 3,168° à 128², 1,917° à 512²). **Deux chiffres séparés valent mieux qu'un chiffre
+// global** : quand la rastérisation arrivera, tout écart de plus lui sera imputable, parce que le
+// reste aura été mesuré seul.
+//
+// ## ⚠ CE QUE CE SHADER NE FAIT PAS ENCORE
+//
+// Il suppose **une seule couche de matière** par pixel — une face avant, une face arrière. Un
+// objet creux, ou deux objets de verre l'un derrière l'autre, demanderaient plus de deux cartes.
+// *C'est une limite du modèle, pas un défaut d'implémentation, et elle se lève par une liste
+// chaînée par pixel — un chantier à part entière.*
 //
 // ## ⚠ AUCUNE COULEUR N'EST ÉCRITE ICI, et un test le garde
 //
 // Le fond d'essai est en **niveaux de gris** ; l'absorption `sigma` arrive par canal depuis
 // l'appelant. *Le moteur fournit ce qui est VRAI, le jeu fournit ce qui est BEAU* — et sur une
 // mesure, un fond achromatique a un second mérite : aucune teinte ne peut masquer un canal faux.
+
+// ── LES DEUX CARTES ──────────────────────────────────────────────────────────────────────────
+//
+// `xyz` = la normale de la surface dans le monde, `w` = la distance depuis l'œil.
+// **`w <= 0` veut dire « aucune matière sur ce pixel »**, et c'est la seule façon de le dire.
+//
+// ⭐ Elles sont lues par `textureLoad`, donc **sans échantillonneur et sans interpolation**. Ce
+// n'est pas une économie : interpoler deux normales de part et d'autre d'une silhouette
+// fabriquerait une normale qui n'existe sur aucune surface — et cette normale-là entrerait ensuite
+// dans Snell, où elle dévierait un rayon vers nulle part. *Le lisse est un défaut ici.*
+@group(0) @binding(0) var carte_avant: texture_2d<f32>;
+@group(0) @binding(1) var carte_arriere: texture_2d<f32>;
 
 struct Constantes {
     // La caméra décrite par sa base, et non par une matrice : la même description sert à
@@ -60,7 +84,6 @@ struct Constantes {
     droite: vec4<f32>,     // xyz = axe droit,  w = tangente du demi-champ horizontal
     haut: vec4<f32>,       // xyz = axe haut,   w = tangente du demi-champ vertical
     avant: vec4<f32>,      // xyz = axe de visée
-    sphere: vec4<f32>,     // xyz = centre,     w = rayon
     matiere: vec4<f32>,    // xyz = sigma par canal, w = rapport des indices n1/n2
     reglages: vec4<f32>,   // xy = taille en pixels, z = mode, w = nombre de tours de Newton
 };
@@ -118,31 +141,27 @@ fn projeter(p: vec3<f32>) -> vec3<f32> {
 
 // ── LA CARTE ─────────────────────────────────────────────────────────────────────────────────
 
-/// Ce qu'un pixel voit de la matière : `x` = distance d'entrée, `y` = distance de sortie.
-/// `x < 0` veut dire « rien ici », et c'est la seule façon de le dire.
-fn couper_la_sphere(origine: vec3<f32>, direction: vec3<f32>) -> vec2<f32> {
-    let oc = origine - k.sphere.xyz;
-    let b = dot(oc, direction);
-    let c = dot(oc, oc) - k.sphere.w * k.sphere.w;
-    let discriminant = b * b - c;
-    if (discriminant < 0.0) {
-        return vec2<f32>(-1.0, -1.0);
-    }
-    let racine = sqrt(discriminant);
-    return vec2<f32>(-b - racine, -b + racine);
-}
-
-/// La face ARRIÈRE vue depuis un pixel : `xyz` = le point, `w` = la distance. `w < 0` = rien.
+/// Lit une carte au pixel donné, en refusant proprement ce qui tombe hors de l'image.
 ///
-/// ⚠ **C'est la seule fonction à remplacer** le jour où les cartes viendront d'une rastérisation.
-/// Tout ce qui l'entoure — Newton, la projection, Snell — est déjà le code définitif.
-fn carte_arriere(pixel: vec2<f32>) -> vec4<f32> {
-    let d = direction_du_pixel(pixel);
-    let t = couper_la_sphere(k.position.xyz, d);
-    if (t.y < 0.0) {
+/// ⚠ **Newton fait sortir du cadre**, et c'est normal : le rayon dévié vise un point que l'écran
+/// ne montre pas forcément. Sans cette garde, `textureLoad` hors bornes rend un résultat que la
+/// spécification ne définit pas — donc un résultat qui change d'une carte graphique à l'autre.
+fn lire(carte: texture_2d<f32>, pixel: vec2<f32>) -> vec4<f32> {
+    let taille = vec2<i32>(textureDimensions(carte));
+    let p = vec2<i32>(floor(pixel));
+    if (p.x < 0 || p.y < 0 || p.x >= taille.x || p.y >= taille.y) {
         return vec4<f32>(0.0, 0.0, 0.0, -1.0);
     }
-    return vec4<f32>(k.position.xyz + d * t.y, t.y);
+    return textureLoad(carte, p, 0);
+}
+
+/// La face ARRIÈRE vue depuis un pixel : `xyz` = la normale, `w` = la distance. `w <= 0` = rien.
+///
+/// ⭐ **C'est ici que la géométrie entre dans le shader**, et c'est la seule porte. Que la carte
+/// vienne d'une intersection exacte, d'une rastérisation logicielle ou d'une passe GPU, tout ce
+/// qui suit — Newton, la projection, Snell, Beer-Lambert — ne change pas d'une ligne.
+fn arriere(pixel: vec2<f32>) -> vec4<f32> {
+    return lire(carte_arriere, pixel);
 }
 
 // ── LA PHYSIQUE ──────────────────────────────────────────────────────────────────────────────
@@ -186,22 +205,26 @@ fn chercher_la_sortie(depart: vec3<f32>, direction: vec3<f32>, estimation: f32) 
     let tours = i32(k.reglages.w);
 
     for (var tour = 0; tour < tours; tour = tour + 1) {
-        let point = depart + direction * s;
-        let ecran = projeter(point);
+        let ecran = projeter(depart + direction * s);
         if (ecran.z == 0.0) { break; }
 
-        let surface = carte_arriere(ecran.xy);
-        if (surface.w < 0.0) { break; }
+        let surface = arriere(ecran.xy);
+        if (surface.w <= 0.0) { break; }
 
-        // La normale de la sphère au point trouvé — c'est ELLE, le gradient de `g`, et c'est
-        // pourquoi Newton ne coûte aucune lecture de plus.
-        let normale = normalize(surface.xyz - k.sphere.xyz);
+        // ⚠ Le point se reconstruit depuis le CENTRE du pixel lu, pas depuis la position
+        // fractionnaire visée. La carte ne connaît que des pixels entiers : reconstruire depuis
+        // autre chose que le centre du pixel réellement lu mélangerait deux endroits différents.
+        let centre = floor(ecran.xy) + vec2<f32>(0.5);
+        let point_surface = k.position.xyz + direction_du_pixel(centre) * surface.w;
 
+        // ⭐ La normale EST le gradient de la fonction dont on cherche la racine : la dérivée que
+        // Newton réclame se LIT dans la carte, elle ne s'estime pas. Aucune lecture de plus.
+        let normale = surface.xyz;
         let denominateur = dot(direction, normale);
         if (abs(denominateur) < 1e-5) { break; }
 
         // Le pas de Newton, réécrit : l'intersection du rayon avec le plan tangent.
-        let suivant = dot(surface.xyz - depart, normale) / denominateur;
+        let suivant = dot(point_surface - depart, normale) / denominateur;
         if (suivant <= 0.0) { break; }
 
         // Converger, c'est cesser de bouger À L'ÉCRAN — la seule grandeur que la carte connaisse.
@@ -212,13 +235,12 @@ fn chercher_la_sortie(depart: vec3<f32>, direction: vec3<f32>, estimation: f32) 
 
     // ⚠⚠ LA LECTURE FINALE. Sans elle, la normale rendue est celle d'avant le dernier pas — et
     // c'est la normale qui entre dans Snell, pas la position.
-    let point = depart + direction * s;
-    let ecran = projeter(point);
+    let ecran = projeter(depart + direction * s);
     if (ecran.z == 0.0) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
-    let surface = carte_arriere(ecran.xy);
-    if (surface.w < 0.0) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+    let surface = arriere(ecran.xy);
+    if (surface.w <= 0.0) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
 
-    return vec4<f32>(normalize(surface.xyz - k.sphere.xyz), s);
+    return vec4<f32>(surface.xyz, s);
 }
 
 @fragment
@@ -227,18 +249,19 @@ fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
     let regard = direction_du_pixel(pixel);
     let mode_direction = k.reglages.z > 0.5;
 
-    let t = couper_la_sphere(k.position.xyz, regard);
+    let avant = lire(carte_avant, pixel);
+    let derriere = lire(carte_arriere, pixel);
     // Rien à cet endroit : on voit le fond directement. En mode direction, la direction du regard
     // est ce qui sort — un rayon qui ne traverse rien n'est pas dévié, et c'est la bonne réponse.
-    if (t.x < 0.0 || t.y < 0.0) {
+    if (avant.w <= 0.0 || derriere.w <= 0.0) {
         if (mode_direction) {
             return vec4<f32>(regard * 0.5 + vec3<f32>(0.5), 1.0);
         }
         return vec4<f32>(fond(regard), 1.0);
     }
 
-    let entree_point = k.position.xyz + regard * t.x;
-    let normale_entree = normalize(entree_point - k.sphere.xyz);
+    let entree_point = k.position.xyz + regard * avant.w;
+    let normale_entree = avant.xyz;
 
     // ── 1. Snell à l'entrée ──
     let dedans = refracter(regard, normale_entree, k.matiere.w);
@@ -254,7 +277,7 @@ fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
     // ── 2. Où ressort-il ? ──
     // L'estimation de départ est la corde vue de face : c'est ce que donnerait l'approximation
     // naïve « le rayon ne dévie pas », et Newton part de là.
-    let sortie = chercher_la_sortie(entree_point, dedans.xyz, t.y - t.x);
+    let sortie = chercher_la_sortie(entree_point, dedans.xyz, derriere.w - avant.w);
     if (sortie.w < 0.0) {
         if (mode_direction) {
             return vec4<f32>(dedans.xyz * 0.5 + vec3<f32>(0.5), 1.0);
