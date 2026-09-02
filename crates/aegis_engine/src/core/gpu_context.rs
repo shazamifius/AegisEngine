@@ -750,6 +750,172 @@ impl GpuContext {
         Ok(())
     }
 
+    /// ⭐⭐ **Rapatrie une image de la carte vers la mémoire, en RVB (trois octets par pixel).**
+    ///
+    /// # Pourquoi cette fonction a déménagé ici, et c'est le fond du sujet
+    ///
+    /// Ce transfert vivait dans `Engine` — c'est-à-dire dans la structure qui **exige une
+    /// fenêtre**. Il y supposait, en dur, que l'image venait d'une chaîne de présentation :
+    /// `old_layout(PRESENT_SRC_KHR)` à l'aller, le même au retour. **Donc la seule façon de relire
+    /// une image du moteur était d'avoir un écran devant soi.**
+    ///
+    /// *C'est exactement la raison structurelle pour laquelle « le rendu casse en silence » sur ce
+    /// projet* : `GpuContext::sans_ecran` sait ouvrir un GPU sans fenêtre depuis le 1ᵉʳ septembre
+    /// 2026, mais rien ne savait relire ce qu'il produisait — alors même que ses images sont
+    /// allouées en `TRANSFER_SRC` **précisément pour ça**.
+    ///
+    /// ⚠ **Et c'est la deuxième fois que ce défaut se trouve au même endroit.** Le `Drop` de ce
+    /// fichier détruisait lui aussi une chaîne de présentation absente (`SIGABRT`, corrigé le
+    /// 1ᵉʳ septembre). *Quand un même fichier suppose deux fois la présentation, ce n'est plus un
+    /// oubli : c'est que la présentation y a été traitée comme une fondation au lieu d'une
+    /// capacité.*
+    ///
+    /// Le geste juste n'était donc pas d'écrire une seconde version pour le banc — ç'aurait été
+    /// deux textes à faire évoluer en parallèle, donc tôt ou tard deux comportements. **C'est de
+    /// remonter la fonction là où elle appartient, et de faire du layout un PARAMÈTRE.**
+    ///
+    /// # Les paramètres
+    ///
+    /// - `image` : l'image à lire. Avec un écran, `swapchain_images[derniere_image]` — *l'image
+    ///   réellement rendue, jamais `[0]`, qui rendrait une photographie vieille de plusieurs
+    ///   trames.* Sans écran, l'une des images allouées par `sans_ecran`.
+    /// - `layout_actuel` : le layout dans lequel l'image se trouve **et dans lequel elle sera
+    ///   remise** en repartant. `PRESENT_SRC_KHR` après une présentation, `COLOR_ATTACHMENT_OPTIMAL`
+    ///   juste après un rendu.
+    /// - `extent`, `format` : la taille et le format de l'image.
+    ///
+    /// # ⚠ Ce que ça ne fait pas
+    ///
+    /// Aucune synchronisation fine : la barrière est volontairement large (`ALL_COMMANDS`), et
+    /// `end_single_time_commands` attend la file entière. *C'est un chemin de CAPTURE, hors du
+    /// chemin critique — ici la correction prime sur la finesse, et une barrière étroite mal posée
+    /// donnerait une image partielle sans que rien ne le dise.*
+    pub fn relire_image(
+        &self,
+        image: vk::Image,
+        layout_actuel: vk::ImageLayout,
+        extent: vk::Extent2D,
+        format: vk::Format,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let octets = (extent.width as vk::DeviceSize) * (extent.height as vk::DeviceSize) * 4;
+        let memory_props =
+            unsafe { self.instance.get_physical_device_memory_properties(self.physical_device) };
+
+        let (tampon, memoire) = crate::core::memory::MemoryManager::create_buffer(
+            &self.device,
+            &memory_props,
+            octets,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+
+        let plage = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+
+        let cmd = self.begin_single_time_commands()?;
+
+        let vers_source = vk::ImageMemoryBarrier::default()
+            .old_layout(layout_actuel)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .image(image)
+            .subresource_range(plage);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vers_source],
+            );
+        }
+
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            });
+
+        unsafe {
+            self.device.cmd_copy_image_to_buffer(
+                cmd,
+                image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                tampon,
+                &[region],
+            );
+        }
+
+        // On remet l'image comme on l'a trouvée : l'appelant continue son travail sans savoir
+        // qu'on est passé.
+        let retour = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(layout_actuel)
+            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .dst_access_mask(vk::AccessFlags::MEMORY_READ)
+            .image(image)
+            .subresource_range(plage);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[retour],
+            );
+        }
+
+        self.end_single_time_commands(cmd)?;
+
+        let mut bruts = vec![0u8; octets as usize];
+        unsafe {
+            let source =
+                self.device
+                    .map_memory(memoire, 0, octets, vk::MemoryMapFlags::empty())?;
+            std::ptr::copy_nonoverlapping(source as *const u8, bruts.as_mut_ptr(), octets as usize);
+            self.device.unmap_memory(memoire);
+            self.device.destroy_buffer(tampon, None);
+            self.device.free_memory(memoire, None);
+        }
+
+        // Les formats en `B8G8R8A8` rangent le bleu en premier : sans cet échange, une capture
+        // sort avec le rouge et le bleu inversés — et ça ne se voit pas sur une image grise.
+        if format == vk::Format::B8G8R8A8_SRGB || format == vk::Format::B8G8R8A8_UNORM {
+            for pixel in bruts.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+
+        let mut rvb = Vec::with_capacity(bruts.len() / 4 * 3);
+        for pixel in bruts.chunks_exact(4) {
+            rvb.extend_from_slice(&pixel[..3]);
+        }
+        Ok(rvb)
+    }
+
     /// Redimensionne la taille du Swapchain Vulkan lors du redimensionnement de la fenêtre.
     #[cfg(feature = "fenetre")]
     pub fn resize(&mut self, window: &Fenetre) {
@@ -911,5 +1077,154 @@ mod tests_sans_ecran {
         // Un contexte sans écran ne présente rien, par construction. Si ce drapeau disait le
         // contraire, la boucle de rendu essaierait de présenter dans le vide.
         assert!(!contexte.presente(), "un contexte sans ecran ne doit rien presenter");
+    }
+
+    /// Rend une image d'une seule couleur, sans écran, et la relit.
+    ///
+    /// Renvoie `None` si aucun Vulkan n'est joignable — l'absence est **dite** par l'appelant,
+    /// jamais avalée.
+    fn rendre_un_aplat(couleur: [f32; 4]) -> Option<(Vec<u8>, usize)> {
+        let ctx = match GpuContext::sans_ecran(16, 16, 1) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("⚠ aucun Vulkan joignable : {e}");
+                return None;
+            }
+        };
+        let image = ctx.swapchain_images[0];
+        let vue = ctx.swapchain_image_views[0];
+        let etendue = ctx.swapchain_extent;
+
+        let plage = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+
+        let cmd = ctx.begin_single_time_commands().ok()?;
+        unsafe {
+            // Une image fraîchement allouée est en `UNDEFINED` : on ne peut rien y écrire avant de
+            // l'avoir amenée dans le layout d'un attachement de couleur.
+            ctx.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::NONE)
+                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .image(image)
+                    .subresource_range(plage)],
+            );
+
+            // ⭐ `CLEAR` écrit À TRAVERS l'attachement de couleur — donc la conversion sRGB du
+            // format s'applique, exactement comme pour un pixel dessiné. C'est ce qui rend ce
+            // test représentatif du vrai rendu, et pas seulement d'un remplissage mémoire.
+            let attache = vk::RenderingAttachmentInfo::default()
+                .image_view(vue)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue { float32: couleur },
+                });
+            ctx.device.cmd_begin_rendering(
+                cmd,
+                &vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: etendue })
+                    .layer_count(1)
+                    .color_attachments(std::slice::from_ref(&attache)),
+            );
+            ctx.device.cmd_end_rendering(cmd);
+        }
+        ctx.end_single_time_commands(cmd).ok()?;
+
+        let rvb = ctx
+            .relire_image(
+                image,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                etendue,
+                ctx.swapchain_format,
+            )
+            .ok()?;
+        let pixels = (etendue.width * etendue.height) as usize;
+        Some((rvb, pixels))
+    }
+
+    /// ⭐⭐⭐ **LE PREMIER TEST D'IMAGE GPU DE CE PROJET** (2 septembre 2026).
+    ///
+    /// # Ce qui n'existait pas avant lui, et pourquoi ça compte plus que ce qu'il vérifie
+    ///
+    /// Le moteur portait **105 tests, tous verts** — et **aucun** ne regardait un pixel produit
+    /// par la carte graphique. Ils vérifiaient des conventions et des calculs faits par le
+    /// processeur ; les quinze images de preuve du dépôt sortent d'un rastériseur écrit à la main,
+    /// **pas de Vulkan**.
+    ///
+    /// *C'est la raison pour laquelle « le rendu casse en silence » sur ce projet — et ce n'est
+    /// pas une négligence, c'est une architecture.* Le HUD est sorti à l'envers avec onze tests au
+    /// vert ; le chargeur de géométrie a éclairé tous les modèles importés de travers pendant des
+    /// mois, à 88° de la vérité, sous 221 tests verts. **Aucun test ne pouvait les voir, parce
+    /// qu'aucun test ne voyait d'image.**
+    ///
+    /// # Le critère, écrit avant le code
+    ///
+    /// Trois propriétés, chacune choisie pour ne dépendre d'aucune convention fragile :
+    ///
+    /// 1. **Le rendu s'exécute vraiment sans écran.** Une passe de rendu dynamique (`1.3`) ouverte
+    ///    et fermée sur une image que personne ne présente. *Rien ne prouvait jusqu'ici que
+    ///    `dynamic_rendering` — la seule fonctionnalité 1.3 que le moteur demande — fonctionne.*
+    /// 2. **⭐ L'ordre des canaux est le bon.** Le format est `B8G8R8A8` : le bleu vient en
+    ///    premier en mémoire. Un rouge pur doit ressortir en rouge. *Ce piège ne se voit sur
+    ///    aucune image grise — et une capture aux canaux inversés a l'air parfaitement normale
+    ///    tant qu'on ne connaît pas la couleur attendue.*
+    /// 3. **⭐⭐ La chaîne écrit bien dans un espace sRGB.** Un gris à 0,5 **linéaire** doit
+    ///    ressortir nettement **au-dessus** de 128 (≈188). S'il sortait à 128, le moteur écrirait
+    ///    en linéaire tout en croyant faire du sRGB — et toute la courbe de tonalité porterait sur
+    ///    une hypothèse fausse.
+    ///
+    /// ⚠ **Aucune empreinte d'image n'est gravée ici, et c'est délibéré.** La règle est née la
+    /// veille en mesurant que deux architectures donnent des images identiques *au bit près* sauf
+    /// accumulation : *un test qui grave une empreinte passerait sur cette machine et tomberait
+    /// chez quelqu'un d'autre, en accusant un code parfaitement juste.* On teste des
+    /// **propriétés**, jamais une valeur exacte.
+    #[test]
+    fn le_gpu_rend_une_image_sans_ecran_et_on_la_relit() {
+        // ── 1 & 2 : le rouge pur, qui prouve le rendu ET l'ordre des canaux ──────────────
+        let Some((rvb, pixels)) = rendre_un_aplat([1.0, 0.0, 0.0, 1.0]) else {
+            println!("  (le test est neutralise, PAS reussi — il n'a rien prouve)");
+            return;
+        };
+        assert_eq!(rvb.len(), pixels * 3, "il manque des pixels a la relecture");
+        println!("  rouge pur relu   : R={} V={} B={}", rvb[0], rvb[1], rvb[2]);
+        for (i, pixel) in rvb.chunks_exact(3).enumerate() {
+            assert_eq!(
+                pixel,
+                [255u8, 0, 0],
+                "pixel {i} : un rouge pur est ressorti {pixel:?} — canaux inverses ou rendu muet"
+            );
+        }
+
+        // Le vert pur : sans lui, un code qui rendrait toujours le premier canal passerait.
+        let (vert, _) = rendre_un_aplat([0.0, 1.0, 0.0, 1.0]).expect("Vulkan etait la a l'instant");
+        println!("  vert pur relu    : R={} V={} B={}", vert[0], vert[1], vert[2]);
+        assert_eq!(&vert[..3], [0u8, 255, 0], "un vert pur n'est pas ressorti vert");
+
+        // ── 3 : la preuve que la chaîne est bien en sRGB ─────────────────────────────────
+        let (gris, _) = rendre_un_aplat([0.5, 0.5, 0.5, 1.0]).expect("Vulkan etait la a l'instant");
+        let clair = gris[0];
+        println!("  gris 0,5 lineaire ressort a {clair}/255 (sRGB predit ~188, lineaire dirait 128)");
+        assert!(
+            clair > 160,
+            "un gris 0,5 lineaire est ressorti a {clair} : la chaine n'applique PAS la courbe sRGB, \
+             alors que tout le reste du moteur le suppose"
+        );
+        assert_eq!(gris[0], gris[1], "un gris doit rester gris");
+        assert_eq!(gris[1], gris[2], "un gris doit rester gris");
     }
 }
