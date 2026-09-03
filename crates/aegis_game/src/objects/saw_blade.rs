@@ -37,10 +37,19 @@ impl SawBladeObject {
         // cubes) — le dire plutôt que le taire : c'est un arbitrage entre deux défauts, pas une
         // correction.
         //
+        // ⚠⚠ **ET CE COMMENTAIRE A MENTI PENDANT TROIS JOURS, ce qui vaut d'être gardé ici.** Il
+        // affirmait, au présent, que `voxeliser_pour_le_monde` « reste juste et sert les autres
+        // objets importés ». **Le commit qui écrivait cette phrase était celui qui supprimait cette
+        // fonction** (`babe31c`, 31 août 2026), et plus aucun objet ne voxelisait quoi que ce soit.
+        // Le module du moteur a dormi le 3 septembre — trouvé non pas par une relecture, mais par
+        // une commande qui cherche ce que personne n'appelle (`--example etat`).
+        //
+        // *Un commentaire qui décrit une intention non réalisée est plus dangereux qu'une absence :
+        // l'absence se remarque, la fausse assurance se fait confirmer par chaque relecture.*
+        //
         // ## Ce qui la ferait entrer dans la trame POUR DE VRAI
         //
-        // Rien ici : `voxeliser_pour_le_monde` reste juste, et sert les autres objets importés. Ce
-        // qui manque est **en amont, dans le modèle** — des dents d'au moins deux voxels, donc
+        // Rien ici. Ce qui manque est **en amont, dans le modèle** — des dents d'au moins deux voxels, donc
         // taillées pour une scie de 1,5 bloc, ou une scie plus grande. Affiner la trame pour un
         // seul objet est le piège à éviter : elle vaudrait alors deux chiffres au lieu d'un, et
         // l'objet cesserait de tomber sur la même grille que le décor — soit exactement la

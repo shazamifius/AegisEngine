@@ -50,8 +50,10 @@ fn tile_hash(x: i32, y: i32, seed: u32) -> u32 {
 ///
 /// ## ⚠ Ce chiffre vit dans le JEU, et pourquoi le moteur n'y touchera jamais
 ///
-/// Le moteur sait voxeliser ([`aegis_engine::geometry::voxel`]) : c'est de la geometrie, sans
-/// gout. Mais **la finesse de la trame est une decision de direction artistique**, au meme titre
+/// Le moteur SAVAIT voxeliser : c'est de la geometrie, sans gout. ⚠ Son module dort depuis le
+/// 3 septembre 2026 (`geometry/_voxel.rs`) — plus rien ne l'appelait depuis que la scie est
+/// revenue lisse, et le raisonnement ci-dessous reste vrai le jour ou on le rallumera.
+/// Mais **la finesse de la trame est une decision de direction artistique**, au meme titre
 /// que la couleur du ciel. Un moteur qui graverait `1/8` deciderait du grain de tous les jeux
 /// qu'il portera.
 ///
