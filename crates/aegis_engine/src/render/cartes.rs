@@ -434,23 +434,58 @@ mod tests {
         )
     }
 
+    /// Une image de carte : cible de rendu **et** lisible par un shader ensuite.
+    fn image_de_carte(
+        ctx: &GpuContext,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        cote: u32,
+    ) -> Option<(vk::Image, vk::ImageView, vk::DeviceMemory)> {
+        image(
+            ctx,
+            memory_props,
+            cote,
+            FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageAspectFlags::COLOR,
+        )
+    }
+
     /// L'image de profondeur qui départage les faces d'une même carte.
     fn image_de_profondeur(
         ctx: &GpuContext,
         memory_props: &vk::PhysicalDeviceMemoryProperties,
         cote: u32,
     ) -> Option<(vk::Image, vk::ImageView, vk::DeviceMemory)> {
+        image(
+            ctx,
+            memory_props,
+            cote,
+            FORMAT_PROFONDEUR,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk::ImageAspectFlags::DEPTH,
+        )
+    }
+
+    /// Une image carrée, son allocation et sa vue — **une seule fois, pour les deux usages**.
+    fn image(
+        ctx: &GpuContext,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        cote: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+        aspect: vk::ImageAspectFlags,
+    ) -> Option<(vk::Image, vk::ImageView, vk::DeviceMemory)> {
         let image = unsafe {
             ctx.device.create_image(
                 &vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
-                    .format(FORMAT_PROFONDEUR)
+                    .format(format)
                     .extent(vk::Extent3D { width: cote, height: cote, depth: 1 })
                     .mip_levels(1)
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                    .usage(usage)
                     .sharing_mode(vk::SharingMode::EXCLUSIVE)
                     .initial_layout(vk::ImageLayout::UNDEFINED),
                 None,
@@ -478,9 +513,9 @@ mod tests {
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(FORMAT_PROFONDEUR)
+                    .format(format)
                     .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::DEPTH,
+                        aspect_mask: aspect,
                         base_mip_level: 0,
                         level_count: 1,
                         base_array_layer: 0,
@@ -841,5 +876,414 @@ mod tests {
                 ecart * 100.0
             );
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    //  LA CHAÎNE COMPLÈTE : un maillage → deux cartes → la réfraction → une image
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+
+    const ETA: f32 = 1.0 / 1.5;
+
+    /// Snell, sous forme vectorielle. **Écrite à part du shader, exprès.**
+    ///
+    /// `None` = réflexion totale interne : ce n'est pas un cas à coder, c'est ce qui reste quand la
+    /// racine n'existe pas.
+    fn refracter(incident: Vec3, normale: Vec3, eta: f32) -> Option<Vec3> {
+        let cos_i = -normale.dot(incident);
+        let reste = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
+        (reste >= 0.0).then(|| incident * eta + normale * (eta * cos_i - reste.sqrt()))
+    }
+
+    /// ⭐ **LA VÉRITÉ** — la direction qui ressort d'une bille de verre, analytiquement.
+    ///
+    /// Deux interfaces, la sphère résolue exactement aux deux, aucune carte et aucun maillage.
+    /// *C'est contre ce vecteur que l'image produite par toute la chaîne est jugée.*
+    fn direction_de_sortie(direction: Vec3) -> Option<Vec3> {
+        let origine = Vec3::new(0.0, 0.0, -RECUL);
+        let (t0, _) = verite(direction)?;
+        let entree = origine + direction * t0;
+        let dedans = refracter(direction, entree * (1.0 / RAYON), ETA)?;
+
+        // Où ce rayon interne ressort : la seconde racine, depuis un point DÉJÀ sur la sphère.
+        let b = entree.dot(dedans);
+        let sortie = entree + dedans * (-2.0 * b);
+        // ⚠ La normale pointe vers l'extérieur ; en sortant on la retourne, et le rapport
+        // d'indices s'inverse avec elle.
+        refracter(dedans, sortie * (-1.0 / RAYON), 1.0 / ETA)
+    }
+
+    /// ⭐⭐⭐ **LE TEST QUI BOUCLE LA CHAÎNE — et la première image de matière du moteur.**
+    ///
+    /// Jusqu'ici les deux moitiés existaient sans se parler : `verre` savait réfracter mais lisait
+    /// des cartes écrites à la main dans son propre test, et `cartes` savait rastériser mais
+    /// personne ne lisait ce qu'elle produisait. **Ceci les branche.**
+    ///
+    /// ⚠⚠ **ET LE REPÈRE EST LE PIÈGE DE CE BRANCHEMENT.** Le banc de `verre` décrit sa caméra
+    /// avec `droite = +X` en regardant vers `+Z` — un repère **main gauche**. La caméra du moteur
+    /// est en main droite : son axe droit est `−X`. *Donner au shader les constantes du banc
+    /// produirait une image parfaitement plausible et fausse, avec un verre qui dévie la lumière
+    /// du mauvais côté — et une bille est trop symétrique pour qu'une silhouette le révèle.*
+    #[test]
+    fn le_verre_refracte_une_bille_rasterisee_contre_la_verite_analytique() {
+        let cote = 256u32;
+        let Some(bruts) = chaine_complete(cote, 64) else { return };
+
+        let (mut somme, mut compte, mut pire) = (0.0f64, 0usize, 0.0f32);
+        for y in 0..cote {
+            for x in 0..cote {
+                let d = direction_du_pixel(x, y, cote);
+                let Some(attendue) = direction_de_sortie(d) else { continue };
+                let i = ((y * cote + x) * 4) as usize;
+                // Format B8G8R8A8 : le bleu vient en premier. Les directions sont encodées en
+                // `v * 0,5 + 0,5`, donc lues en `v * 2 − 1`.
+                let lu = Vec3::new(
+                    bruts[i + 2] as f32 / 255.0 * 2.0 - 1.0,
+                    bruts[i + 1] as f32 / 255.0 * 2.0 - 1.0,
+                    bruts[i] as f32 / 255.0 * 2.0 - 1.0,
+                )
+                .normalize_or_zero();
+                if lu.length() < 0.5 {
+                    continue;
+                }
+                let angle = attendue.dot(lu).clamp(-1.0, 1.0).acos().to_degrees();
+                somme += angle as f64;
+                pire = pire.max(angle);
+                compte += 1;
+            }
+        }
+
+        let moyenne = somme / compte.max(1) as f64;
+        println!(
+            "  bille RASTERISEE -> refraction : ecart moyen {moyenne:.3}° (pire {pire:.3}°) sur \
+             {compte} pixels"
+        );
+        println!("  pour memoire : cartes EXACTES 2,132° · physique seule 1,789° · sans Newton 16,773°");
+
+        assert!(compte > 5000, "trop peu de pixels compares : la chaine n'a rien produit");
+        // ⚠ Le seuil est LARGE et c'est voulu : il ne mesure pas une qualité, il refuse une chaîne
+        // débranchée ou un repère inversé. *Le repère faux donnait 44° sur les normales seules ;
+        // ici il donnerait bien davantage.* La qualité, elle, se lit dans le chiffre affiché et se
+        // compare aux trois repères de la ligne au-dessus.
+        assert!(
+            moyenne < 6.0,
+            "la chaine complete s'ecarte de {moyenne:.3}° de la verite — au-dela des 2,132° des \
+             cartes exactes plus le cout de la rasterisation. Verifier le REPERE en premier."
+        );
+    }
+
+    /// Rastérise la bille dans deux cartes, branche le verre dessus, et rend l'image des
+    /// directions de sortie.
+    fn chaine_complete(cote: u32, subdivisions: u32) -> Option<Vec<u8>> {
+        chaine(cote, subdivisions, 1.0, [0.0, 0.0, 0.0], vk::Format::B8G8R8A8_UNORM)
+    }
+
+    /// La même chaîne, mais qui rend une COULEUR — donc à travers la chaîne du vrai rendu, sRGB
+    /// comprise. *Une direction se lit en `UNORM`, une couleur en `SRGB` : à travers une courbe de
+    /// gamma, la quantification est trois fois plus grossière autour de 0,5.*
+    fn chaine_complete_couleur(cote: u32, subdivisions: u32, sigma: [f32; 3]) -> Option<Vec<u8>> {
+        chaine(cote, subdivisions, 0.0, sigma, vk::Format::B8G8R8A8_SRGB)
+    }
+
+    fn chaine(
+        cote: u32,
+        subdivisions: u32,
+        mode: f32,
+        sigma: [f32; 3],
+        format_cible: vk::Format,
+    ) -> Option<Vec<u8>> {
+        // La cible finale est une image d'écran ordinaire ; les deux cartes vivent à part, en
+        // flottants.
+        let ctx = match GpuContext::sans_ecran_format(cote, cote, 1, format_cible) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("⚠ aucun Vulkan joignable : {e}");
+                return None;
+            }
+        };
+        let memory_props =
+            unsafe { ctx.instance.get_physical_device_memory_properties(ctx.physical_device) };
+
+        let (sommets, indices) =
+            Primitives::create_uv_sphere(RAYON, subdivisions, subdivisions * 2);
+        let maillage = GpuMesh::upload(&ctx, &memory_props, &sommets, &indices)
+            .expect("le maillage de la bille n'a pas pu monter sur la carte");
+
+        let mut cadre = crate::render::cadre::Cadre::nouveau(&ctx, &memory_props)
+            .expect("le cadre uniforme n'a pas pu etre cree");
+        let oeil = Vec3::new(0.0, 0.0, -RECUL);
+        let mut camera = crate::scene::camera::Camera::new(oeil, Vec3::new(0.0, 0.0, 0.0), 1.0);
+        camera.fov_y_radians = 2.0 * TANGENTE.atan();
+        let view_proj = camera.compute_projection_matrix() * camera.compute_view_matrix();
+        cadre.ecrire(&crate::render::cadre::DonneesImage::nouvelle(
+            view_proj,
+            Mat4::IDENTITY,
+            [oeil.x, oeil.y, oeil.z],
+            crate::render::cadre::Ambiance::default(),
+            &[],
+        ));
+
+        let instances = crate::render::instances::Instances::nouveau(&ctx, &memory_props, 1)
+            .expect("le tampon d'instances n'a pas pu etre cree");
+        let passe = Cartes::nouvelle(&ctx, cadre.layout_descripteur)
+            .expect("les pipelines de cartes n'ont pas pu etre crees");
+        let profondeur = image_de_profondeur(&ctx, &memory_props, cote)
+            .expect("l'image de profondeur n'a pas pu etre creee");
+
+        let mut cartes = Vec::new();
+        for face in [Faces::Entree, Faces::Sortie] {
+            let cible = image_de_carte(&ctx, &memory_props, cote)
+                .expect("une image de carte n'a pas pu etre creee");
+            instances.recommencer();
+            rendre_dans(
+                &ctx, &passe, face, &cadre, &maillage, &instances, cible.0, cible.1, profondeur.1,
+                cote,
+            );
+            cartes.push(cible);
+        }
+
+        // ── La réfraction lit les deux cartes et écrit l'image ──
+        let verre = crate::render::verre::Verre::nouvelle(&ctx, ctx.swapchain_format)
+            .expect("la passe de verre n'a pas pu etre creee");
+        verre.brancher(&ctx, cartes[0].1, cartes[1].1);
+
+        let k = crate::render::verre::ConstantesVerre {
+            position: [oeil.x, oeil.y, oeil.z, 0.0],
+            // ⚠⚠ `−X` À DROITE, et c'est tout le sujet de ce test. Voir sa documentation.
+            droite: [-1.0, 0.0, 0.0, TANGENTE],
+            haut: [0.0, 1.0, 0.0, TANGENTE],
+            avant: [0.0, 0.0, 1.0, 0.0],
+            // Pas d'absorption : on mesure une DIRECTION, et une couleur absorbée n'en dit rien.
+            matiere: [sigma[0], sigma[1], sigma[2], ETA],
+            // `z = 1` : le mode « direction » (le vecteur de sortie) ; `z = 0` : une vraie image.
+            reglages: [cote as f32, cote as f32, mode, 8.0],
+        };
+
+        let image = ctx.swapchain_images[0];
+        let vue = ctx.swapchain_image_views[0];
+        let etendue = vk::Extent2D { width: cote, height: cote };
+        let cmd = ctx.begin_single_time_commands().expect("tampon de commandes");
+        unsafe {
+            barriere(
+                &ctx, cmd, image, vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            );
+            let attache = vk::RenderingAttachmentInfo::default()
+                .image_view(vue)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.0; 4] } });
+            ctx.device.cmd_begin_rendering(
+                cmd,
+                &vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: etendue })
+                    .layer_count(1)
+                    .color_attachments(std::slice::from_ref(&attache)),
+            );
+            regler_la_vue(&ctx, cmd, cote);
+        }
+        verre.dessiner(&ctx, cmd, &k);
+        unsafe { ctx.device.cmd_end_rendering(cmd) };
+        ctx.end_single_time_commands(cmd).expect("soumission");
+
+        let bruts = ctx
+            .relire_image_brute(
+                image,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                etendue,
+                ctx.swapchain_format,
+            )
+            .expect("relecture de l'image finale");
+
+        unsafe {
+            ctx.device.device_wait_idle().ok();
+            for (img, vue, mem) in cartes.iter().chain(std::iter::once(&profondeur)) {
+                ctx.device.destroy_image_view(*vue, None);
+                ctx.device.destroy_image(*img, None);
+                ctx.device.free_memory(*mem, None);
+            }
+        }
+        verre.detruire(&ctx.device);
+        passe.detruire(&ctx.device);
+        cadre.detruire(&ctx.device);
+        Some(bruts)
+    }
+
+    /// Une transition de layout, écrite une fois.
+    ///
+    /// ⚠ Les étages et les accès sont volontairement LARGES (`ALL_COMMANDS`) : c'est un chemin de
+    /// banc, hors du chemin critique du rendu. *Un banc qui optimise ses barrières mesure ses
+    /// barrières.*
+    unsafe fn barriere(
+        ctx: &GpuContext,
+        cmd: vk::CommandBuffer,
+        image: vk::Image,
+        avant: vk::ImageLayout,
+        apres: vk::ImageLayout,
+    ) {
+        unsafe {
+            ctx.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::default()
+                    .old_layout(avant)
+                    .new_layout(apres)
+                    .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+                    .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
+                    .image(image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })],
+            );
+        }
+    }
+
+    /// Le cadrage, identique pour toutes les passes de ce banc.
+    unsafe fn regler_la_vue(ctx: &GpuContext, cmd: vk::CommandBuffer, cote: u32) {
+        unsafe {
+            ctx.device.cmd_set_viewport(
+                cmd,
+                0,
+                &[vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: cote as f32,
+                    height: cote as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
+            );
+            ctx.device.cmd_set_scissor(
+                cmd,
+                0,
+                &[vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: vk::Extent2D { width: cote, height: cote },
+                }],
+            );
+        }
+    }
+
+    /// Rastérise une face dans l'image donnée, et la laisse **lisible par un shader**.
+    ///
+    /// *C'est la seule différence avec `rendre_une_carte`, qui rapatrie l'image au lieu de la
+    /// laisser sur la carte — les deux partagent tout le reste.*
+    #[allow(clippy::too_many_arguments)]
+    fn rendre_dans(
+        ctx: &GpuContext,
+        passe: &Cartes,
+        face: Faces,
+        cadre: &crate::render::cadre::Cadre,
+        maillage: &GpuMesh,
+        instances: &crate::render::instances::Instances,
+        image: vk::Image,
+        vue: vk::ImageView,
+        vue_profondeur: vk::ImageView,
+        cote: u32,
+    ) {
+        let cmd = ctx.begin_single_time_commands().expect("tampon de commandes");
+        unsafe {
+            barriere(
+                ctx, cmd, image, vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            );
+            let couleur = vk::RenderingAttachmentInfo::default()
+                .image_view(vue)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.0; 4] } });
+            let profondeur = vk::RenderingAttachmentInfo::default()
+                .image_view(vue_profondeur)
+                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: face.profondeur_initiale(),
+                        stencil: 0,
+                    },
+                });
+            ctx.device.cmd_begin_rendering(
+                cmd,
+                &vk::RenderingInfo::default()
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: vk::Extent2D { width: cote, height: cote },
+                    })
+                    .layer_count(1)
+                    .color_attachments(std::slice::from_ref(&couleur))
+                    .depth_attachment(&profondeur),
+            );
+            regler_la_vue(ctx, cmd, cote);
+        }
+
+        passe.dessiner(
+            ctx,
+            cmd,
+            face,
+            cadre,
+            &Objet { maillage, instances, modele: Mat4::IDENTITY },
+        );
+        unsafe {
+            ctx.device.cmd_end_rendering(cmd);
+            // ⭐ La carte devient une TEXTURE : c'est cette transition qui la fait passer du
+            // statut d'image qu'on écrit à celui d'image qu'un shader lit.
+            barriere(
+                ctx, cmd, image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            );
+        }
+        ctx.end_single_time_commands(cmd).expect("soumission");
+    }
+
+    /// ⭐⭐⭐ **LA PREMIÈRE IMAGE DE MATIÈRE DU MOTEUR ISSUE D'UNE VRAIE GÉOMÉTRIE.**
+    ///
+    /// Les trois images du verre existaient déjà — mais leur bille était une **équation**, résolue
+    /// analytiquement dans le test. Celles-ci viennent d'un **maillage rastérisé par la carte
+    /// graphique**, exactement comme viendra la géométrie de Blender.
+    ///
+    /// ⚠ **Un test ne peut pas juger ces images.** Il vérifie qu'elles sont écrites et qu'elles ne
+    /// sont pas vides ; *le juge du rendu perçu est son œil, et rien d'autre.*
+    #[test]
+    fn les_images_de_la_bille_rasterisee() {
+        let Some(directions) = chaine_complete(256, 64) else {
+            println!("  (aucune image ecrite — pas de Vulkan)");
+            return;
+        };
+        let Some(couleur) = chaine_complete_couleur(256, 64, [0.0, 0.0, 0.0]) else { return };
+        let Some(coloree) = chaine_complete_couleur(256, 64, [0.35, 0.9, 1.6]) else { return };
+
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier de preuves");
+        for (nom, bruts) in [
+            ("cartes-bille-directions.png", &directions),
+            ("cartes-bille-rasterisee.png", &couleur),
+            ("cartes-bille-absorbante.png", &coloree),
+        ] {
+            let mut rvb = Vec::with_capacity(bruts.len() / 4 * 3);
+            for p in bruts.chunks_exact(4) {
+                // B8G8R8A8 : le bleu vient en premier.
+                rvb.extend_from_slice(&[p[2], p[1], p[0]]);
+            }
+            let png = crate::image::png::encoder(256, 256, &rvb).expect("png");
+            std::fs::write(dossier.join(nom), png).expect("ecriture");
+            println!("  ecrit : target/preuves/{nom}");
+        }
+
+        // Garde anti-image-vide : une image entièrement noire passerait pour un rendu.
+        let vivants = couleur.chunks_exact(4).filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8).count();
+        assert!(
+            vivants > 10_000,
+            "seulement {vivants} pixels non noirs : l'image est vide, la chaine n'a rien rendu"
+        );
     }
 }
