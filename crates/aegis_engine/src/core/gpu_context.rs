@@ -6,6 +6,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::ffi::CStr;
 #[cfg(feature = "fenetre")]
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// ⭐⭐ **CE QU'EST UNE FENÊTRE POUR LE MOTEUR — et ce qu'elle devient quand il n'y en a pas.**
 ///
@@ -24,6 +25,85 @@ pub type Fenetre = winit::window::Window;
 /// Sans système de fenêtrage, aucune fenêtre ne peut exister — et le compilateur le sait.
 #[cfg(not(feature = "fenetre"))]
 pub enum Fenetre {}
+
+/// ⭐⭐ **L'INSTANCE VULKAN DU PROCESSUS — créée une seule fois, et JAMAIS détruite.**
+///
+/// # Le défaut qu'elle ferme, mesuré le 3 septembre 2026
+///
+/// La suite de tests du moteur **plantait une fois sur quatre** (`5 crashs / 20`), par `SIGSEGV`,
+/// **après** que tous les tests aient affiché `ok` — donc sans qu'aucune vérification n'échoue et
+/// sans qu'aucun coupable ne soit nommé.
+///
+/// Le cœur du core dump dit tout en trois lignes : un thread meurt dans
+/// `__nptl_deallocate_tsd` — la libération des données locales à un thread — en appelant un
+/// destructeur enregistré par `libnvidia-glcore`, **pendant qu'un autre thread est dans
+/// `_dl_close_worker`**, c'est-à-dire en train de décharger `libGLX_nvidia.so.0`.
+///
+/// Or, chez NVIDIA, `libGLX_nvidia.so.0` **EST** le pilote Vulkan (son `nvidia_icd.json` la
+/// désigne). Le loader Vulkan la décharge quand la **dernière** instance est détruite ; tout
+/// thread qui se termine ensuite saute alors dans un destructeur situé dans une bibliothèque
+/// **démappée**.
+///
+/// Trois tests ouvraient chacun leur propre contexte, donc trois instances créées puis détruites
+/// dans un même processus — **une chose que le moteur ne fait jamais** : `GpuContext::new` en crée
+/// une seule et la garde jusqu'à la sortie. *Le défaut n'était pas dans le pilote : il était dans
+/// l'écart entre ce que le banc fait et ce que le moteur fait.*
+///
+/// # Pourquoi ne rien détruire n'est pas une fuite
+///
+/// Une instance Vulkan vit aussi longtemps que le processus qui s'en sert ; ici elle est
+/// **libérée par la fin du processus**, exactement comme dans le vrai moteur. Ce qui serait une
+/// faute, c'est de ne pas libérer les ressources qu'on alloue à l'intérieur — et le `Drop` de
+/// [`GpuContext`] continue de toutes les détruire, y compris le `device`.
+///
+/// # Ce que ça ne prouve pas
+///
+/// Que le pilote n'a plus aucune course. On ne supprime pas son défaut : **on cesse de le
+/// déclencher**, en n'offrant plus jamais l'occasion d'un déchargement. La vérification est
+/// statistique et elle est écrite dans le test
+/// [`tests_sans_ecran::une_seule_instance_vulkan_pour_tout_le_processus`].
+static INSTANCE_DU_PROCESSUS: OnceLock<Result<(ash::Entry, ash::Instance), String>> =
+    OnceLock::new();
+
+/// Rend l'instance Vulkan du processus, en la créant au premier appel.
+///
+/// ⚠ L'erreur est conservée **en texte** : `Box<dyn Error>` n'est ni `Send` ni `Sync`, donc ne
+/// peut pas vivre dans un `static`. Le message est rendu à l'identique à chaque appel suivant —
+/// *une seconde tentative ne réessaie pas, elle redit pourquoi la première a échoué.*
+fn instance_du_processus() -> Result<(ash::Entry, ash::Instance), Box<dyn std::error::Error>> {
+    let resultat = INSTANCE_DU_PROCESSUS.get_or_init(|| {
+        let entry = unsafe { ash::Entry::load() }.map_err(|e| e.to_string())?;
+
+        let nom = unsafe { CStr::from_bytes_with_nul_unchecked(b"AegisEngine Banc\0") };
+        let app_info = vk::ApplicationInfo::default()
+            .application_name(nom)
+            .application_version(vk::make_api_version(0, 0, 1, 0))
+            .engine_name(nom)
+            .engine_version(vk::make_api_version(0, 0, 1, 0))
+            // La MÊME version que `new` : un banc qui tournerait sous une autre version du
+            // pilote ne mesurerait pas le jeu.
+            .api_version(capacites::VERSION_EXIGEE);
+
+        // Aucune extension d'instance : rien ici ne sait ce qu'est un écran.
+        let instance = unsafe {
+            entry.create_instance(
+                &vk::InstanceCreateInfo::default().application_info(&app_info),
+                None,
+            )
+        }
+        .map_err(|e| e.to_string())?;
+
+        Ok((entry, instance))
+    });
+
+    match resultat {
+        // ⚠ Un `clone` d'`ash::Instance` ne duplique **aucune ressource Vulkan** : c'est le même
+        // identifiant et la même table de fonctions. C'est ce qui rend le partage possible sans
+        // changer une ligne du reste du moteur.
+        Ok(paire) => Ok(paire.clone()),
+        Err(message) => Err(message.clone().into()),
+    }
+}
 
 /// Struct regroupant la file de traitement et son index de famille.
 pub struct QueueInfo {
@@ -84,6 +164,16 @@ pub struct GpuContext {
     /// voit et qu'aucun œil ne remarque, parce que deux images consécutives se ressemblent : il
     /// ne se révèle que lorsqu'on demande à la mesure d'être exacte.
     pub derniere_image: usize,
+    /// ⭐ **Ce contexte POSSÈDE-t-il son instance Vulkan, ou l'emprunte-t-il au processus ?**
+    ///
+    /// La question n'est pas décorative : elle décide qui a le droit de la détruire. Avec un
+    /// écran ([`GpuContext::new`]) le contexte la crée, donc il la détruit. Sans écran, il
+    /// emprunte celle de [`INSTANCE_DU_PROCESSUS`], qui n'est jamais détruite — *sans quoi le
+    /// pilote se fait décharger sous les pieds des threads encore vivants.*
+    ///
+    /// *C'est la question « à qui appartient la chose qu'on manipule », posée avant de libérer
+    /// plutôt qu'après avoir planté.*
+    proprietaire_de_l_instance: bool,
 }
 
 impl GpuContext {
@@ -332,6 +422,9 @@ impl GpuContext {
             // à nous, et les détruire serait une faute.
             memoires_des_images: Vec::new(),
             derniere_image: 0,
+            // Le vrai moteur crée son instance et la garde jusqu'à la sortie : il en est le seul
+            // propriétaire, et c'est lui qui la détruit.
+            proprietaire_de_l_instance: true,
         })
     }
 
@@ -386,24 +479,12 @@ impl GpuContext {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Contexte Vulkan SANS ECRAN — aucune fenetre, aucun compositeur dans la mesure");
 
-        let entry = unsafe { ash::Entry::load()? };
-
-        let app_name = unsafe { CStr::from_bytes_with_nul_unchecked(b"AegisEngine Banc\0") };
-        let app_info = vk::ApplicationInfo::default()
-            .application_name(app_name)
-            .application_version(vk::make_api_version(0, 0, 1, 0))
-            .engine_name(app_name)
-            .engine_version(vk::make_api_version(0, 0, 1, 0))
-            // 1.3 pour la même raison que dans `new` — voir le commentaire là-haut. Les deux
-            // chemins doivent déclarer la MÊME version : un banc qui tournerait sous une version
-            // différente du jeu ne mesurerait pas le jeu.
-            .api_version(capacites::VERSION_EXIGEE);
-
-        // Aucune extension d'instance : c'est la différence de fond avec `new`. Rien ici ne sait
-        // ce qu'est un écran.
-        let instance = unsafe {
-            entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app_info), None)?
-        };
+        // ⭐ L'instance n'est PLUS créée ici : elle est empruntée au processus, une fois pour
+        // toutes. Le pourquoi — un `SIGSEGV` sur quatre exécutions, causé par le déchargement du
+        // pilote NVIDIA quand la dernière instance mourait — est écrit en entier sur
+        // [`INSTANCE_DU_PROCESSUS`]. *Ouvrir dix contextes sans écran d'affilée n'ouvre donc
+        // qu'une seule instance, exactement comme le fait le vrai moteur.*
+        let (entry, instance) = instance_du_processus()?;
 
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
         if physical_devices.is_empty() {
@@ -586,6 +667,9 @@ impl GpuContext {
             image_suivante: 0,
             memoires_des_images: memoires,
             derniere_image: 0,
+            // ⚠ L'instance appartient au processus, pas à ce contexte : la détruire ici ferait
+            // décharger le pilote alors que d'autres threads vivent encore.
+            proprietaire_de_l_instance: false,
             device,
         })
     }
@@ -1093,7 +1177,18 @@ impl Drop for GpuContext {
             }
 
             self.device.destroy_device(None);
-            self.instance.destroy_instance(None);
+
+            // **③ L'instance ne se détruit QUE si elle nous appartient.** Sans écran, elle est
+            // celle du processus ([`INSTANCE_DU_PROCESSUS`]) et plusieurs contextes la partagent :
+            // la détruire ici ferait décharger le pilote NVIDIA — qui **est** l'ICD Vulkan — sous
+            // les pieds des threads encore vivants, et le processus mourait d'un `SIGSEGV` une
+            // fois sur quatre, *après* que tous les tests aient dit `ok`.
+            //
+            // *Le champ dit à qui la chose appartient ; c'est la question à poser avant de
+            // libérer, pas après avoir planté.*
+            if self.proprietaire_de_l_instance {
+                self.instance.destroy_instance(None);
+            }
         }
         log::info!("Ressources Vulkan liberees proprement.");
     }
@@ -1170,6 +1265,59 @@ mod tests_sans_ecran {
         // Un contexte sans écran ne présente rien, par construction. Si ce drapeau disait le
         // contraire, la boucle de rendu essaierait de présenter dans le vide.
         assert!(!contexte.presente(), "un contexte sans ecran ne doit rien presenter");
+    }
+
+    /// ⭐⭐ **UNE SEULE INSTANCE VULKAN POUR TOUT LE PROCESSUS** — la garde du `SIGSEGV` du
+    /// 3 septembre 2026.
+    ///
+    /// # Ce qu'il garde, et pourquoi un test ne peut pas garder plus
+    ///
+    /// La suite plantait **une fois sur quatre** (`5 / 20`), par `SIGSEGV`, *après* que tous les
+    /// tests aient affiché `ok`. Cause mesurée : trois tests ouvraient chacun leur contexte, donc
+    /// créaient et **détruisaient** trois instances Vulkan ; à la mort de la dernière, le loader
+    /// déchargeait `libGLX_nvidia.so.0` — qui **est** le pilote Vulkan de NVIDIA — pendant que
+    /// d'autres threads de test se terminaient encore et appelaient des destructeurs situés dans
+    /// cette bibliothèque désormais démappée.
+    ///
+    /// ⚠ **Aucun test ne peut prouver qu'une course a disparu** : elle ne se produisait déjà que
+    /// trois fois sur quatre... dans l'autre sens. Ce test garde donc la **propriété qui supprime
+    /// la cause** — *le processus n'a qu'une instance, donc rien ne peut jamais être déchargé* —
+    /// et pas l'absence de symptôme. La vérification statistique (40 exécutions consécutives sans
+    /// plantage, contre 5 sur 20 avant) a été faite à la main le jour du correctif ; c'est elle
+    /// qui a le droit de dire que ça marche, pas ce test.
+    ///
+    /// *Ce qu'il empêche pour de bon, en revanche : que quelqu'un rétablisse un jour la
+    /// destruction de l'instance sans savoir ce qu'elle coûtait.*
+    #[test]
+    fn une_seule_instance_vulkan_pour_tout_le_processus() {
+        // On reproduit exactement le motif qui plantait : ouvrir, **détruire**, rouvrir.
+        let premier = match GpuContext::sans_ecran(16, 16, 1) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("⚠ aucun Vulkan joignable sur cette machine : {e}");
+                println!("  (le test est neutralise, PAS reussi — il n'a rien prouve)");
+                return;
+            }
+        };
+        let handle_du_premier = premier.instance.handle();
+        assert!(
+            !premier.proprietaire_de_l_instance,
+            "un contexte sans ecran ne doit JAMAIS posseder l'instance : la detruire fait \
+             decharger le pilote sous les pieds des threads encore vivants"
+        );
+        drop(premier);
+
+        let second = GpuContext::sans_ecran(32, 32, 1).expect(
+            "le second contexte doit s'ouvrir : si l'instance avait ete detruite avec le premier, \
+             c'est ici que tout s'ecroulerait",
+        );
+
+        assert_eq!(
+            handle_du_premier,
+            second.instance.handle(),
+            "deux contextes sans ecran doivent partager LA MEME instance Vulkan"
+        );
+        println!("  les deux contextes partagent l'instance {handle_du_premier:?}");
     }
 
     /// Rend une image d'une seule couleur, sans écran, et la relit.
