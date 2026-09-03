@@ -1,4 +1,5 @@
 use crate::chrono_gpu::ChronoGpu;
+use crate::core::capacites;
 use ash::vk;
 #[cfg(feature = "fenetre")]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -30,7 +31,10 @@ pub struct QueueInfo {
     pub family_index: u32,
 }
 
-/// Contexte Pure Vulkan 1.4 From Scratch (Zero Middleware / Zero wgpu).
+/// Contexte Vulkan pur, ecrit a la main (aucun intermediaire, aucun wgpu).
+///
+/// ⚠ La version exigee vit dans [`crate::core::capacites::VERSION_EXIGEE`] — **pas ici**. Ce
+/// commentaire a annonce « 1.4 » pendant deux jours apres la descente en 1.3.
 pub struct GpuContext {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
@@ -83,10 +87,11 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
-    /// Initialise une instance Vulkan 1.4 native pure, sélectionne le GPU et crée le Swapchain.
+    /// Initialise l'instance Vulkan, selectionne le GPU **apres avoir verifie qu'il convient**, et
+    /// cree la chaine de presentation.
     #[cfg(feature = "fenetre")]
     pub fn new(window: Arc<Fenetre>) -> Result<Self, Box<dyn std::error::Error>> {
-        log::info!("Initialisation de l'API Vulkan 1.4 Native via ash (Pure From Scratch)...");
+        log::info!("Initialisation de Vulkan via ash, ecrit a la main...");
 
         // 1. Chargement de la bibliothèque dynamique Vulkan
         let entry = unsafe { ash::Entry::load()? };
@@ -97,7 +102,7 @@ impl GpuContext {
 
         let instance_extensions = ash_window::enumerate_required_extensions(display_handle)?;
 
-        let app_name = unsafe { CStr::from_bytes_with_nul_unchecked(b"AegisEngine Pure Vulkan 1.4\0") };
+        let app_name = unsafe { CStr::from_bytes_with_nul_unchecked(b"AegisEngine\0") };
 
         let app_info = vk::ApplicationInfo::default()
             .application_name(app_name)
@@ -112,19 +117,22 @@ impl GpuContext {
             // **Le prix de cette ligne se paie ailleurs que sur cette machine.** Une RTX 4070
             // annonce 1.4, donc rien ne se voyait ici. Mais un GPU mobile n'y est pas :
             // l'IMG BXM-8-256 d'un Motorola G54 s'arrête à **Vulkan 1.3**, et le Snapdragon XR2
-            // d'un Meta Quest 2 — la machine de référence du projet — est en dessous. *Déclarer une
-            // version qu'on n'utilise pas, c'est risquer de se faire refuser la toute première
-            // fonction Vulkan du programme, pour rien.*
+            // d'un Meta Quest 2 — la machine de référence du projet — est en dessous. *Declarer une version
+            // qu'on n'utilise pas ne sert a rien — et ⚠ la justification ecrite ici le 1er septembre
+            // etait TROP DRAMATIQUE : depuis Vulkan 1.1 le loader ne refuse plus une `apiVersion`
+            // trop haute (c'est en 1.0 qu'il renvoyait `VK_ERROR_INCOMPATIBLE_DRIVER`). Ce qui se
+            // paie vraiment, c'est le `vkCreateDevice` : les fonctionnalites d'une version que la
+            // carte n'a pas ne peuvent pas etre activees. Voir `core::capacites`.*
             //
             // ⚠ Ce que ça ne prouve pas : que le moteur démarre sur mobile. Rien n'a jamais tourné
             // sur un téléphone. Ça retire **un** obstacle certain, pas tous les obstacles.
-            .api_version(vk::make_api_version(0, 1, 3, 0));
+            .api_version(capacites::VERSION_EXIGEE);
 
         let instance_create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_extension_names(instance_extensions);
 
-        log::info!("Création de l'instance Vulkan 1.4 Core...");
+        log::info!("Création de l'instance Vulkan 1.3...");
         let instance = unsafe { entry.create_instance(&instance_create_info, None)? };
 
         // 3. Surface de fenêtrage
@@ -187,25 +195,21 @@ impl GpuContext {
             .queue_family_index(graphics_family_idx)
             .queue_priorities(&queue_priorities);
 
-        // Activation des fonctionnalités Vulkan 1.3 & 1.4 en Core
-        let mut features_13 = vk::PhysicalDeviceVulkan13Features::default()
-            .dynamic_rendering(true)
-            .synchronization2(true);
+        // ⭐ La carte est INTERROGÉE avant qu'on lui demande quoi que ce soit, et le refus NOMME ce
+        // qui manque. Avant le 3 septembre 2026, `create_device` échouait ici sans un mot utile.
+        unsafe { capacites::verifier(&instance, physical_device)? };
 
-        let mut features_12 = vk::PhysicalDeviceVulkan12Features::default()
-            .buffer_device_address(true)
-            .descriptor_indexing(true);
-
-        let mut features_core = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut features_13)
-            .push_next(&mut features_12);
+        // Ce que le moteur active — la liste vit dans `core::capacites`, à un seul endroit, et un
+        // test échoue si elle contient une fonctionnalité dont aucun code vivant ne se sert.
+        let mut features_13 = capacites::fonctionnalites_13();
+        let mut features_core = vk::PhysicalDeviceFeatures2::default().push_next(&mut features_13);
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(std::slice::from_ref(&queue_create_info))
             .enabled_extension_names(&device_extension_names)
             .push_next(&mut features_core);
 
-        log::info!("Création du Logical Device Vulkan 1.4...");
+        log::info!("Création du Logical Device Vulkan 1.3...");
         let device = unsafe { instance.create_device(physical_device, &device_create_info, None)? };
         let graphics_queue = unsafe { device.get_device_queue(graphics_family_idx, 0) };
 
@@ -297,7 +301,7 @@ impl GpuContext {
         let render_finished_semaphore = unsafe { device.create_semaphore(&semaphore_info, None)? };
         let in_flight_fence = unsafe { device.create_fence(&fence_info, None)? };
 
-        log::info!("Swapchain Vulkan 1.4 créé ({x}x{y}, Format: {fmt:?}, Images: {count})", x = extent.width, y = extent.height, fmt = format.format, count = swapchain_images.len());
+        log::info!("Chaine de presentation creee ({x}x{y}, Format: {fmt:?}, Images: {count})", x = extent.width, y = extent.height, fmt = format.format, count = swapchain_images.len());
 
         Ok(Self {
             entry,
@@ -393,7 +397,7 @@ impl GpuContext {
             // 1.3 pour la même raison que dans `new` — voir le commentaire là-haut. Les deux
             // chemins doivent déclarer la MÊME version : un banc qui tournerait sous une version
             // différente du jeu ne mesurerait pas le jeu.
-            .api_version(vk::make_api_version(0, 1, 3, 0));
+            .api_version(capacites::VERSION_EXIGEE);
 
         // Aucune extension d'instance : c'est la différence de fond avec `new`. Rien ici ne sait
         // ce qu'est un écran.
@@ -437,15 +441,12 @@ impl GpuContext {
             .queue_family_index(famille)
             .queue_priorities(&priorites);
 
-        let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
-            .dynamic_rendering(true)
-            .synchronization2(true);
-        let mut f12 = vk::PhysicalDeviceVulkan12Features::default()
-            .buffer_device_address(true)
-            .descriptor_indexing(true);
-        let mut fcore = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut f13)
-            .push_next(&mut f12);
+        // Mêmes exigences que le chemin avec écran, et par la même fonction — un banc qui
+        // demanderait autre chose que le jeu ne mesurerait pas le jeu.
+        unsafe { capacites::verifier(&instance, physical_device)? };
+
+        let mut f13 = capacites::fonctionnalites_13();
+        let mut fcore = vk::PhysicalDeviceFeatures2::default().push_next(&mut f13);
 
         // Aucune extension de device non plus : `VK_KHR_swapchain` ne sert qu'à présenter.
         let device = unsafe {
@@ -1084,7 +1085,7 @@ impl Drop for GpuContext {
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
-        log::info!("Ressources Vulkan 1.4 libérées proprement.");
+        log::info!("Ressources Vulkan liberees proprement.");
     }
 }
 

@@ -1,7 +1,7 @@
 use ash::vk;
 use crate::core::math::{Vec2, Vec3, Vec4};
 
-/// Structure de Sommet PBR Standard (Standard PBR Vertex) pour Vulkan 1.4.
+/// Structure de Sommet PBR Standard (Standard PBR Vertex).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Vertex {

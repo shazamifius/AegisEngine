@@ -1,7 +1,7 @@
 use ash::vk;
 use ash::Device;
 
-/// Usine de création de Pipelines Graphiques et Compute Native Vulkan 1.4.
+/// Usine de création de Pipelines graphiques et de calcul, ecrits a la main sur Vulkan.
 pub struct PipelineFactory;
 
 /// Comment un dessin se combine avec ce qui est déjà là.
@@ -143,7 +143,7 @@ impl PipelineFactory {
         }
     }
 
-    /// Crée un Pipeline Graphique Vulkan 1.4 complet avec support Dynamic Rendering.
+    /// Crée un pipeline graphique complet, en rendu dynamique (`VK_KHR_dynamic_rendering`).
     pub fn create_graphics_pipeline(
         device: &Device,
         layout: vk::PipelineLayout,

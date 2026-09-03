@@ -1,5 +1,5 @@
 //! Module mathématique natif Rust (remplace la crate `glam`).
-//! Fournit les structures vectorielles et matricielles alignées `#[repr(C)]` pour Vulkan 1.4.
+//! Fournit les structures vectorielles et matricielles alignées `#[repr(C)]` pour Vulkan.
 
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 

@@ -1,4 +1,4 @@
-//! aegis_engine — moteur 3D Vulkan 1.4 ecrit a la main.
+//! aegis_engine — moteur 3D Vulkan ecrit a la main.
 //!
 //! ⚠ **Il n'y a AUCUN support VR aujourd'hui**, malgre ce que le nom du projet a longtemps
 //! annonce. Ce qui existait — `vr/openxr_context.rs`, des parametres d'ecart inter-oculaire et de

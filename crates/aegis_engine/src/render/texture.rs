@@ -15,7 +15,7 @@ pub struct Texture2D {
 }
 
 impl Texture2D {
-    /// Crée une texture 1x1 par défaut (couleur unie RGBA8) dans la VRAM Vulkan 1.4.
+    /// Crée une texture 1x1 par défaut (couleur unie RGBA8) dans la memoire de la carte.
     pub fn create_solid_color(
         gpu: &GpuContext,
         memory_props: &vk::PhysicalDeviceMemoryProperties,
@@ -107,7 +107,7 @@ impl Texture2D {
             gpu.device.unmap_memory(staging_memory);
         }
 
-        // 2. Image Vulkan 1.4 (OPTIMAL Tiling)
+        // 2. Image en pavage optimal
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)

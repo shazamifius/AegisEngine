@@ -1,7 +1,7 @@
 use ash::vk;
 use ash::Device;
 
-/// Gestionnaire de la mémoire VRAM et des allocations transitoires (Pure Vulkan 1.4).
+/// Gestionnaire de la mémoire VRAM et des allocations transitoires (Vulkan pur).
 pub struct MemoryManager;
 
 impl MemoryManager {

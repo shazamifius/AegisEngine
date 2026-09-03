@@ -25,7 +25,7 @@ pub struct GlassSlabInstance {
     pub rugosite: f32,
 }
 
-/// Moteur de Rendu 3D Principal AegisEngine (Pure Vulkan 1.4 Native).
+/// Moteur de rendu 3D principal d'AegisEngine (Vulkan pur, ecrit a la main).
 pub struct Engine {
     pub gpu: GpuContext,
     pub frame_count: u64,
