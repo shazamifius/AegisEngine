@@ -786,10 +786,13 @@ impl GpuContext {
         image: vk::Image,
         layout_actuel: vk::ImageLayout,
         extent: vk::Extent2D,
+        format: vk::Format,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        // `UNDEFINED` n'est le format d'aucune image réelle : il ne peut donc déclencher aucun des
-        // échanges de canaux, ce qui est exactement le sens de « brut ».
-        self.transfert(image, layout_actuel, extent, vk::Format::UNDEFINED, true)
+        // ⚠ Le format sert **uniquement à la taille d'un pixel** : le drapeau `brut` empêche tout
+        // échange de canaux. *Il était passé à `UNDEFINED` avant le 3 septembre 2026, et la taille
+        // d'un pixel était alors gravée à quatre octets — ce qui rendait cette fonction incapable
+        // de relire quoi que ce soit d'autre qu'une image d'écran, en silence.*
+        self.transfert(image, layout_actuel, extent, format, true)
     }
 
     /// ⭐⭐ **Rapatrie une image de la carte vers la mémoire, en RVB (trois octets par pixel).**
@@ -851,7 +854,14 @@ impl GpuContext {
         format: vk::Format,
         brut: bool,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let octets = (extent.width as vk::DeviceSize) * (extent.height as vk::DeviceSize) * 4;
+        // ⚠⚠ QUATRE OCTETS PAR PIXEL ÉTAIENT GRAVÉS ICI, et ça a tenu tant que le moteur ne
+        // relisait que des images d'écran. La première carte en `R32G32B32A32_SFLOAT` — seize
+        // octets par pixel — a demandé un tampon quatre fois trop petit, et la copie a échoué.
+        //
+        // *Une constante qui décrit une propriété d'un ARGUMENT n'a pas à être écrite : elle se
+        // déduit. Elle ne rétrécit pas, elle cesse d'exister.*
+        let par_pixel = octets_par_pixel(format)? as vk::DeviceSize;
+        let octets = (extent.width as vk::DeviceSize) * (extent.height as vk::DeviceSize) * par_pixel;
         let memory_props =
             unsafe { self.instance.get_physical_device_memory_properties(self.physical_device) };
 
@@ -1087,6 +1097,31 @@ impl Drop for GpuContext {
         }
         log::info!("Ressources Vulkan liberees proprement.");
     }
+}
+
+/// Combien d'octets occupe un pixel, d'après son format.
+///
+/// ⭐ **Volontairement INCOMPLÈTE, et elle échoue plutôt que de deviner.** Elle ne connaît que les
+/// formats que le moteur relit réellement. Un format inconnu rend une erreur qui le NOMME — et
+/// c'est bien mieux qu'une valeur par défaut plausible : *un tampon de la mauvaise taille ne se
+/// signale pas, il tronque ou il déborde.*
+fn octets_par_pixel(format: vk::Format) -> Result<u32, Box<dyn std::error::Error>> {
+    Ok(match format {
+        vk::Format::R8G8B8A8_UNORM
+        | vk::Format::R8G8B8A8_SRGB
+        | vk::Format::B8G8R8A8_UNORM
+        | vk::Format::B8G8R8A8_SRGB => 4,
+        vk::Format::R16G16B16A16_SFLOAT => 8,
+        vk::Format::R32G32B32A32_SFLOAT => 16,
+        autre => {
+            return Err(format!(
+                "je ne sais pas combien d'octets pese un pixel en {autre:?}. \
+                 Ajoute-le a `octets_par_pixel` plutot que de laisser deviner : un tampon de la \
+                 mauvaise taille tronque ou deborde sans rien dire."
+            )
+            .into())
+        }
+    })
 }
 
 #[cfg(test)]

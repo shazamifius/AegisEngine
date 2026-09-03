@@ -72,6 +72,7 @@ fn main() {
         ("occlusion.wgsl", "occlusion.vert.spv", "occlusion.frag.spv"),
         ("copie.wgsl", "copie.vert.spv", "copie.frag.spv"),
         ("refraction.wgsl", "refraction.vert.spv", "refraction.frag.spv"),
+        ("cartes.wgsl", "cartes.vert.spv", "cartes.frag.spv"),
     ];
 
     for (src_file, vert_out, frag_out) in shaders {

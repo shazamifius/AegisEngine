@@ -149,6 +149,7 @@ impl Verre {
                 melange: Melange::Aucun,
                 // Le shader fabrique ses trois sommets tout seul.
                 use_vertex_input: false,
+                faces: crate::render::pipeline::Faces::Toutes,
                 echantillons: vk::SampleCountFlags::TYPE_1,
             },
         )?;
@@ -468,7 +469,7 @@ mod tests {
         ctx.end_single_time_commands(cmd).ok()?;
 
         let bruts = ctx
-            .relire_image_brute(image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, etendue)
+            .relire_image_brute(image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, etendue, ctx.swapchain_format)
             .ok()?;
         verre.detruire(&ctx.device);
         tex_avant.detruire(&ctx.device);

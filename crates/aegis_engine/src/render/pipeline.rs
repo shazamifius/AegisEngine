@@ -60,6 +60,64 @@ const MOITIE: [f32; 4] = [0.5, 0.5, 0.5, 0.5];
 /// ordre qu'il fallait retenir : intervertir « écrit la profondeur » et « mélange les couleurs »
 /// produit un pipeline parfaitement valide qui dessine mal, et **rien ne le signale**. Nommer
 /// chaque réglage au point d'appel rend cette faute visible en la lisant.
+/// ⭐ **QUELLE FACE DE LA MATIÈRE CETTE PASSE CAPTURE — et donc quelle profondeur elle garde.**
+///
+/// Un seul réglage, et **c'est délibéré : les deux décisions ne sont pas indépendantes.** Garder
+/// les faces d'entrée n'a de sens qu'avec la plus PROCHE (par où le rayon entre) ; garder les
+/// faces de sortie n'a de sens qu'avec la plus LOINTAINE (par où il ressort). Deux champs séparés
+/// auraient permis quatre combinaisons dont deux n'ont aucun sens physique — et rien n'aurait
+/// signalé qu'on venait d'en choisir une.
+///
+/// *Le nom dit la physique, pas l'API : on ne demande pas « cull FRONT », on demande la face par
+/// laquelle le rayon SORT.*
+///
+/// ⚠ **L'orientation apparente d'un triangle n'est pas une évidence sur ce moteur** : `naga`
+/// retourne l'axe Y à la compilation des shaders, et c'est ce qui a fait sortir le HUD à l'envers
+/// sous onze tests verts (19 août 2026). **Ce réglage est donc vérifié par une mesure sur des
+/// pixels produits par la carte** — `l_entree_est_toujours_plus_proche_que_la_sortie` — et jamais
+/// par le raisonnement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Faces {
+    /// Toutes les faces, la plus proche gagne. Le cas de tout rendu ordinaire.
+    #[default]
+    Toutes,
+    /// **Par où le rayon ENTRE dans la matière** : faces avant, la plus proche.
+    Entree,
+    /// **Par où le rayon en SORT** : faces arrière, la plus lointaine.
+    ///
+    /// *La plus lointaine, et pas la plus proche : un objet creux ou concave a plusieurs faces
+    /// arrière, et c'est la dernière qui referme la matière traversée.*
+    Sortie,
+}
+
+impl Faces {
+    fn cull(self) -> vk::CullModeFlags {
+        match self {
+            Faces::Toutes => vk::CullModeFlags::NONE,
+            Faces::Entree => vk::CullModeFlags::BACK,
+            Faces::Sortie => vk::CullModeFlags::FRONT,
+        }
+    }
+
+    fn comparaison(self) -> vk::CompareOp {
+        match self {
+            Faces::Toutes | Faces::Entree => vk::CompareOp::LESS_OR_EQUAL,
+            Faces::Sortie => vk::CompareOp::GREATER_OR_EQUAL,
+        }
+    }
+
+    /// La profondeur à écrire au nettoyage pour que le premier fragment gagne toujours.
+    ///
+    /// *Elle n'est pas un réglage de plus : elle DÉCOULE de la comparaison, et la laisser à
+    /// l'appelant aurait été la cinquième combinaison absurde possible.*
+    pub fn profondeur_initiale(self) -> f32 {
+        match self {
+            Faces::Toutes | Faces::Entree => 1.0,
+            Faces::Sortie => 0.0,
+        }
+    }
+}
+
 pub struct Reglages {
     /// Format de la cible couleur. `UNDEFINED` veut dire « passe de profondeur pure ».
     pub color_format: vk::Format,
@@ -81,6 +139,8 @@ pub struct Reglages {
     pub melange: Melange,
     /// Faux pour un shader qui fabrique ses propres sommets, comme le fond.
     pub use_vertex_input: bool,
+    /// Quelle face de la matière cette passe capture — voir [`Faces`].
+    pub faces: Faces,
     /// ⚠ Doit valoir EXACTEMENT l'échantillonnage des images attachées à la passe. Un pipeline qui
     /// rasterise à 4 échantillons dans une cible qui n'en a qu'un est un défaut que le pilote
     /// n'est pas tenu de signaler — il peut dessiner n'importe quoi, ou rien.
@@ -158,6 +218,7 @@ impl PipelineFactory {
             depth_write,
             melange,
             use_vertex_input,
+            faces,
             echantillons,
         } = reglages;
         let vs_entry = std::ffi::CStr::from_bytes_with_nul(b"vs_main\0")?;
@@ -252,7 +313,7 @@ impl PipelineFactory {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
+            .cull_mode(faces.cull())
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(passe_de_profondeur_seule);
 
@@ -268,7 +329,7 @@ impl PipelineFactory {
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(depth_format.is_some())
             .depth_write_enable(depth_write)
-            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .depth_compare_op(faces.comparaison())
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 

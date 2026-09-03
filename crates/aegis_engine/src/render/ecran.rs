@@ -242,6 +242,7 @@ impl Ecran {
                 // ⚠ Un seul échantillon : la moyenne a déjà eu lieu, à la fin de la passe de
                 // scène. Anti-créneler une image plein écran qui n'a aucune arête géométrique
                 // serait payer quatre fois pour rien.
+                faces: crate::render::pipeline::Faces::Toutes,
                 echantillons: vk::SampleCountFlags::TYPE_1,
             },
         )?;
@@ -272,6 +273,7 @@ impl Ecran {
             depth_write: false,
             melange,
             use_vertex_input: false,
+            faces: crate::render::pipeline::Faces::Toutes,
             echantillons: vk::SampleCountFlags::TYPE_1,
         };
 

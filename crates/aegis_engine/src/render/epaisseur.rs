@@ -736,6 +736,7 @@ pub fn rendre(
 /// que le matériel graphique nomme `front_face`, et il est cohérent par construction sur un
 /// maillage fermé : deux triangles qui se font face de part en part de la matière ont des
 /// orientations opposées à l'écran.
+///
 fn accumuler_triangle(
     sommets: &[SommetProjete; 3],
     out: &mut Sorties,
@@ -904,9 +905,59 @@ mod tests {
         t * t * (3.0 - 2.0 * t)
     }
 
+    /// ⭐ **LA SEULE PORTE PAR LAQUELLE UNE BILLE ENTRE DANS CE BANC.**
+    ///
+    /// Elle retourne l'ordre des indices, et c'est une **dette nommée** (3 septembre 2026).
+    ///
+    /// `Primitives::create_uv_sphere` produisait ses triangles **objectivement à l'envers** —
+    /// normales géométriques rentrantes, volume signé négatif — et ce banc portait le critère de
+    /// signe inverse. **Deux fautes qui s'annulaient : le banc rendait les bons chiffres et donnait
+    /// une compréhension fausse, sans que rien ne le signale.**
+    ///
+    /// Elles se sont séparées le jour où une passe GPU a demandé pour la première fois à Vulkan de
+    /// distinguer l'avant de l'arrière : jusque-là tout le moteur dessinait en `cull_mode: NONE`,
+    /// donc personne n'avait jamais eu à trancher. La sphère est corrigée ; **ce banc reste
+    /// cohérent avec sa propre convention d'écran** (il regarde la bille depuis +Z et retourne Y
+    /// lui-même, là où Vulkan le fait nativement).
+    ///
+    /// ⚠ **Le retournement est ici, et NULLE PART AILLEURS.** Ma première tentative ne le posait
+    /// que dans `sphere()` — neuf autres tests appelaient la primitive directement, et sont restés
+    /// rouges. *Une garde posée sur un seul chemin n'est pas une garde, y compris quand le chemin
+    /// s'appelle « le décor de tous les tests d'ici ».*
+    ///
+    /// ⚠⚠ **C'est une dette, pas une solution.** Le vrai correctif est d'aligner la convention
+    /// d'écran de ce banc sur celle du moteur — ce qui touche son critère de signe **et** les
+    /// triangles que ses tests fabriquent à la main. *Un chantier à décider, pas à bâcler.*
+    fn bille_du_banc(rayon: f32, tranches: u32, coupes: u32) -> (Vec<crate::geometry::vertex::Vertex>, Vec<u32>) {
+        let (sommets, indices) = Primitives::create_uv_sphere(rayon, tranches, coupes);
+        let indices = indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
+        (sommets, indices)
+    }
+
     /// Une sphère, sa caméra, et la matrice qui va avec — le décor de tous les tests d'ici.
+    ///
+    /// ## ⚠⚠ LES INDICES SONT RETOURNÉS ICI, ET C'EST UNE DETTE NOMMÉE (3 septembre 2026)
+    ///
+    /// `Primitives::create_uv_sphere` produisait ses triangles **objectivement à l'envers** —
+    /// normales géométriques rentrantes, volume signé négatif — et ce banc portait le critère de
+    /// signe inverse. **Deux fautes qui s'annulaient : le banc rendait les bons chiffres et donnait
+    /// une compréhension fausse, sans que rien ne le signale.**
+    ///
+    /// Elles se sont séparées le jour où une passe GPU a demandé pour la première fois à Vulkan de
+    /// distinguer l'avant de l'arrière : jusque-là tout le moteur dessinait en `cull_mode: NONE`,
+    /// donc personne n'avait jamais eu à trancher. La sphère est corrigée ; **ce banc, lui, reste
+    /// cohérent avec sa propre convention d'écran** (il regarde la bille depuis +Z et retourne Y
+    /// lui-même, là où Vulkan le fait nativement).
+    ///
+    /// **Le retournement est donc ici, à UN seul endroit, plutôt que dispersé** — et il est une
+    /// dette, pas une solution : *le vrai correctif est d'aligner la convention d'écran de ce banc
+    /// sur celle du moteur, ce qui touche son critère de signe ET les triangles que ses tests
+    /// fabriquent à la main. C'est un chantier à décider, pas à bâcler en fin de session.*
+    ///
+    /// ⚠ **Ne pas retirer cette ligne sans ce chantier** : dix tests de ce fichier tombent, dont
+    /// `au_centre_d_une_sphere_l_epaisseur_vaut_le_diametre`, qui est la seule sonde absolue du lot.
     fn sphere(rayon: f32, tranches: u32) -> (Vec<Vec3>, Vec<u32>, Mat4, Vec3, f32) {
-        let (sommets, indices) = Primitives::create_uv_sphere(rayon, tranches, tranches);
+        let (sommets, indices) = bille_du_banc(rayon, tranches, tranches);
         let positions: Vec<Vec3> = sommets
             .iter()
             .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
@@ -1095,7 +1146,7 @@ mod tests {
     /// vite que le rouge. **Ils viennent du test, pas du moteur** — la frontière tient.
     #[test]
     fn une_nectarine_en_contre_jour() {
-        let (sommets, indices) = Primitives::create_uv_sphere(1.0, 96, 96);
+        let (sommets, indices) = bille_du_banc(1.0, 96, 96);
         // Une nectarine n'est pas une sphère : elle est un peu aplatie et un peu plus large.
         let positions: Vec<Vec3> = sommets
             .iter()
@@ -1229,7 +1280,7 @@ mod tests {
     /// beauté : que le champ change réellement l'image, et que quatre pas suffisent presque.
     #[test]
     fn une_nectarine_et_son_interieur() {
-        let (sommets, indices) = Primitives::create_uv_sphere(1.0, 96, 96);
+        let (sommets, indices) = bille_du_banc(1.0, 96, 96);
         let positions: Vec<Vec3> = sommets
             .iter()
             .map(|s| Vec3::new(s.position[0] * 1.04, s.position[1] * 0.93, s.position[2] * 1.04))
@@ -1421,7 +1472,7 @@ mod tests {
     /// exactement la liste du chantier suivant, et elle est écrite plutôt que devinée.*
     #[test]
     fn une_sucette_bleue_et_ses_bulles() {
-        let (sommets, indices) = Primitives::create_uv_sphere(1.0, 96, 96);
+        let (sommets, indices) = bille_du_banc(1.0, 96, 96);
         let positions: Vec<Vec3> = sommets
             .iter()
             .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
@@ -1657,7 +1708,7 @@ mod tests {
     /// direction de ce point. Il n'y a rien à approcher, la comparaison est exacte.
     #[test]
     fn les_normales_de_la_surface_avant_toute_refraction() {
-        let (sommets, indices) = Primitives::create_uv_sphere(1.0, 96, 96);
+        let (sommets, indices) = bille_du_banc(1.0, 96, 96);
         let positions: Vec<Vec3> = sommets
             .iter()
             .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
@@ -1874,7 +1925,7 @@ mod tests {
     /// est mesurée plus bas plutôt qu'estimée, mais elle existe.*
     #[test]
     fn la_refraction_replie_le_monde_derriere_la_bille() {
-        let (sommets, indices) = Primitives::create_uv_sphere(1.0, 96, 96);
+        let (sommets, indices) = bille_du_banc(1.0, 96, 96);
         let positions: Vec<Vec3> = sommets
             .iter()
             .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
@@ -2200,7 +2251,7 @@ mod tests {
     /// Deux sphères disjointes alignées sur l'axe de vue : au centre, on traverse deux diamètres.
     #[test]
     fn deux_objets_alignes_donnent_la_somme_de_leurs_epaisseurs() {
-        let (sommets, indices_un) = Primitives::create_uv_sphere(1.0, 48, 48);
+        let (sommets, indices_un) = bille_du_banc(1.0, 48, 48);
         let mut positions = Vec::new();
         let mut indices = Vec::new();
 
@@ -2566,7 +2617,7 @@ mod tests {
 
         let (camera, vue_proj, projeter, direction) = banc_de_refraction(COTE);
 
-        let (sommets, indices) = Primitives::create_uv_sphere(R, 96, 96);
+        let (sommets, indices) = bille_du_banc(R, 96, 96);
         let positions: Vec<Vec3> = sommets
             .iter()
             .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
@@ -2722,7 +2773,7 @@ mod tests {
         // Une teinte bleue légère : la traversée doit se voir sans masquer le damier.
         const SIGMA: [f32; 3] = [0.55, 0.20, 0.06];
 
-        let (sommets, indices) = Primitives::create_uv_sphere(R, 96, 96);
+        let (sommets, indices) = bille_du_banc(R, 96, 96);
         let positions: Vec<Vec3> = sommets
             .iter()
             .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))
@@ -2988,7 +3039,7 @@ mod tests {
         const N_SUCRE: f32 = 1.50;
         const COTE: usize = 512;
 
-        let (sommets, indices) = Primitives::create_uv_sphere(R, 96, 96);
+        let (sommets, indices) = bille_du_banc(R, 96, 96);
         let positions: Vec<Vec3> = sommets
             .iter()
             .map(|s| Vec3::new(s.position[0], s.position[1], s.position[2]))

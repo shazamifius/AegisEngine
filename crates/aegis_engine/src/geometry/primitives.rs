@@ -119,13 +119,27 @@ impl Primitives {
                 let first = i * (slices + 1) + j;
                 let second = first + slices + 1;
 
+                // ⚠⚠ L'ORDRE A ÉTÉ INVERSÉ LE 3 SEPTEMBRE 2026, et il était faux depuis toujours.
+                //
+                // 992 triangles sur 1024 tournaient dans le sens HORAIRE vu de l'extérieur de la
+                // bille, c'est-à-dire à l'envers de la convention du moteur
+                // (`FrontFace::COUNTER_CLOCKWISE`). *Le défaut était invisible parce que tout le
+                // moteur dessinait avec `cull_mode: NONE` : personne n'avait jamais demandé à
+                // Vulkan de distinguer l'avant de l'arrière.* La première passe qui l'a demandé —
+                // les deux cartes de la matière — a capturé la face opposée sur 100 % des pixels.
+                //
+                // ⚠ Et il s'en est fallu de peu que je corrige le PIPELINE : une carte inversée a
+                // exactement deux causes possibles (le maillage tourne à l'envers, ou la
+                // convention d'écran est inversée), et l'image ne les distingue pas. C'est une
+                // sonde qui calcule le sens sur le PROCESSEUR, sans GPU, qui a tranché —
+                // `le_maillage_tourne_dans_le_sens_direct_vu_du_dehors`.
                 indices.push(first);
-                indices.push(second);
                 indices.push(first + 1);
+                indices.push(second);
 
                 indices.push(second);
-                indices.push(second + 1);
                 indices.push(first + 1);
+                indices.push(second + 1);
             }
         }
 

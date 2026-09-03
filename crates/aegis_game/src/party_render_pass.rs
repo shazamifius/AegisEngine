@@ -330,6 +330,7 @@ impl PartyRenderPass {
                 depth_write: false,
                 melange: aegis_engine::render::pipeline::Melange::Aucun,
                 use_vertex_input: false,
+                faces: aegis_engine::render::pipeline::Faces::Toutes,
                 echantillons: cibles.echantillons,
             },
         )?;
@@ -346,6 +347,7 @@ impl PartyRenderPass {
                 depth_write: true,
                 melange: aegis_engine::render::pipeline::Melange::Aucun,
                 use_vertex_input: true,
+                faces: aegis_engine::render::pipeline::Faces::Toutes,
                 echantillons: cibles.echantillons,
             },
         )?;
@@ -364,6 +366,7 @@ impl PartyRenderPass {
                 depth_write: false,
                 melange: aegis_engine::render::pipeline::Melange::Transparence,
                 use_vertex_input: true,
+                faces: aegis_engine::render::pipeline::Faces::Toutes,
                 echantillons: cibles.echantillons,
             },
         )?;
@@ -417,6 +420,7 @@ impl PartyRenderPass {
                 depth_write: false,
                 melange: aegis_engine::render::pipeline::Melange::Aucun,
                 use_vertex_input: true,
+                faces: aegis_engine::render::pipeline::Faces::Toutes,
                 echantillons: vk::SampleCountFlags::TYPE_1,
             },
         )?;

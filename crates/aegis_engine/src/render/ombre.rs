@@ -184,6 +184,7 @@ impl Ombre {
                 // s'affiche jamais, on y lit des profondeurs. Multi-echantillonner une profondeur
                 // quadruplerait une carte de 2048x2048 (16 Mo -> 64 Mo) pour un bord d'ombre que
                 // le filtrage PCF adoucit deja. *Jamais d'excedent.*
+                faces: crate::render::pipeline::Faces::Toutes,
                 echantillons: vk::SampleCountFlags::TYPE_1,
             },
         )?;

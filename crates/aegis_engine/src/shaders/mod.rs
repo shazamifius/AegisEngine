@@ -25,3 +25,9 @@ pub const OCCLUSION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/occlu
 pub const COPIE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/copie.vert.spv"));
 /// La refraction — le premier shader du moteur qui fasse de la physique de la MATIERE.
 pub const REFRACTION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/refraction.vert.spv"));
+
+/// ⭐ La passe qui fait ENTRER une vraie géométrie dans les deux cartes que lit `refraction.wgsl`.
+///
+/// Deux points d'entrée dans le même module, comme le halo : `build.rs` écrit le même SPIR-V pour
+/// le sommet et le fragment, et une seconde constante identique ne tromperait que son lecteur.
+pub const CARTES_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cartes.vert.spv"));

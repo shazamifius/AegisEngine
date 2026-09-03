@@ -147,6 +147,7 @@ impl Occlusion {
             depth_write: false,
             melange,
             use_vertex_input: false,
+            faces: crate::render::pipeline::Faces::Toutes,
             echantillons: vk::SampleCountFlags::TYPE_1,
         };
 

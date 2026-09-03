@@ -601,6 +601,7 @@ mod tests {
         ("occlusion.wgsl", include_str!("../shaders/occlusion.wgsl")),
         ("copie.wgsl", include_str!("../shaders/copie.wgsl")),
         ("refraction.wgsl", include_str!("../shaders/refraction.wgsl")),
+        ("cartes.wgsl", include_str!("../shaders/cartes.wgsl")),
     ];
 
     /// ⚠⚠ LE TEST QUI REND LA FRONTIÈRE INATTEIGNABLE, pas seulement écrite.
