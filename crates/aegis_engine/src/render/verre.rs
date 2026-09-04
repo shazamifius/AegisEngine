@@ -111,6 +111,12 @@ pub struct Verre {
     /// *C'est ce qui permet à la passe de n'avoir qu'un seul chemin de code : le cas simple n'est
     /// pas une branche, c'est une valeur.*
     volume_neutre: crate::render::texture::Texture,
+    /// La carte d'environnement par défaut : **un seul texel noir**.
+    ///
+    /// Un ensemble de descripteurs doit être entièrement écrit avant d'être lu ; il faut donc
+    /// toujours une carte. *Noire est le bon défaut : une scène sans environnement déclaré ne
+    /// reflète rien, plutôt que de refléter une lumière que personne n'a demandée.*
+    environnement_neutre: crate::render::texture::Texture,
 }
 
 impl Verre {
@@ -145,6 +151,18 @@ impl Verre {
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            // ⭐ La carte d'environnement et SON échantillonneur — séparé de celui du volume parce
+            // que l'azimut boucle là où un volume se fige à son bord.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let descripteurs = unsafe {
             gpu.device.create_descriptor_set_layout(
@@ -155,10 +173,10 @@ impl Verre {
         let tailles = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(3),
+                .descriptor_count(4),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(1),
+                .descriptor_count(2),
         ];
         let pool = unsafe {
             gpu.device.create_descriptor_pool(
@@ -235,9 +253,62 @@ impl Verre {
             &texel,
         )?;
 
-        let passe = Self { pipeline, layout, descripteurs, pool, ensemble, volume_neutre };
+        let mut noir = Vec::with_capacity(16);
+        for v in [0.0f32; 4] {
+            noir.extend_from_slice(&v.to_ne_bytes());
+        }
+        let environnement_neutre = crate::render::texture::Texture::create_environnement(
+            gpu,
+            &memoire,
+            1,
+            1,
+            vk::Format::R32G32B32A32_SFLOAT,
+            16,
+            &noir,
+        )?;
+
+        let passe = Self {
+            pipeline,
+            layout,
+            descripteurs,
+            pool,
+            ensemble,
+            volume_neutre,
+            environnement_neutre,
+        };
         passe.brancher_matiere(gpu, None);
+        passe.brancher_environnement(gpu, None);
         Ok(passe)
+    }
+
+    /// Désigne la carte d'environnement — **ce que la matière reflète**. `None` = rien à refléter.
+    ///
+    /// ⚠ Elle n'agit que si `volume_taille.w` vaut 1 dans les constantes : à 0, le shader garde son
+    /// damier de mesure. *Toutes les mesures écrites avant le 4 septembre 2026 continuent donc de
+    /// mesurer exactement ce qu'elles mesuraient.*
+    pub fn brancher_environnement(
+        &self,
+        gpu: &GpuContext,
+        carte: Option<&crate::render::texture::Texture>,
+    ) {
+        let choisie = carte.unwrap_or(&self.environnement_neutre);
+        let image = [vk::DescriptorImageInfo::default()
+            .image_view(choisie.view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let ech = [vk::DescriptorImageInfo::default().sampler(choisie.sampler)];
+        let ecritures = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.ensemble)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&image),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.ensemble)
+                .dst_binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&ech),
+        ];
+        unsafe { gpu.device.update_descriptor_sets(&ecritures, &[]) };
     }
 
     /// Désigne le volume que le shader traversera — ou **le milieu homogène** quand on ne lui en
@@ -323,6 +394,7 @@ impl Verre {
 
     pub fn detruire(&self, device: &ash::Device) {
         self.volume_neutre.detruire(device);
+        self.environnement_neutre.detruire(device);
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
@@ -540,6 +612,27 @@ mod tests {
         };
         verre.brancher_matiere(&ctx, tex_volume.as_ref());
 
+        // L'environnement n'est fabriqué que si les constantes le réclament (`volume_taille.w`).
+        let tex_env = if k.volume_taille[3] > 0.5 {
+            let (l, h) = (512u32, 256u32);
+            let octets = habitacle(l, h);
+            Some(
+                crate::render::texture::Texture::create_environnement(
+                    &ctx,
+                    &memory_props,
+                    l,
+                    h,
+                    vk::Format::R32G32B32A32_SFLOAT,
+                    16,
+                    &octets,
+                )
+                .ok()?,
+            )
+        } else {
+            None
+        };
+        verre.brancher_environnement(&ctx, tex_env.as_ref());
+
         let image = ctx.swapchain_images[0];
         let vue = ctx.swapchain_image_views[0];
         let etendue = ctx.swapchain_extent;
@@ -619,6 +712,9 @@ mod tests {
         tex_arriere.detruire(&ctx.device);
         if let Some(v) = tex_volume.as_ref() {
             v.detruire(&ctx.device);
+        }
+        if let Some(e) = tex_env.as_ref() {
+            e.detruire(&ctx.device);
         }
         Some(bruts)
     }
@@ -833,6 +929,50 @@ mod tests {
         // et c'est exactement le défaut qui a survécu une journée entière sur le banc processeur.*
         assert_ne!(sans, avec, "Newton ne change RIEN a l'image : la poignee est morte");
         assert_ne!(avec, colore, "l'absorption ne change RIEN : Beer-Lambert est mort");
+    }
+
+    /// ⭐ **UN HABITACLE, CALCULÉ ET NON PHOTOGRAPHIÉ** — et il vit ici, du côté de l'appelant.
+    ///
+    /// Une grande fenêtre lumineuse, un sol sombre, un dégradé entre les deux : la géométrie de
+    /// lumière d'une voiture vue depuis un siège. *Rien n'est chargé ; tout se règle par des
+    /// nombres et se rejoue à l'identique sur n'importe quelle machine.*
+    ///
+    /// ⚠⚠ **Ce code a d'abord été écrit DANS le shader, et la garde de la frontière l'a refusé
+    /// dans l'heure.** Elle avait raison sur le fond : *où se trouve une fenêtre et combien elle
+    /// éclaire sont des décisions de SCÈNE*, et les graver dans le moteur, c'est mettre un
+    /// habitacle de voiture dans un moteur qui vise tous les mondes. **Écrire la règle est la
+    /// moitié du travail ; la rendre inatteignable est l'autre.**
+    ///
+    /// ⚠ La fenêtre dépasse **largement 1**, et c'est voulu : une fenêtre est une source, pas une
+    /// surface. C'est ce qui donne un reflet saturé de blanc là où elle se réfléchit — et
+    /// seulement là.
+    fn habitacle(largeur: u32, hauteur: u32) -> Vec<u8> {
+        // Projection équirectangulaire : l'azimut sur la largeur, l'élévation sur la hauteur.
+        let mut octets = Vec::with_capacity((largeur * hauteur * 16) as usize);
+        let vers_la_fenetre = Vec3::new(-0.45, 0.72, -0.53).normalize();
+        for y in 0..hauteur {
+            let elevation =
+                (0.5 - (y as f32 + 0.5) / hauteur as f32) * std::f32::consts::PI;
+            for x in 0..largeur {
+                let azimut = ((x as f32 + 0.5) / largeur as f32 - 0.5)
+                    * std::f32::consts::TAU;
+                let d = Vec3::new(
+                    elevation.cos() * azimut.sin(),
+                    elevation.sin(),
+                    elevation.cos() * azimut.cos(),
+                );
+                // Une PUISSANCE, pas un seuil : une fenêtre a un contour mou, et un seuil poserait
+                // un bord net que l'œil lit immédiatement comme un défaut.
+                let fenetre = d.dot(vers_la_fenetre).max(0.0).powf(9.0);
+                let vers_le_haut = (d.y * 0.5 + 0.5).clamp(0.0, 1.0);
+                let ambiante = 0.015 + (0.16 - 0.015) * vers_le_haut * vers_le_haut;
+                let luminance = ambiante + 14.0 * fenetre;
+                for v in [luminance, luminance, luminance, 1.0] {
+                    octets.extend_from_slice(&v.to_ne_bytes());
+                }
+            }
+        }
+        octets
     }
 
     /// Fabrique un volume cubique dont chaque texel vaut ce que la fonction en dit.
@@ -1182,7 +1322,10 @@ mod tests {
         k.matiere = [SUCRE[0], SUCRE[1], SUCRE[2], ETA];
         // 64 pas : la marche doit voir les bulles, et elles font quelques texels.
         k.volume_min = [-BOITE * 0.5, -BOITE * 0.5, -BOITE * 0.5, 64.0];
-        k.volume_taille = [BOITE, BOITE, BOITE, 0.0];
+        // ⭐ `w = 1` : l'environnement procédural au lieu du damier de mesure. **Sans lui le reflet
+        // de Fresnel existe et ne se voit pas** — un miroir qui reflète un fond uniformément
+        // lumineux rend la même chose que ce qu'il cache.
+        k.volume_taille = [BOITE, BOITE, BOITE, 1.0];
 
         let Some(image) = rendre_avec(&k, vk::Format::B8G8R8A8_SRGB, COTE, Some((N, N, N, &volume)))
         else {
@@ -1357,6 +1500,98 @@ mod tests {
             pire_ecart, 0.0,
             "la courbe mesuree s'ecarte de Fresnel au-dela de ce que la discretisation explique"
         );
+    }
+
+    /// ⭐⭐ **LE REFLET SE VOIT** — et on le prouve en éteignant tout le reste.
+    ///
+    /// # Pourquoi ce test existe, alors que Fresnel est déjà mesuré
+    ///
+    /// La réflectance était **juste** (3,922 % contre 4,000 % analytiques) et le reflet **ne se
+    /// voyait pas** : le fond d'essai est un damier de mesure, partout à peu près aussi lumineux,
+    /// donc un miroir qui le reflète rend la même chose que ce qu'il cache. *Un mécanisme exact et
+    /// invisible reste invisible — et c'est le genre de chose qu'un chiffre juste laisse croire
+    /// réglée.*
+    ///
+    /// # Le montage : une bille qui n'a plus que son reflet
+    ///
+    /// Avec une absorption énorme, **rien ne ressort par transmission** : ce qui reste à l'écran
+    /// est, par construction, uniquement ce qui a rebondi. On peut alors affirmer sans juger
+    /// l'image que la fenêtre de l'environnement s'y voit — et **où**.
+    #[test]
+    fn la_fenetre_de_l_environnement_se_voit_dans_le_reflet() {
+        let mut k = constantes(0.0, 6.0, COTE);
+        // Une absorption qui ne laisse rien passer : au bout de deux unités de trajet, il reste
+        // e^-120, c'est-à-dire zéro.
+        k.matiere = [60.0, 60.0, 60.0, ETA];
+        k.volume_taille = [1.0, 1.0, 1.0, 1.0]; // w = 1 : l'environnement, pas le damier
+
+        let Some(image) = rendre(&k, vk::Format::B8G8R8A8_UNORM, COTE) else {
+            println!("  (aucune image — pas de Vulkan)");
+            return;
+        };
+        let lire = |x: u32, y: u32| image[((y * COTE + x) * 4) as usize] as f32 / 255.0;
+
+        // On ne regarde QUE l'intérieur de la silhouette : le fond, lui, montre l'environnement
+        // en direct et n'a rien à voir avec un reflet.
+        let rayon_apparent = 50u32; // largement dans la bille (elle en fait ~57)
+        let mut le_plus_clair = 0.0f32;
+        let mut ou = (0u32, 0u32);
+        let mut somme = 0.0f64;
+        let mut combien = 0u64;
+        for y in (COTE / 2 - rayon_apparent)..(COTE / 2 + rayon_apparent) {
+            for x in (COTE / 2 - rayon_apparent)..(COTE / 2 + rayon_apparent) {
+                let dx = x as f32 - COTE as f32 * 0.5;
+                let dy = y as f32 - COTE as f32 * 0.5;
+                if dx * dx + dy * dy > (rayon_apparent * rayon_apparent) as f32 {
+                    continue;
+                }
+                let v = lire(x, y);
+                if v > le_plus_clair {
+                    le_plus_clair = v;
+                    ou = (x, y);
+                }
+                somme += v as f64;
+                combien += 1;
+            }
+        }
+        let moyenne = somme / combien as f64;
+        println!(
+            "  dans la bille : le plus clair {:.3} en ({}, {}), moyenne {moyenne:.3}",
+            le_plus_clair, ou.0, ou.1
+        );
+
+        // ── 1. La fenêtre s'y voit : il existe un endroit franchement brillant ──
+        assert!(
+            le_plus_clair > 0.35,
+            "rien ne brille dans la bille ({le_plus_clair:.3}) : le reflet de l'environnement \
+             n'arrive pas jusqu'a l'image"
+        );
+        // ── 2. Et ce n'est PAS un aplat : le reste reste sombre ──
+        // *Une bille uniformément claire voudrait dire qu'on ajoute une constante, pas un reflet.*
+        assert!(
+            (moyenne as f32) < le_plus_clair * 0.5,
+            "la bille est uniformement claire (moyenne {moyenne:.3} contre un maximum de \
+             {le_plus_clair:.3}) : ce n'est pas un reflet, c'est un aplat"
+        );
+        // ── 3. Le reflet est du CÔTÉ de la fenêtre (haut-gauche dans l'image) ──
+        // La fenêtre est en haut à gauche et un peu en arrière ; en image, y descend.
+        assert!(
+            ou.0 < COTE / 2 && ou.1 < COTE / 2,
+            "le point le plus brillant est en ({}, {}) : il devrait etre en haut a GAUCHE, du \
+             cote de la fenetre",
+            ou.0,
+            ou.1
+        );
+
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier de preuves");
+        let mut rvb = Vec::with_capacity(image.len() / 4 * 3);
+        for p in image.chunks_exact(4) {
+            rvb.extend_from_slice(&[p[2], p[1], p[0]]);
+        }
+        let png = crate::image::png::encoder(COTE, COTE, &rvb).expect("png");
+        std::fs::write(dossier.join("volume-5-reflet.png"), &png).expect("ecriture");
+        println!("  ecrit : target/preuves/volume-5-reflet.png ({} Ko)", png.len() / 1024);
     }
 
     /// La taille des constantes, vérifiée plutôt que supposée — **et elle est maintenant au ras

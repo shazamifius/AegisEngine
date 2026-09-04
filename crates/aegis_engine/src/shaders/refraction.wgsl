@@ -101,6 +101,29 @@
 @group(0) @binding(2) var volume_matiere: texture_3d<f32>;
 @group(0) @binding(3) var echantillonneur: sampler;
 
+// ── LA CARTE D'ENVIRONNEMENT ─────────────────────────────────────────────────────────────────
+//
+// ⭐⭐ **Ce que la lumière fait AVANT d'arriver sur la matière**, en projection équirectangulaire :
+// l'azimut en `u`, l'élévation en `v`.
+//
+// # Pourquoi une carte, et pas une fonction écrite ici
+//
+// Le premier jet calculait l'environnement dans ce shader : une grande fenêtre, un sol sombre,
+// quelques nombres. **Le test qui garde la frontière moteur/jeu l'a refusé dans l'heure** — et il
+// avait raison sur le fond, même si sa sonde visait une direction en croyant voir une couleur :
+// *où se trouve la fenêtre et combien elle éclaire sont des décisions de SCÈNE.* Les graver ici,
+// c'est mettre un habitacle de voiture dans un moteur qui vise tous les mondes.
+//
+// **La géométrie entre par deux cartes, la matière par un volume, la lumière incidente par
+// celle-ci.** Le shader ne sait donc rien de ce qu'il reflète — et l'appelant reste libre de la
+// calculer, de la peindre ou de la photographier.
+//
+// ⚠ Son échantillonneur est SÉPARÉ de celui du volume : l'azimut **boucle** (`REPEAT`), là où un
+// volume doit se figer à son bord. *Un seul échantillonneur partagé aurait posé une couture
+// visible derrière la caméra — le genre de défaut qu'on attribue ensuite à la géométrie.*
+@group(0) @binding(4) var carte_environnement: texture_2d<f32>;
+@group(0) @binding(5) var echantillonneur_environnement: sampler;
+
 struct Constantes {
     // La caméra décrite par sa base, et non par une matrice : la même description sert à
     // PROJETER (monde → pixel, ce dont Newton a besoin) et à DÉ-PROJETER (pixel → direction).
@@ -249,6 +272,30 @@ fn fresnel(cos_incidence: f32, eta: f32) -> f32 {
     return 0.5 * (rs * rs + rp * rp);
 }
 
+/// L'environnement, lu dans sa carte — **aucune scène n'est décrite ici**.
+///
+/// La projection est équirectangulaire : l'azimut sur toute la largeur, l'élévation sur la
+/// hauteur. *C'est la projection la moins chère à échantillonner et la seule qui ne demande ni
+/// six faces ni indirection ; sa distorsion aux pôles est réelle, et elle ne coûte rien tant que
+/// la source lumineuse n'y est pas.*
+fn environnement(direction: vec3<f32>) -> vec3<f32> {
+    let d = normalize(direction);
+    // ⚠ `atan2(x, z)` et non `atan2(z, x)` : le premier tourne autour de l'axe vertical, ce qui
+    // est ce qu'un azimut veut dire. *Écrit à l'envers, la carte pivote autour du mauvais axe et
+    // l'erreur ressemble à un décalage de scène.*
+    let azimut = atan2(d.x, d.z);
+    let elevation = asin(clamp(d.y, -1.0, 1.0));
+    let u = azimut / 6.2831853 + 0.5;
+    // v descend dans une image et l'élévation monte dans le monde : le retournement est ici.
+    let v = 0.5 - elevation / 3.1415927;
+    return textureSampleLevel(
+        carte_environnement,
+        echantillonneur_environnement,
+        vec2<f32>(u, v),
+        0.0
+    ).rgb;
+}
+
 /// Un fond d'essai **achromatique**, contrasté et directionnel : sans structure visible, une
 /// réfraction juste et une réfraction fausse donnent la même image plate.
 /// ⚠ L'azimut se prend en `atan2(x, z)`, pas `atan2(z, x)` : autour de l'axe de visée, le premier
@@ -257,6 +304,12 @@ fn fresnel(cos_incidence: f32, eta: f32) -> f32 {
 /// de montrer la moindre déviation. Un fond sans structure rend une réfraction fausse et une
 /// réfraction juste identiques à l'œil.*
 fn fond(direction: vec3<f32>) -> vec3<f32> {
+    // ⭐ `volume_taille.w` était le dernier champ libre des constantes — le plafond de 128 octets
+    // étant atteint, c'est lui qui porte le choix. *Le damier reste le DÉFAUT : toutes les mesures
+    // écrites avant ce jour continuent de mesurer exactement ce qu'elles mesuraient.*
+    if (k.volume_taille.w > 0.5) {
+        return environnement(direction);
+    }
     let u = atan2(direction.x, direction.z) * 20.0;
     let v = asin(clamp(direction.y, -1.0, 1.0)) * 20.0;
     let damier = sin(u) * sin(v);

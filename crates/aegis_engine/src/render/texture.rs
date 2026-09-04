@@ -180,6 +180,41 @@ impl Texture {
         )
     }
 
+    /// ⭐ **UNE CARTE D'ENVIRONNEMENT** — plate comme une image, mais bouclée comme un horizon.
+    ///
+    /// La seule différence avec [`Self::create_from_bytes`] est le comportement aux bords, et elle
+    /// est décisive :
+    ///
+    /// - **`u` boucle (`REPEAT`)** : l'azimut fait le tour. *Avec `CLAMP`, la couture derrière la
+    ///   caméra fige une bande de pixels — un défaut qu'on attribuerait ensuite à la géométrie.*
+    /// - **`v` se fige (`CLAMP_TO_EDGE`)** : l'élévation ne boucle pas, le zénith est un pôle.
+    /// - **`LINEAR`** : deux directions voisines regardent le même monde ; interpoler entre elles
+    ///   dit la vérité, contrairement à deux normales de part et d'autre d'une silhouette.
+    pub fn create_environnement(
+        gpu: &GpuContext,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        largeur: u32,
+        hauteur: u32,
+        format: vk::Format,
+        octets_par_pixel: u32,
+        pixels: &[u8],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::creer_complet(
+            gpu,
+            memory_props,
+            largeur,
+            hauteur,
+            1,
+            false,
+            format,
+            octets_par_pixel,
+            vk::Filter::LINEAR,
+            vk::SamplerAddressMode::REPEAT,
+            vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            pixels,
+        )
+    }
+
     /// Le corps commun aux deux. **`volumique` est dit, jamais deviné** — voir l'avertissement
     /// sur [`Texture`].
     #[allow(clippy::too_many_arguments)]
@@ -194,6 +229,41 @@ impl Texture {
         octets_par_pixel: u32,
         filtre: vk::Filter,
         bordure: vk::SamplerAddressMode,
+        pixels: &[u8],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::creer_complet(
+            gpu,
+            memory_props,
+            width,
+            height,
+            depth,
+            volumique,
+            format,
+            octets_par_pixel,
+            filtre,
+            bordure,
+            bordure,
+            pixels,
+        )
+    }
+
+    /// Le corps réel — le seul endroit où une image Vulkan est construite dans ce moteur.
+    ///
+    /// `bordure_u` et `bordure_v` sont distinctes parce qu'un horizon **boucle en azimut et pas en
+    /// élévation** : c'est la seule chose qui sépare une carte d'environnement d'une image plate.
+    #[allow(clippy::too_many_arguments)]
+    fn creer_complet(
+        gpu: &GpuContext,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        width: u32,
+        height: u32,
+        depth: u32,
+        volumique: bool,
+        format: vk::Format,
+        octets_par_pixel: u32,
+        filtre: vk::Filter,
+        bordure_u: vk::SamplerAddressMode,
+        bordure_v: vk::SamplerAddressMode,
         pixels: &[u8],
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let image_size = (width * height * depth * octets_par_pixel) as vk::DeviceSize;
@@ -363,9 +433,9 @@ impl Texture {
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(filtre)
             .min_filter(filtre)
-            .address_mode_u(bordure)
-            .address_mode_v(bordure)
-            .address_mode_w(bordure)
+            .address_mode_u(bordure_u)
+            .address_mode_v(bordure_v)
+            .address_mode_w(bordure_v)
             .anisotropy_enable(false)
             .unnormalized_coordinates(false);
 
