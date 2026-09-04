@@ -8,6 +8,21 @@ no rendering library.*
 
 ---
 
+## 📓 [Le carnet de recherche](recherche/) — commencer par là
+
+**[`recherche/`](recherche/)** porte l'état réel de ce moteur : ce qu'il sait faire avec ses mesures,
+ce qu'il ne sait pas faire, la physique qui y est démontrée, et **tout le chemin qui reste**. Écrit
+pour des gens qui connaissent le rendu temps réel ; chaque affirmation y porte sa nature — *mesuré,
+calculé, lu ailleurs, ou conjecturé* — et la commande qui la rejoue.
+
+> **Ce moteur ne bat aucun record aujourd'hui, et il est très incomplet.** Le carnet commence par le
+> dire, parce que c'est la seule position à partir de laquelle on peut travailler.
+
+*A research notebook: what this engine measurably does, what it does not, and everything left to
+build. In French, for readers who already know real-time rendering.*
+
+---
+
 ## 🛠️ À propos / About
 
 Le dépôt porte **deux parties séparées**, et la frontière entre elles est tenue par un test :
