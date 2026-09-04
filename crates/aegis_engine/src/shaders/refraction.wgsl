@@ -76,6 +76,25 @@
 @group(0) @binding(0) var carte_avant: texture_2d<f32>;
 @group(0) @binding(1) var carte_arriere: texture_2d<f32>;
 
+// ── LE VOLUME DE MATIÈRE ─────────────────────────────────────────────────────────────────────
+//
+// ⭐⭐ **La géométrie entre par deux cartes plates ; la matière entre par ce volume, et par lui
+// seul.** Le shader ne connaît donc aucune sucette, aucun jade, aucun brouillard : il échantillonne
+// ce qu'on lui donne. *Écrire les bulles ici aurait gravé une décision d'artiste dans le moteur —
+// exactement la faute du voxel du 31 août 2026, qu'un raccourci qui fonctionne rend si tentante.*
+//
+// `rgb` = le facteur qui module l'absorption de référence, par canal. **1 partout = milieu
+// homogène**, et le résultat est alors celui d'avant, à la précision de la somme près.
+//
+// ⚠ `a` n'est PAS lu aujourd'hui. Le canal existe parce que Vulkan ne garantit aucun format à
+// trois canaux flottants — pas parce qu'il ferait quelque chose.
+//
+// ⚠ Celui-là est échantillonné avec **interpolation**, contrairement aux deux cartes : entre deux
+// texels de matière, la valeur intermédiaire décrit un milieu qui existe. *Entre deux normales de
+// part et d'autre d'une silhouette, non.*
+@group(0) @binding(2) var volume_matiere: texture_3d<f32>;
+@group(0) @binding(3) var echantillonneur: sampler;
+
 struct Constantes {
     // La caméra décrite par sa base, et non par une matrice : la même description sert à
     // PROJETER (monde → pixel, ce dont Newton a besoin) et à DÉ-PROJETER (pixel → direction).
@@ -84,8 +103,10 @@ struct Constantes {
     droite: vec4<f32>,     // xyz = axe droit,  w = tangente du demi-champ horizontal
     haut: vec4<f32>,       // xyz = axe haut,   w = tangente du demi-champ vertical
     avant: vec4<f32>,      // xyz = axe de visée
-    matiere: vec4<f32>,    // xyz = sigma par canal, w = rapport des indices n1/n2
+    matiere: vec4<f32>,    // xyz = sigma de REFERENCE par canal, w = rapport des indices n1/n2
     reglages: vec4<f32>,   // xy = taille en pixels, z = mode, w = nombre de tours de Newton
+    volume_min: vec4<f32>,    // xyz = coin minimal de la boite du volume, w = nombre de pas
+    volume_taille: vec4<f32>, // xyz = taille de la boite du volume ; w non lu
 };
 var<push_constant> k: Constantes;
 
@@ -301,9 +322,37 @@ fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
         return vec4<f32>(direction_finale * 0.5 + vec3<f32>(0.5), 1.0);
     }
 
-    // ── 4. Ce qui a survécu — Beer-Lambert sur la longueur RÉELLEMENT traversée ──
-    // Par canal : c'est la seule façon d'obtenir un verre qui colore, et la longueur vient de
-    // Newton, pas d'une épaisseur supposée constante.
-    let survie = exp(-k.matiere.xyz * distance_traversee);
+    // ── 4. Ce qui a survécu — Beer-Lambert le long du trajet RÉEL ──
+    //
+    // ⭐⭐ **UNE SEULE FORMULE, ET LE MILIEU HOMOGÈNE EN EST UN CAS PARTICULIER EXACT.**
+    //
+    // Jusqu'au 4 septembre 2026, cette ligne était `exp(-sigma * distance)` : un `sigma` unique
+    // pour tout le trajet, donc un verre teinté et rien d'autre. Une sucette de sucre bleu a un
+    // feuillet de colorant mal mélangé et des bulles — **la matière change le long du rayon**, et
+    // aucune formule fermée ne dit ça. Il faut marcher et accumuler l'épaisseur optique.
+    //
+    // *Et il n'y a PAS deux chemins de code.* Sur un volume neutre, chaque pas ajoute
+    // `sigma * 1 * ds`, dont la somme vaut `sigma * distance` — la marche **redonne** l'ancienne
+    // formule au lieu de la remplacer. Une branche `si le milieu est homogène` aurait été un
+    // second chemin à tester pour toujours, et le premier à diverger.
+    //
+    // ⚠ L'échantillon se prend au **milieu** de chaque segment, jamais à son début : sur un
+    // feuillet mince, prendre le bord fait manquer ou compter deux fois une couche entière selon
+    // le pas — et l'erreur ne se voit pas, elle se contente de décaler la teinte.
+    var epaisseur_optique = vec3<f32>(0.0);
+    let pas = max(1, i32(k.volume_min.w));
+    let ds = distance_traversee / f32(pas);
+    for (var i = 0; i < pas; i = i + 1) {
+        let point = entree_point + dedans.xyz * ((f32(i) + 0.5) * ds);
+        // Monde → volume. La boîte est décrite par son coin et sa taille : deux soustractions et
+        // une division, pas de matrice.
+        let uvw = (point - k.volume_min.xyz) / k.volume_taille.xyz;
+        // ⚠ `textureSampleLevel` et non `textureSample` : dans une boucle, le niveau de détail
+        // implicite se calcule à partir de dérivées d'écran qui n'ont aucun sens ici — et la
+        // spécification l'interdit sous flux non uniforme.
+        let densite = textureSampleLevel(volume_matiere, echantillonneur, uvw, 0.0).rgb;
+        epaisseur_optique = epaisseur_optique + k.matiere.xyz * densite * ds;
+    }
+    let survie = exp(-epaisseur_optique);
     return vec4<f32>(fond(direction_finale) * survie, 1.0);
 }

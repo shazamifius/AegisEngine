@@ -1056,6 +1056,9 @@ mod tests {
             matiere: [sigma[0], sigma[1], sigma[2], ETA],
             // `z = 1` : le mode « direction » (le vecteur de sortie) ; `z = 0` : une vraie image.
             reglages: [cote as f32, cote as f32, mode, 8.0],
+            // Aucun volume : le milieu est homogène, et un seul pas y est exact.
+            volume_min: crate::render::verre::ConstantesVerre::MILIEU_HOMOGENE_MIN,
+            volume_taille: crate::render::verre::ConstantesVerre::MILIEU_HOMOGENE_TAILLE,
         };
 
         let image = ctx.swapchain_images[0];

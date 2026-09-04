@@ -45,12 +45,37 @@ pub struct ConstantesVerre {
     /// xyz = axe de visée.
     pub avant: [f32; 4],
     /// xyz = absorption par canal (Beer-Lambert), w = rapport des indices n₁/n₂.
+    ///
+    /// ⚠ Depuis le 4 septembre 2026, `xyz` est **l'absorption de référence**, que le volume de
+    /// matière module texel par texel. Un volume neutre (partout 1) redonne exactement le milieu
+    /// homogène d'avant.
     pub matiere: [f32; 4],
     /// xy = taille en pixels, z = mode (0 = couleur, 1 = direction), w = tours de Newton.
     pub reglages: [f32; 4],
+    /// ⭐ xyz = le coin **minimal** de la boîte du volume, dans le monde ; w = le nombre de pas de
+    /// la marche à l'intérieur de la matière.
+    ///
+    /// *Le nombre de pas voyage ici parce qu'il n'y avait plus un seul `w` libre ailleurs — et
+    /// c'est bien : ce qui décide de la finesse de l'intégration appartient au volume.*
+    pub volume_min: [f32; 4],
+    /// xyz = la **taille** de la boîte du volume, dans le monde. `w` n'est pas lu.
+    ///
+    /// ⚠ Une composante nulle donnerait une division par zéro dans le shader ; l'appelant décrit
+    /// toujours une boîte réelle, même pour un volume d'un seul texel.
+    pub volume_taille: [f32; 4],
 }
 
 impl ConstantesVerre {
+    /// ⭐ **Le milieu homogène, écrit une seule fois** — le coin de la boîte, et **un seul pas**.
+    ///
+    /// Sur un volume neutre, un pas unique suffit et il est *exact* : l'unique segment couvre tout
+    /// le trajet, son échantillon au milieu vaut 1, et la somme donne `sigma × distance` — la
+    /// formule d'avant, au calcul près. *Demander plus de pas ici ne changerait rien qu'un coût.*
+    pub const MILIEU_HOMOGENE_MIN: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    /// La taille de la boîte du milieu homogène. **Aucune composante nulle** : le shader divise
+    /// par elle.
+    pub const MILIEU_HOMOGENE_TAILLE: [f32; 4] = [1.0, 1.0, 1.0, 0.0];
+
     /// Les octets tels que le shader les lit.
     fn octets(&self) -> &[u8] {
         // SÛRETÉ : `#[repr(C)]` sur un agrégat de `f32` — pas de bourrage, pas de pointeur, pas
@@ -76,6 +101,16 @@ pub struct Verre {
     descripteurs: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     ensemble: vk::DescriptorSet,
+    /// ⭐ **Le volume neutre — un seul texel valant 1, et il n'est pas un bouche-trou.**
+    ///
+    /// Un ensemble de descripteurs doit être **entièrement** écrit avant d'être lu : laisser le
+    /// binding du volume vide serait un comportement indéfini, pas une absence. Il faut donc
+    /// toujours un volume — et le volume neutre est celui qui **redonne exactement le milieu
+    /// homogène**, puisque `sigma × 1` sommé sur le trajet vaut `sigma × distance`.
+    ///
+    /// *C'est ce qui permet à la passe de n'avoir qu'un seul chemin de code : le cas simple n'est
+    /// pas une branche, c'est une valeur.*
+    volume_neutre: crate::render::texture::Texture,
 }
 
 impl Verre {
@@ -97,6 +132,19 @@ impl Verre {
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            // ⭐ Le volume de matière, lui, veut un échantillonneur : on l'interpole (voir
+            // `Texture::create_volume`). C'est la différence de nature entre une carte de
+            // géométrie et un milieu.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let descripteurs = unsafe {
             gpu.device.create_descriptor_set_layout(
@@ -104,9 +152,14 @@ impl Verre {
                 None,
             )?
         };
-        let tailles = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::SAMPLED_IMAGE)
-            .descriptor_count(2)];
+        let tailles = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(3),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1),
+        ];
         let pool = unsafe {
             gpu.device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -155,7 +208,64 @@ impl Verre {
         )?;
         unsafe { gpu.device.destroy_shader_module(module, None) };
 
-        Ok(Self { pipeline, layout, descripteurs, pool, ensemble })
+        // Un seul texel valant 1 par canal : le milieu homogène, écrit comme une **valeur** et
+        // non comme une branche.
+        //
+        // ⚠ En 32 bits flottants, comme les cartes de géométrie — et c'est délibéré. La moitié de
+        // cette mémoire suffirait (`R16G16B16A16_SFLOAT`), mais le projet n'embarque aucune
+        // bibliothèque et la conversion vers un flottant de 16 bits est à écrire à la main, avec
+        // ses subnormaux et ses arrondis. *Une conversion fausse ne casserait pas l'image : elle
+        // la rendrait plausible et fausse* — le pire mode de panne de ce moteur. Le format est un
+        // paramètre de `create_volume` : le jour où la mémoire d'un mobile décidera, ce sera un
+        // argument à changer, et une conversion à prouver par un test.
+        let memoire = unsafe {
+            gpu.instance
+                .get_physical_device_memory_properties(gpu.physical_device)
+        };
+        let mut texel = Vec::with_capacity(16);
+        for v in [1.0f32, 1.0, 1.0, 0.0] {
+            texel.extend_from_slice(&v.to_ne_bytes());
+        }
+        let volume_neutre = crate::render::texture::Texture::create_volume(
+            gpu,
+            &memoire,
+            [1, 1, 1],
+            vk::Format::R32G32B32A32_SFLOAT,
+            16,
+            &texel,
+        )?;
+
+        let passe = Self { pipeline, layout, descripteurs, pool, ensemble, volume_neutre };
+        passe.brancher_matiere(gpu, None);
+        Ok(passe)
+    }
+
+    /// Désigne le volume que le shader traversera — ou **le milieu homogène** quand on ne lui en
+    /// donne aucun.
+    ///
+    /// ⚠ **À rappeler après chaque `brancher`** si un volume propre est en place : les deux
+    /// fonctions écrivent dans le même ensemble de descripteurs, et rien n'oblige l'appelant à les
+    /// appeler dans un ordre plutôt qu'un autre. *C'est écrit ici parce que rien dans le type ne
+    /// l'impose — une garde de prose, donc faible, et il vaut mieux le dire que le taire.*
+    pub fn brancher_matiere(&self, gpu: &GpuContext, volume: Option<&crate::render::texture::Texture>) {
+        let choisi = volume.unwrap_or(&self.volume_neutre);
+        let image = [vk::DescriptorImageInfo::default()
+            .image_view(choisi.view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let echantillonneur = [vk::DescriptorImageInfo::default().sampler(choisi.sampler)];
+        let ecritures = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.ensemble)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&image),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.ensemble)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&echantillonneur),
+        ];
+        unsafe { gpu.device.update_descriptor_sets(&ecritures, &[]) };
     }
 
     /// Désigne les deux cartes que le shader lira. À rappeler dès qu'elles changent.
@@ -212,6 +322,7 @@ impl Verre {
     }
 
     pub fn detruire(&self, device: &ash::Device) {
+        self.volume_neutre.detruire(device);
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
@@ -247,6 +358,8 @@ mod tests {
             avant: [0.0, 0.0, 1.0, 0.0],
             matiere: [0.0, 0.0, 0.0, ETA],
             reglages: [cote as f32, cote as f32, mode, tours],
+            volume_min: ConstantesVerre::MILIEU_HOMOGENE_MIN,
+            volume_taille: ConstantesVerre::MILIEU_HOMOGENE_TAILLE,
         }
     }
 
@@ -366,6 +479,19 @@ mod tests {
     /// `UNORM` (quantification uniforme), une couleur en `SRGB` (la chaîne du vrai rendu). *Lire
     /// une direction à travers une courbe de gamma mesurerait la courbe autant que la direction.*
     fn rendre(k: &ConstantesVerre, format: vk::Format, cote: u32) -> Option<Vec<u8>> {
+        rendre_avec(k, format, cote, None)
+    }
+
+    /// Le même rendu, **avec un volume de matière**. `None` = le milieu homogène.
+    ///
+    /// *Une seule fonction plutôt que deux : la leçon de `Texture` du même jour, appliquée tout
+    /// de suite — deux textes presque identiques finissent toujours par diverger.*
+    fn rendre_avec(
+        k: &ConstantesVerre,
+        format: vk::Format,
+        cote: u32,
+        volume: Option<(u32, u32, u32, &[u8])>,
+    ) -> Option<Vec<u8>> {
         let ctx = match GpuContext::sans_ecran_format(cote, cote, 1, format) {
             Ok(c) => c,
             Err(e) => {
@@ -383,7 +509,7 @@ mod tests {
         };
         let (octets_avant, octets_arriere) = cartes_exactes(cote);
         let fabriquer = |octets: &[u8]| {
-            crate::render::texture::Texture2D::create_from_bytes(
+            crate::render::texture::Texture::create_from_bytes(
                 &ctx,
                 &memory_props,
                 cote,
@@ -396,6 +522,23 @@ mod tests {
         let tex_avant = fabriquer(&octets_avant).ok()?;
         let tex_arriere = fabriquer(&octets_arriere).ok()?;
         verre.brancher(&ctx, tex_avant.view, tex_arriere.view);
+
+        // Le volume doit vivre jusqu'à la fin du rendu, comme les cartes.
+        let tex_volume = match volume {
+            Some((l, h, p, octets)) => Some(
+                crate::render::texture::Texture::create_volume(
+                    &ctx,
+                    &memory_props,
+                    [l, h, p],
+                    vk::Format::R32G32B32A32_SFLOAT,
+                    16,
+                    octets,
+                )
+                .ok()?,
+            ),
+            None => None,
+        };
+        verre.brancher_matiere(&ctx, tex_volume.as_ref());
 
         let image = ctx.swapchain_images[0];
         let vue = ctx.swapchain_image_views[0];
@@ -474,6 +617,9 @@ mod tests {
         verre.detruire(&ctx.device);
         tex_avant.detruire(&ctx.device);
         tex_arriere.detruire(&ctx.device);
+        if let Some(v) = tex_volume.as_ref() {
+            v.detruire(&ctx.device);
+        }
         Some(bruts)
     }
 
@@ -689,15 +835,159 @@ mod tests {
         assert_ne!(avec, colore, "l'absorption ne change RIEN : Beer-Lambert est mort");
     }
 
-    /// Les 112 octets, vérifiés plutôt que supposés.
+    /// Fabrique un volume cubique dont chaque texel vaut ce que la fonction en dit.
+    ///
+    /// `rgb` = le facteur d'absorption par canal ; `a` n'est pas lu par le shader.
+    fn volume_cube(cote: u32, f: impl Fn(u32, u32, u32) -> [f32; 3]) -> Vec<u8> {
+        let mut octets = Vec::with_capacity((cote * cote * cote * 16) as usize);
+        // ⚠ L'ordre est celui que Vulkan attend : x varie le plus vite, z le plus lentement.
+        // *L'écrire à l'envers ne casse rien — ça transpose la matière, ce qui est parfaitement
+        // invisible sur un volume symétrique et faux sur tous les autres.*
+        for z in 0..cote {
+            for y in 0..cote {
+                for x in 0..cote {
+                    let d = f(x, y, z);
+                    for v in [d[0], d[1], d[2], 0.0] {
+                        octets.extend_from_slice(&v.to_ne_bytes());
+                    }
+                }
+            }
+        }
+        octets
+    }
+
+    /// ⭐⭐⭐ **LA MATIÈRE CESSE D'ÊTRE UNIFORME** — et le milieu homogène traverse la marche sans
+    /// bouger d'un pixel.
+    ///
+    /// # Les deux choses que ce test prouve, et il faut les deux
+    ///
+    /// **1. Le volume est vraiment lu.** Un feuillet dense d'un côté, clair de l'autre, doit
+    /// produire une image différente. *Sans cette moitié, tout le mécanisme pourrait être branché
+    /// à rien et personne ne le verrait — la famille de défauts n° 1 de ce projet.*
+    ///
+    /// **2. La marche ne dégrade RIEN.** Le même milieu homogène, calculé d'un côté par la
+    /// formule fermée (un seul pas) et de l'autre par une marche en 32 pas sur un volume uniforme,
+    /// doit donner **la même image**. C'est ce qui autorise à n'avoir qu'un seul chemin de code :
+    /// *si la marche coûtait ne serait-ce qu'un niveau de couleur au cas simple, il aurait fallu
+    /// garder l'ancienne formule à côté — donc deux chemins, dont un seul serait testé.*
+    ///
+    /// ⚠ Ce test ne juge **aucune** image : il compare des octets. Ce qu'une sucette doit *avoir
+    /// l'air* d'être ne se mesure pas ici — c'est son œil, et lui seul.
+    #[test]
+    fn un_volume_inhomogene_change_la_matiere_et_le_milieu_homogene_traverse_sans_bouger() {
+        let mut k = constantes(0.0, 6.0, COTE);
+        // Une absorption franche, sinon les trois images se ressembleraient pour une raison qui
+        // n'a rien à voir avec le volume.
+        k.matiere = [0.35, 0.9, 1.6, ETA];
+
+        let Some(par_la_formule) = rendre(&k, vk::Format::B8G8R8A8_SRGB, COTE) else {
+            println!("  (aucune image — pas de Vulkan)");
+            return;
+        };
+
+        // La boîte englobe la bille (rayon 1) avec de la marge, et la marche fait 32 pas.
+        let mut k_marche = k;
+        k_marche.volume_min = [-1.5, -1.5, -1.5, 32.0];
+        k_marche.volume_taille = [3.0, 3.0, 3.0, 0.0];
+
+        const N: u32 = 16;
+        let uniforme = volume_cube(N, |_, _, _| [1.0, 1.0, 1.0]);
+        let par_la_marche = rendre_avec(
+            &k_marche,
+            vk::Format::B8G8R8A8_SRGB,
+            COTE,
+            Some((N, N, N, &uniforme)),
+        )
+        .expect("Vulkan etait la a l'instant");
+
+        // Un feuillet de colorant : dense d'un côté, presque rien de l'autre.
+        let feuillet = volume_cube(N, |x, _, _| {
+            if x < N / 2 { [2.5, 2.5, 2.5] } else { [0.15, 0.15, 0.15] }
+        });
+        let avec_feuillet = rendre_avec(
+            &k_marche,
+            vk::Format::B8G8R8A8_SRGB,
+            COTE,
+            Some((N, N, N, &feuillet)),
+        )
+        .expect("Vulkan etait la a l'instant");
+
+        // ── 1. Le volume est lu ──
+        assert_ne!(
+            par_la_marche, avec_feuillet,
+            "le volume ne change RIEN a l'image : il n'est pas lu, et tout ce mecanisme est mort"
+        );
+
+        // ── 2. La marche redonne la formule fermée ──
+        let differents = par_la_formule
+            .iter()
+            .zip(par_la_marche.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        let pire = par_la_formule
+            .iter()
+            .zip(par_la_marche.iter())
+            .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
+            .max()
+            .unwrap_or(0);
+        println!(
+            "  formule fermee (1 pas) contre marche (32 pas, volume uniforme {N}³) :\n    \
+             {differents} octets differents sur {}, ecart maximal {pire} niveau(x) sur 255",
+            par_la_formule.len()
+        );
+        // Le seuil n'est pas un réglage : un écart d'UN niveau est le dernier bit d'un octet, donc
+        // le bruit d'arrondi de la somme flottante. Deux niveaux voudraient dire que la marche
+        // change la matière, ce qu'elle n'a pas le droit de faire sur un milieu uniforme.
+        assert!(
+            pire <= 1,
+            "la marche degrade le milieu homogene de {pire} niveaux — elle ne l'integre pas juste"
+        );
+
+        // ── Et la mesure qui dit COMBIEN le feuillet change, pour que le chiffre existe ──
+        let ecart_feuillet = par_la_marche
+            .iter()
+            .zip(avec_feuillet.iter())
+            .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as f64)
+            .sum::<f64>()
+            / par_la_marche.len() as f64;
+        println!("  le feuillet deplace en moyenne {ecart_feuillet:.2} niveaux par octet");
+
+        // ── Les images, pour l'œil — la seule instance qui juge une matière ──
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier de preuves");
+        for (nom, bruts) in [
+            ("volume-1-homogene.png", &par_la_marche),
+            ("volume-2-feuillet.png", &avec_feuillet),
+        ] {
+            let mut rvb = Vec::with_capacity(bruts.len() / 4 * 3);
+            for p in bruts.chunks_exact(4) {
+                rvb.extend_from_slice(&[p[2], p[1], p[0]]);
+            }
+            let png = crate::image::png::encoder(COTE, COTE, &rvb).expect("png");
+            std::fs::write(dossier.join(nom), &png).expect("ecriture");
+            println!("  ecrit : target/preuves/{nom} ({} Ko)", png.len() / 1024);
+        }
+    }
+
+    /// La taille des constantes, vérifiée plutôt que supposée — **et elle est maintenant au ras
+    /// du plafond**.
+    ///
+    /// L'histoire de ce chiffre, parce qu'elle dit ce que le shader a cessé et commencé de savoir :
+    /// **112** jusqu'au 2 septembre 2026 (le centre et le rayon de la sphère y voyageaient encore),
+    /// **96** quand la géométrie est passée par des cartes — *ce qui n'est plus lu n'a pas à être
+    /// poussé* —, puis **128** le 4 septembre, quand la matière est entrée par un volume : il a
+    /// fallu dire où se trouve sa boîte dans le monde, et en combien de pas la traverser.
+    ///
+    /// ⚠⚠ **Il ne reste plus un seul octet.** Le prochain qui aura besoin d'un `vec4` ne pourra
+    /// pas l'ajouter ici : il devra soit reprendre un `w` inutilisé, soit passer par un tampon
+    /// uniforme. *Ce n'est pas une limite de cette machine — elle en offre 256 — c'est le plancher
+    /// que Vulkan garantit partout, et le franchir ne se verrait que sur la carte de quelqu'un
+    /// d'autre.*
     #[test]
     fn les_constantes_tiennent_sous_le_plafond_garanti_de_vulkan() {
         let taille = std::mem::size_of::<ConstantesVerre>();
         println!("  constantes de verre : {taille} octets (plafond garanti : 128)");
-        // 112 jusqu'au 2 septembre 2026 : le centre et le rayon de la sphère y voyageaient encore.
-        // Ils sont partis le jour où la géométrie est passée par des cartes — *ce qui n'est plus
-        // lu n'a pas à être poussé.*
-        assert_eq!(taille, 96, "la structure a changé de taille sans qu'on le décide");
+        assert_eq!(taille, 128, "la structure a changé de taille sans qu'on le décide");
         assert!(
             taille <= 128,
             "Vulkan ne garantit que 128 octets de constantes poussées, et cette limite a déjà \

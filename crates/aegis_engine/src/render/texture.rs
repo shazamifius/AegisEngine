@@ -5,16 +5,43 @@ use std::path::Path;
 use crate::core::gpu_context::GpuContext;
 use crate::core::memory::MemoryManager;
 
-pub struct Texture2D {
+/// Une image échantillonnable par un shader — **plate ou volumique**.
+///
+/// # ⭐ Pourquoi la dimension n'est pas dans le nom (4 septembre 2026)
+///
+/// Cette structure s'appelait `Texture2D`, et le volume de matière de la sucette a demandé une
+/// image à trois dimensions. Le geste court était d'écrire une `Texture3D` à côté : deux cents
+/// lignes identiques au caractère près, sauf trois champs. **Ça aurait « marché » le soir même, et
+/// créé deux textes à faire évoluer en parallèle** — donc, tôt ou tard, deux comportements.
+///
+/// *C'est la leçon du portage Linux du 7 août 2026, retrouvée ailleurs : quand une chose manque
+/// dans un cas, la question n'est pas « que faut-il ajouter ici » mais « qu'est-ce qui n'aurait
+/// jamais dû vivre là ».* Ici, ce qui n'aurait jamais dû vivre dans le nom, c'est la dimension.
+///
+/// # ⚠⚠ ET LA DIMENSION NE SE DÉDUIT PAS DE LA TAILLE — payé le jour même
+///
+/// La première version décidait toute seule : `si profondeur > 1, alors volume`. C'était joli, et
+/// **faux**. Le volume neutre de la passe de verre mesure un seul texel : il était donc créé
+/// comme une image **plate**, pendant que le shader réclamait une texture à trois dimensions.
+/// Descripteur incompatible, lecture indéfinie — le volume rendait **zéro**, l'absorption
+/// disparaissait, et *aucune erreur n'était signalée nulle part*.
+///
+/// **Un volume d'un seul texel reste un volume.** La dimension est une **intention de
+/// l'appelant**, pas une propriété qu'on mesure sur les données. *Deviner à sa place produit
+/// exactement ce que ce moteur redoute le plus : une image plausible et fausse.*
+pub struct Texture {
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
     pub view: vk::ImageView,
     pub sampler: vk::Sampler,
     pub width: u32,
     pub height: u32,
+    /// 1 pour une image plate — mais aussi pour un volume d'une seule couche : **ce champ ne dit
+    /// pas la dimension**, il dit combien de couches. Voir l'avertissement ci-dessus.
+    pub depth: u32,
 }
 
-impl Texture2D {
+impl Texture {
     /// Crée une texture 1x1 par défaut (couleur unie RGBA8) dans la memoire de la carte.
     pub fn create_solid_color(
         gpu: &GpuContext,
@@ -27,7 +54,7 @@ impl Texture2D {
     /// Rend à la carte tout ce que cette texture lui a pris.
     ///
     /// ⚠⚠ **Cette fonction n'existait pas avant le 2 septembre 2026, et personne ne libérait une
-    /// `Texture2D` — ni `Drop`, ni geste explicite.** Sur un programme qui charge ses textures une
+    /// une texture — ni `Drop`, ni geste explicite.** Sur un programme qui charge ses textures une
     /// fois au démarrage, ça ne se voit jamais : le pilote nettoie à la sortie du processus. Ça se
     /// voit dès qu'une texture est créée **par image ou par test**, et c'est exactement ce que fait
     /// la passe de verre.
@@ -90,7 +117,86 @@ impl Texture2D {
         octets_par_pixel: u32,
         pixels: &[u8],
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let image_size = (width * height * octets_par_pixel) as vk::DeviceSize;
+        Self::creer(
+            gpu,
+            memory_props,
+            width,
+            height,
+            1,
+            false,
+            format,
+            octets_par_pixel,
+            vk::Filter::NEAREST,
+            vk::SamplerAddressMode::REPEAT,
+            pixels,
+        )
+    }
+
+    /// ⭐⭐ **UN VOLUME DE MATIÈRE** — ce que le rayon traverse, et non plus seulement la forme
+    /// qu'il rencontre.
+    ///
+    /// # Pourquoi il existe (4 septembre 2026)
+    ///
+    /// Le shader de réfraction savait absorber selon Beer-Lambert avec **un seul `σ` pour tout le
+    /// trajet** : un milieu homogène, donc un verre teinté et rien d'autre. Une sucette de sucre
+    /// bleu a un feuillet de colorant mal mélangé et des bulles — *la matière change le long du
+    /// rayon*, et aucune formule fermée ne dit ça.
+    ///
+    /// **La géométrie entre dans le shader par deux cartes plates ; la matière y entre par ce
+    /// volume, et par lui seul.** Le shader ne connaît donc aucune sucette : il échantillonne ce
+    /// qu'on lui donne. *Écrire les bulles dans le shader aurait gravé une décision d'artiste
+    /// dans le moteur — exactement la faute du voxel du 31 août, qu'un raccourci qui fonctionne
+    /// rend si tentante.*
+    ///
+    /// # Deux réglages qui ne sont pas ceux d'une carte, et pourquoi
+    ///
+    /// - **`LINEAR`** : ici, l'interpolation est ce qu'on veut. *Pour une carte de normales elle
+    ///   est un défaut — mélanger deux normales de part et d'autre d'une silhouette fabrique une
+    ///   normale qui n'existe nulle part. Pour de la matière, deux échantillons voisins décrivent
+    ///   le même milieu, et l'interpolation dit la vérité entre eux.*
+    /// - **`CLAMP_TO_EDGE`** : un rayon qui sort du volume doit trouver le bord, jamais l'autre
+    ///   côté. *Avec `REPEAT`, la matière d'une face reviendrait par la face opposée — une image
+    ///   parfaitement plausible et fausse.*
+    pub fn create_volume(
+        gpu: &GpuContext,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        taille: [u32; 3],
+        format: vk::Format,
+        octets_par_texel: u32,
+        texels: &[u8],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::creer(
+            gpu,
+            memory_props,
+            taille[0],
+            taille[1],
+            taille[2],
+            true,
+            format,
+            octets_par_texel,
+            vk::Filter::LINEAR,
+            vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            texels,
+        )
+    }
+
+    /// Le corps commun aux deux. **`volumique` est dit, jamais deviné** — voir l'avertissement
+    /// sur [`Texture`].
+    #[allow(clippy::too_many_arguments)]
+    fn creer(
+        gpu: &GpuContext,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        width: u32,
+        height: u32,
+        depth: u32,
+        volumique: bool,
+        format: vk::Format,
+        octets_par_pixel: u32,
+        filtre: vk::Filter,
+        bordure: vk::SamplerAddressMode,
+        pixels: &[u8],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let image_size = (width * height * depth * octets_par_pixel) as vk::DeviceSize;
 
         // 1. Staging Buffer
         let (staging_buffer, staging_memory) = MemoryManager::create_buffer(
@@ -108,13 +214,15 @@ impl Texture2D {
         }
 
         // 2. Image en pavage optimal
+        // ⚠ La dimension vient de l'appelant, JAMAIS de la profondeur — un volume d'un seul
+        // texel est un volume.
         let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
+            .image_type(if volumique { vk::ImageType::TYPE_3D } else { vk::ImageType::TYPE_2D })
             .format(format)
             .extent(vk::Extent3D {
                 width,
                 height,
-                depth: 1,
+                depth,
             })
             .mip_levels(1)
             .array_layers(1)
@@ -127,7 +235,7 @@ impl Texture2D {
         let image = unsafe { gpu.device.create_image(&image_info, None)? };
         let mem_reqs = unsafe { gpu.device.get_image_memory_requirements(image) };
         let mem_type = MemoryManager::find_memory_type(memory_props, mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            .ok_or("Impossible de trouver de la VRAM pour la Texture2D")?;
+            .ok_or("Impossible de trouver de la VRAM pour la Texture")?;
 
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_reqs.size)
@@ -187,7 +295,7 @@ impl Texture2D {
                 .image_extent(vk::Extent3D {
                     width,
                     height,
-                    depth: 1,
+                    depth,
                 });
 
             gpu.device.cmd_copy_buffer_to_image(
@@ -239,7 +347,7 @@ impl Texture2D {
         // 4. ImageView Vulkan
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(if volumique { vk::ImageViewType::TYPE_3D } else { vk::ImageViewType::TYPE_2D })
             .format(format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -253,17 +361,17 @@ impl Texture2D {
 
         // 5. Sampler VRAM Vulkan
         let sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::NEAREST)
-            .min_filter(vk::Filter::NEAREST)
-            .address_mode_u(vk::SamplerAddressMode::REPEAT)
-            .address_mode_v(vk::SamplerAddressMode::REPEAT)
-            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .mag_filter(filtre)
+            .min_filter(filtre)
+            .address_mode_u(bordure)
+            .address_mode_v(bordure)
+            .address_mode_w(bordure)
             .anisotropy_enable(false)
             .unnormalized_coordinates(false);
 
         let sampler = unsafe { gpu.device.create_sampler(&sampler_info, None)? };
 
-        log::info!("Texture2D VRAM créé avec succès ({}x{} px).", width, height);
+        log::info!("Texture VRAM creee ({width}x{height}x{depth}).");
 
         Ok(Self {
             image,
@@ -272,6 +380,7 @@ impl Texture2D {
             sampler,
             width,
             height,
+            depth,
         })
     }
 
