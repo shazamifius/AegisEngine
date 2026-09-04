@@ -835,30 +835,59 @@ fn accumuler_triangle(
     }
 }
 
+// ── LES OUTILS D'UN CHAMP PROCÉDURAL ─────────────────────────────────────────────────────────
+//
+// ⚠ Ils vivaient dans le `mod tests` de ce fichier jusqu'au 4 septembre 2026, et c'est le banc GPU
+// qui a demandé à les partager : **la sucette doit être cuite dans un volume à partir du MÊME
+// champ que celui du banc processeur**, sinon on compare deux sucettes différentes et l'écart ne
+// dit plus rien. *Les dupliquer aurait garanti qu'elles divergent.*
+//
+// Ils restent sous `cfg(test)` : aucun chemin de production n'en a besoin, et le compilateur le
+// dirait s'ils devenaient morts.
+//
+// ⚠⚠ **CHAQUE fonction porte SON `#[cfg(test)]`, collé à elle.** Un seul attribut posé en tête de
+// ce bloc ne s'applique qu'à la PREMIÈRE : `fondu` s'est retrouvée compilée en production et
+// jamais appelée, et seul le warning `never used` l'a dit. *C'est la même famille que le
+// doc-comment glissé entre un `#[test]` et sa fonction, qui désarme le test suivant en silence —
+// un attribut séparé de sa cible par quoi que ce soit ne la vise plus.*
+
+/// Un nombre entre 0 et 1, tiré d'une cellule de grille — **déterministe et sans état**.
+///
+/// C'est ce qui permet de semer des milliers de bulles sans en stocker une seule : on ne
+/// *place* pas les bulles, on *demande* à un point s'il est dans une. *Rien à modéliser, rien à
+/// charger, rien à faire tenir en mémoire — et la même graine redonne exactement la même
+/// sucette, ce qui rend un rendu reproductible.*
+#[cfg(test)]
+pub(crate) fn alea(cx: i32, cy: i32, cz: i32, graine: u32) -> f32 {
+    let mut h = (cx as u32)
+        .wrapping_mul(0x9E37_79B1)
+        ^ (cy as u32).wrapping_mul(0x85EB_CA77)
+        ^ (cz as u32).wrapping_mul(0xC2B2_AE3D)
+        ^ graine.wrapping_mul(0x27D4_EB2F);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297A_2D39);
+    h ^= h >> 15;
+    h as f32 / u32::MAX as f32
+}
+
+/// Un passage doux de 0 à 1 entre deux bornes — la courbe d'Hermite `3t² − 2t³`.
+///
+/// ⚠ **Sa dérivée s'annule aux deux bouts**, et c'est toute la différence avec un `clamp` :
+/// une rampe linéaire a un coude, et un coude se VOIT sur une image. *La première nectarine
+/// portait deux anneaux nets pour cette seule raison.*
+#[cfg(test)]
+pub(crate) fn fondu(depart: f32, arrivee: f32, valeur: f32) -> f32 {
+    let t = ((valeur - depart) / (arrivee - depart)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::geometry::primitives::Primitives;
 
-    /// Un nombre entre 0 et 1, tiré d'une cellule de grille — **déterministe et sans état**.
-    ///
-    /// C'est ce qui permet de semer des milliers de bulles sans en stocker une seule : on ne
-    /// *place* pas les bulles, on *demande* à un point s'il est dans une. *Rien à modéliser, rien à
-    /// charger, rien à faire tenir en mémoire — et la même graine redonne exactement la même
-    /// sucette, ce qui rend un rendu reproductible.*
-    fn alea(cx: i32, cy: i32, cz: i32, graine: u32) -> f32 {
-        let mut h = (cx as u32)
-            .wrapping_mul(0x9E37_79B1)
-            ^ (cy as u32).wrapping_mul(0x85EB_CA77)
-            ^ (cz as u32).wrapping_mul(0xC2B2_AE3D)
-            ^ graine.wrapping_mul(0x27D4_EB2F);
-        h ^= h >> 15;
-        h = h.wrapping_mul(0x2C1B_3C6D);
-        h ^= h >> 12;
-        h = h.wrapping_mul(0x297A_2D39);
-        h ^= h >> 15;
-        h as f32 / u32::MAX as f32
-    }
 
     /// ⭐⭐ **L'EMPREINTE D'UNE IMAGE, ET POURQUOI ELLE EXISTE** — comparer deux machines sans
     /// s'échanger un seul fichier.
@@ -895,15 +924,6 @@ mod tests {
         format!("empreinte {h:016x} · somme des canaux {somme}")
     }
 
-    /// Un passage doux de 0 à 1 entre deux bornes — la courbe d'Hermite `3t² − 2t³`.
-    ///
-    /// ⚠ **Sa dérivée s'annule aux deux bouts**, et c'est toute la différence avec un `clamp` :
-    /// une rampe linéaire a un coude, et un coude se VOIT sur une image. *La première nectarine
-    /// portait deux anneaux nets pour cette seule raison.*
-    fn fondu(depart: f32, arrivee: f32, valeur: f32) -> f32 {
-        let t = ((valeur - depart) / (arrivee - depart)).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    }
 
     /// ⭐ **LA SEULE PORTE PAR LAQUELLE UNE BILLE ENTRE DANS CE BANC.**
     ///

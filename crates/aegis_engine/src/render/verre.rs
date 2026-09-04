@@ -1075,6 +1075,156 @@ mod tests {
         println!("  ecrit : target/preuves/volume-3-bulles.png ({} Ko)", png.len() / 1024);
     }
 
+    /// ⭐⭐⭐ **LA SUCETTE, ENTIÈRE** — la matière du banc processeur traverse enfin une vraie
+    /// réfraction.
+    ///
+    /// # Ce que cette image réunit, et pourquoi il a fallu deux moitiés
+    ///
+    /// Le banc processeur (`epaisseur.rs`) porte **la matière** — sucre bleu dont la teinte vire
+    /// avec l'épaisseur, feuillet de colorant figé par la viscosité, bulles qui renvoient
+    /// l'ambiante — et **ne dévie aucun rayon** : sa sucette est une boule opaque et colorée. Le
+    /// banc de verre porte **la réfraction** — Snell aux deux interfaces, Newton pour trouver la
+    /// sortie — et son verre est **nu**. *Chacune était juste et aucune n'était une sucette.*
+    ///
+    /// Le champ est **exactement celui du banc processeur** : mêmes constantes, mêmes fonctions
+    /// `alea` et `fondu`, qui ont été remontées de son `mod tests` pour ça. *Le recopier aurait
+    /// garanti que les deux sucettes divergent au premier réglage.*
+    ///
+    /// # ⚠⚠ ET LE MUR QUE CE TEST A RÉVÉLÉ — il est structurel, pas anecdotique
+    ///
+    /// **Un volume cuit ne peut pas porter les bulles fines de cette sucette.** Leur rayon va de
+    /// 0,016 à 0,046 pour une bille de rayon 1 ; une sphère cesse de scintiller à partir de huit
+    /// échantillons dans son diamètre. Le calcul est sans appel :
+    ///
+    /// | Volume | Mémoire | Une bulle fine mesure |
+    /// |---|---|---|
+    /// | 128³ | 34 Mo | **0,9 texel** |
+    /// | 256³ | **268 Mo** | 1,7 texel |
+    /// | ~1200³ | ~27 **Go** | 8 texels — *ce qu'il faudrait* |
+    ///
+    /// **C'est une propriété du choix d'architecture, pas un défaut d'implémentation** : une grille
+    /// régulière paie partout la finesse dont elle n'a besoin que par endroits. Le banc processeur
+    /// n'a pas ce problème parce qu'il n'a **aucune grille** — il demande au point s'il est dans
+    /// une bulle, et la réponse est exacte à n'importe quelle échelle.
+    ///
+    /// *Ce test grossit donc les bulles d'un facteur écrit, pour montrer le mécanisme entier. Il ne
+    /// prétend pas rendre la sucette du banc processeur — et la question qu'il pose vaut mieux
+    /// qu'une image : **les inclusions fines demanderont autre chose qu'un volume cuit.***
+    #[test]
+    fn la_sucette_entiere_traverse_le_gpu() {
+        use crate::render::epaisseur::{alea, fondu};
+
+        // ── Le champ, repris à l'identique du banc processeur ──
+        const SUCRE: [f32; 3] = [3.4, 1.15, 0.30];
+        const CELLULE: [f32; 3] = [0.150, 0.360, 0.150];
+        // ⚠ Le facteur qui rend les bulles visibles dans une grille — voir le mur ci-dessus. Il
+        // est ÉCRIT parce qu'il fait mentir la sucette : ce sont les bulles d'une sucette trois
+        // fois plus grosse.
+        const GROSSISSEMENT: f32 = 3.0;
+
+        const N: u32 = 128;
+        const BOITE: f32 = 2.4;
+        let pas_du_volume = BOITE / N as f32;
+
+        let debut = std::time::Instant::now();
+        let volume = volume_cube_source(N, |ix, iy, iz| {
+            let p = |i: u32| (i as f32 + 0.5) / N as f32 * BOITE - BOITE * 0.5;
+            let (x, y, z) = (p(ix), p(iy), p(iz));
+
+            // Le feuillet de colorant : la frontière est quasi nette, un sirop à 150 °C ne se
+            // mélange pas, il se colle.
+            let cote_droit = fondu(-0.17, -0.11, x);
+            let concentration = 0.70 + 0.58 * cote_droit;
+            let mut densite = [concentration, concentration, concentration];
+            let mut source = 0.0f32;
+
+            // Les bulles : on ne les place pas, on demande au point s'il est dans une.
+            let cx = (x / CELLULE[0]).floor() as i32;
+            let cy = (y / CELLULE[1]).floor() as i32;
+            let cz = (z / CELLULE[2]).floor() as i32;
+            if alea(cx, cy, cz, 7) > 0.18 {
+                let place = |g: u32, axe: usize| (0.2 + 0.6 * alea(cx, cy, cz, g)) * CELLULE[axe];
+                let centre = [
+                    cx as f32 * CELLULE[0] + place(11, 0),
+                    cy as f32 * CELLULE[1] + place(13, 1),
+                    cz as f32 * CELLULE[2] + place(17, 2),
+                ];
+                // Stratification : les grosses remontent, les fines restent piégées.
+                let haut = fondu(-0.6, 0.85, y);
+                let rayon = (0.016 + 0.030 * haut)
+                    * (0.40 + 0.60 * alea(cx, cy, cz, 23))
+                    * GROSSISSEMENT;
+                let etirement = 1.0 + 1.7 * haut;
+                let d = [x - centre[0], (y - centre[1]) / etirement, z - centre[2]];
+                let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                // La netteté suit le pas du VOLUME, pas celui de la marche : c'est la grille qui
+                // limite ici, et une bulle plus fine qu'un texel ne peut qu'aliaser.
+                let nettete = fondu(rayon * 0.55, rayon * 0.22, pas_du_volume);
+                let dedans = fondu(rayon, rayon * 0.55, distance) * nettete;
+
+                // ⭐ Une bulle n'est pas un trou, c'est un miroir : air dans du sucre, la réflexion
+                // est totale au-delà de 41,8° — donc sur la plus grande part d'une sphère. Elle
+                // renvoie l'ambiante SANS qu'elle ait traversé le bleu.
+                source += 9.0 * dedans;
+                for c in densite.iter_mut() {
+                    *c += 7.0 * dedans;
+                }
+            }
+            [densite[0], densite[1], densite[2], source]
+        });
+        println!(
+            "  volume {N}³ cuit en {:?} ({:.0} Mo)",
+            debut.elapsed(),
+            volume.len() as f64 / 1e6
+        );
+
+        let mut k = constantes(0.0, 6.0, COTE);
+        k.matiere = [SUCRE[0], SUCRE[1], SUCRE[2], ETA];
+        // 64 pas : la marche doit voir les bulles, et elles font quelques texels.
+        k.volume_min = [-BOITE * 0.5, -BOITE * 0.5, -BOITE * 0.5, 64.0];
+        k.volume_taille = [BOITE, BOITE, BOITE, 0.0];
+
+        let Some(image) = rendre_avec(&k, vk::Format::B8G8R8A8_SRGB, COTE, Some((N, N, N, &volume)))
+        else {
+            println!("  (aucune image — pas de Vulkan)");
+            return;
+        };
+
+        // ── Ce qu'on peut affirmer sans regarder ──
+        // La sucette absorbe surtout le rouge : à travers elle, le bleu doit survivre mieux que le
+        // rouge. *C'est la seule chose que le sigma du sucre garantit, et elle se vérifie sans
+        // juger l'image.* On ne regarde que le centre, là où le trajet est le plus long.
+        let mut rouge = 0u64;
+        let mut bleu = 0u64;
+        let mut comptes = 0u64;
+        let bord = COTE / 3;
+        for y in bord..(COTE - bord) {
+            for x in bord..(COTE - bord) {
+                let i = ((y * COTE + x) * 4) as usize;
+                bleu += image[i] as u64; // B8G8R8A8 : bleu en premier
+                rouge += image[i + 2] as u64;
+                comptes += 1;
+            }
+        }
+        let (r, b) = (rouge as f64 / comptes as f64, bleu as f64 / comptes as f64);
+        println!("  au centre : rouge {r:.1}, bleu {b:.1} (sur 255)");
+        assert!(
+            b > r * 1.5,
+            "le sucre bleu n'est pas bleu : rouge {r:.1}, bleu {b:.1} — le sigma par canal ne \
+             traverse pas la marche"
+        );
+
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier de preuves");
+        let mut rvb = Vec::with_capacity(image.len() / 4 * 3);
+        for p in image.chunks_exact(4) {
+            rvb.extend_from_slice(&[p[2], p[1], p[0]]);
+        }
+        let png = crate::image::png::encoder(COTE, COTE, &rvb).expect("png");
+        std::fs::write(dossier.join("volume-4-sucette.png"), &png).expect("ecriture");
+        println!("  ecrit : target/preuves/volume-4-sucette.png ({} Ko)", png.len() / 1024);
+    }
+
     /// La taille des constantes, vérifiée plutôt que supposée — **et elle est maintenant au ras
     /// du plafond**.
     ///
