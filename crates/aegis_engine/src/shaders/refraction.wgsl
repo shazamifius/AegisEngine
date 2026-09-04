@@ -208,6 +208,47 @@ fn refracter(incident: vec3<f32>, normale: vec3<f32>, eta: f32) -> vec4<f32> {
     return vec4<f32>(eta * incident + (eta * cos_i - sqrt(reste)) * normale, 1.0);
 }
 
+/// ⭐⭐ **LES ÉQUATIONS DE FRESNEL, EXACTES** — quelle fraction de la lumière rebondit au lieu
+/// d'entrer.
+///
+/// # Pourquoi les vraies, et pas l'approximation de Schlick
+///
+/// Schlick coûte une puissance cinquième et se trompe de moins d'un pour cent : c'est le choix de
+/// toute l'industrie, et il serait défendable. **Les équations exactes coûtent une racine carrée de
+/// plus**, et elles donnent trois choses que l'approximation ne donne pas :
+///
+/// 1. **Elles se démontrent au lieu de se régler.** *Une constante qui se dérive vaut mieux qu'une
+///    constante qui s'ajuste* — et ici il n'y a plus aucune constante du tout.
+/// 2. **Elles séparent les deux polarisations** (`Rs` et `Rp`). La lumière d'un habitacle de
+///    voiture est fortement polarisée : ce que ce code moyenne aujourd'hui, il pourra le pondérer
+///    demain, **sans rien réécrire**. *L'étalon note la polarisation comme « rien, et personne ne
+///    le fait ».*
+/// 3. **Elles donnent l'angle de Brewster gratuitement** — `Rp` s'annule vers 56,3° pour n = 1,5,
+///    et ce n'est écrit nulle part : ça tombe de l'équation, exactement comme l'angle critique.
+///
+/// # La vérité contre laquelle ce code se mesure
+///
+/// À incidence normale, `R = ((n₁−n₂)/(n₁+n₂))²`. Pour n = 1,5 cela vaut **exactement 4,0 %** —
+/// une valeur physique connue, indépendante de ce moteur. *C'est ce que le test vérifie sur le
+/// pixel central, et c'est pour ça que la mesure prouve quelque chose : elle ne compare pas deux
+/// de mes calculs entre eux.*
+fn fresnel(cos_incidence: f32, eta: f32) -> f32 {
+    let cos_i = clamp(abs(cos_incidence), 0.0, 1.0);
+    let sin_t_carre = eta * eta * (1.0 - cos_i * cos_i);
+    // Pas de racine → réflexion totale. **Elle n'est pas un cas à coder** : c'est ce qui reste
+    // quand la lumière ne peut plus sortir, et l'angle critique tombe de l'équation.
+    if (sin_t_carre >= 1.0) {
+        return 1.0;
+    }
+    let cos_t = sqrt(1.0 - sin_t_carre);
+    // Perpendiculaire au plan d'incidence (« s »), puis parallèle (« p »).
+    let rs = (eta * cos_i - cos_t) / (eta * cos_i + cos_t);
+    let rp = (eta * cos_t - cos_i) / (eta * cos_t + cos_i);
+    // Lumière non polarisée : les deux moitiés à parts égales. *C'est ICI, et nulle part ailleurs,
+    // qu'une pondération de polarisation viendra se placer.*
+    return 0.5 * (rs * rs + rp * rp);
+}
+
 /// Un fond d'essai **achromatique**, contrasté et directionnel : sans structure visible, une
 /// réfraction juste et une réfraction fausse donnent la même image plate.
 /// ⚠ L'azimut se prend en `atan2(x, z)`, pas `atan2(z, x)` : autour de l'axe de visée, le premier
@@ -274,7 +315,11 @@ fn chercher_la_sortie(depart: vec3<f32>, direction: vec3<f32>, estimation: f32) 
 fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
     let pixel = entree.position.xy;
     let regard = direction_du_pixel(pixel);
-    let mode_direction = k.reglages.z > 0.5;
+    let mode_direction = k.reglages.z > 0.5 && k.reglages.z < 1.5;
+    // ⭐ Mode 2 : la réflectance de Fresnel, seule, en niveaux de gris. *Un moteur qui vise une
+    // machine qu'il ne verra jamais doit pouvoir montrer ses grandeurs intermédiaires — sinon la
+    // seule sonde est l'œil, et l'œil ne lit pas un pourcentage.*
+    let mode_reflectance = k.reglages.z > 1.5;
 
     let avant = lire(carte_avant, pixel);
     let derriere = lire(carte_arriere, pixel);
@@ -284,11 +329,27 @@ fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
         if (mode_direction) {
             return vec4<f32>(regard * 0.5 + vec3<f32>(0.5), 1.0);
         }
+        if (mode_reflectance) {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
         return vec4<f32>(fond(regard), 1.0);
     }
 
     let entree_point = k.position.xyz + regard * avant.w;
     let normale_entree = avant.xyz;
+
+    // ── 0. CE QUI NE RENTRE PAS ──
+    //
+    // ⭐⭐ **Jusqu'au 4 septembre 2026, ce shader transmettait CENT POUR CENT de la lumière.** Ce
+    // n'était pas un reflet manquant : c'était **l'énergie qui ne se conservait pas**. Une bille de
+    // verre sans reflet ne ressemble à rien de réel, et aucun réglage de couleur ne pouvait le
+    // rattraper — *une somme de corrections justes ne franchit pas un mécanisme absent.*
+    let part_reflechie = fresnel(dot(normale_entree, regard), k.matiere.w);
+    if (mode_reflectance) {
+        return vec4<f32>(vec3<f32>(part_reflechie), 1.0);
+    }
+    // Ce que le miroir montre : l'environnement dans la direction du rebond.
+    let reflet = fond(reflect(regard, normale_entree)) * part_reflechie;
 
     // ── 1. Snell à l'entrée ──
     let dedans = refracter(regard, normale_entree, k.matiere.w);
@@ -298,7 +359,7 @@ fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
         if (mode_direction) {
             return vec4<f32>(regard * 0.5 + vec3<f32>(0.5), 1.0);
         }
-        return vec4<f32>(fond(regard), 1.0);
+        return vec4<f32>(reflet, 1.0);
     }
 
     // ── 2. Où ressort-il ? ──
@@ -309,7 +370,7 @@ fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
         if (mode_direction) {
             return vec4<f32>(dedans.xyz * 0.5 + vec3<f32>(0.5), 1.0);
         }
-        return vec4<f32>(fond(dedans.xyz), 1.0);
+        return vec4<f32>(reflet + fond(dedans.xyz) * (1.0 - part_reflechie), 1.0);
     }
     let distance_traversee = sortie.w;
 
@@ -381,5 +442,9 @@ fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
         epaisseur_optique = epaisseur_optique + demie + demie;
     }
     let survie = exp(-epaisseur_optique);
-    return vec4<f32>(fond(direction_finale) * survie + lumiere_rendue, 1.0);
+    // ⚠ **La part réfléchie ne traverse rien** : elle n'est ni absorbée, ni colorée par le milieu.
+    // C'est ce qui garde un reflet BLANC sur une bille bleue — et ce qui rend le reflet si
+    // reconnaissable. *Le multiplier par l'absorption donnerait un reflet bleu, plausible et faux.*
+    let transmis = (fond(direction_finale) * survie + lumiere_rendue) * (1.0 - part_reflechie);
+    return vec4<f32>(reflet + transmis, 1.0);
 }

@@ -1225,6 +1225,140 @@ mod tests {
         println!("  ecrit : target/preuves/volume-4-sucette.png ({} Ko)", png.len() / 1024);
     }
 
+    /// ⭐⭐⭐ **FRESNEL, CONFRONTÉ À UNE VÉRITÉ QUI N'EST PAS LA MIENNE.**
+    ///
+    /// # Ce qui était faux avant, et ce n'était pas esthétique
+    ///
+    /// Le shader transmettait **cent pour cent** de la lumière : l'énergie ne se conservait pas.
+    /// Une bille de verre sans reflet ne ressemble à rien de réel, et *aucun réglage de couleur
+    /// n'aurait pu le rattraper* — une somme de corrections justes ne franchit pas un mécanisme
+    /// absent.
+    ///
+    /// # Le critère, écrit avant de lancer quoi que ce soit
+    ///
+    /// À incidence normale, `R = ((n₁−n₂)/(n₁+n₂))²`. Pour n = 1,5 : **exactement 4,00 %**. Ce
+    /// nombre ne vient ni de ce moteur, ni de mon banc processeur — *c'est une constante physique
+    /// vérifiable dans n'importe quel manuel, donc la comparaison prouve quelque chose.* Deux
+    /// implémentations issues du même raisonnement peuvent être fausses de la même façon ; une
+    /// implémentation et une vérité extérieure, non.
+    ///
+    /// Et deux propriétés de forme, qui attrapent les fautes qu'un seul point ne verrait pas :
+    /// **R croît du centre vers le bord**, et **R tend vers 1** en incidence rasante.
+    ///
+    /// ⚠ **Rendu en `UNORM`, jamais en `SRGB`.** 4 % passés dans une courbe sRGB donnent 22 % à
+    /// l'écran : on mesurerait la courbe autant que la réflectance. *C'est exactement la raison
+    /// pour laquelle le format est un paramètre depuis le 2 septembre.*
+    #[test]
+    fn la_reflectance_de_fresnel_vaut_quatre_pour_cent_de_face() {
+        // Mode 2 : la réflectance seule, en niveaux de gris.
+        let k = constantes(2.0, 6.0, COTE);
+        let Some(image) = rendre(&k, vk::Format::B8G8R8A8_UNORM, COTE) else {
+            println!("  (aucune image — pas de Vulkan)");
+            return;
+        };
+
+        let lire = |x: u32, y: u32| -> f32 {
+            image[((y * COTE + x) * 4) as usize] as f32 / 255.0
+        };
+
+        // ── 1. Le centre : incidence normale, la vérité vaut 4,00 % ──
+        let centre = lire(COTE / 2, COTE / 2);
+        let attendu = {
+            let eta = ETA; // n1/n2 = 1/1,5
+            let r = (eta - 1.0) / (eta + 1.0);
+            r * r
+        };
+        println!(
+            "  au centre : {:.3} % mesures, {:.3} % attendus (vérité analytique)",
+            centre * 100.0,
+            attendu * 100.0
+        );
+        // La tolérance est celle de la QUANTIFICATION, pas un réglage : un octet vaut 1/255,
+        // soit 0,39 point de pourcentage. On accepte un pas, pas davantage.
+        assert!(
+            (centre - attendu).abs() <= 1.0 / 255.0,
+            "reflectance de face {:.4} au lieu de {:.4} — au-dela d'un pas de quantification",
+            centre,
+            attendu
+        );
+
+        // ── 2. LA COURBE ENTIÈRE, contre l'analytique ──
+        //
+        // Un seul point pourrait être juste par accident. On compare donc la réflectance mesurée à
+        // la valeur analytique **à chaque distance du centre**, en calculant l'angle d'incidence
+        // par la géométrie : un rayon qui passe à `b` de l'axe frappe une sphère de rayon `R` sous
+        // un angle dont le sinus vaut `b/R`.
+        //
+        // ⚠⚠ **ET L'INCIDENCE RASANTE N'EST PAS ATTEIGNABLE SUR UNE GRILLE.** Mon premier critère
+        // exigeait que la réflectance monte au-delà de 50 % ; elle plafonne à 43 %, et *c'est le
+        // critère qui avait tort*. Entre l'avant-dernier pixel de la bille et le dernier, l'angle
+        // saute de 78° à 85° : le centre du dernier pixel ne voit jamais le bord. **Exiger d'un
+        // banc une borne qu'il ne peut pas échantillonner, c'est la faute que le corpus appelle
+        // « extrapoler au-delà de ce que l'instrument atteint ».**
+        //
+        // La tolérance n'est donc pas un réglage : c'est **l'amplitude réelle de la réflectance à
+        // l'intérieur du pixel** (elle explose près du bord) plus un pas de quantification.
+        let angle_du_pixel = |dx: f32| -> Option<f32> {
+            let a = (dx / (COTE as f32 * 0.5) * TANGENTE).atan();
+            let b = RECUL * a.sin();
+            if b >= RAYON { None } else { Some((b / RAYON).asin()) }
+        };
+        let fresnel = |incidence: f32| -> f32 {
+            let (ci, eta) = (incidence.cos(), ETA);
+            let st2 = eta * eta * (1.0 - ci * ci);
+            if st2 >= 1.0 {
+                return 1.0;
+            }
+            let ct = (1.0f32 - st2).sqrt();
+            let rs = (eta * ci - ct) / (eta * ci + ct);
+            let rp = (eta * ct - ci) / (eta * ct + ci);
+            0.5 * (rs * rs + rp * rp)
+        };
+
+        let mut precedent = centre;
+        let mut reculs = 0;
+        let mut pire_ecart = 0.0f32;
+        let mut pire_a = 0.0f32;
+        let mut compares = 0;
+        for dx in 1..(COTE / 2) {
+            let mesure = lire(COTE / 2 + dx, COTE / 2);
+            if mesure <= 0.0 {
+                break; // sorti de la bille
+            }
+            if mesure + 1.0 / 255.0 < precedent {
+                reculs += 1;
+            }
+            precedent = mesure;
+
+            let (Some(i0), Some(i1)) = (
+                angle_du_pixel(dx as f32 - 0.5),
+                angle_du_pixel(dx as f32 + 0.5),
+            ) else {
+                continue; // le pixel chevauche la silhouette : son angle n'est pas défini partout
+            };
+            let attendu = fresnel(angle_du_pixel(dx as f32).unwrap());
+            // Ce que la réflectance fait varier À L'INTÉRIEUR du pixel.
+            let amplitude = (fresnel(i1) - fresnel(i0)).abs();
+            let ecart = (mesure - attendu).abs();
+            if ecart > amplitude + 1.0 / 255.0 {
+                pire_ecart = pire_ecart.max(ecart);
+                pire_a = i1.to_degrees();
+            }
+            compares += 1;
+        }
+        println!(
+            "  {compares} distances comparees a l'analytique, plus grand ecart hors tolerance \
+             {:.4} (vers {pire_a:.0}°)",
+            pire_ecart
+        );
+        assert_eq!(reculs, 0, "la reflectance RECULE en allant vers le bord — Fresnel est inverse");
+        assert!(compares > 30, "trop peu de points compares ({compares}) : la mesure ne dit rien");
+        assert_eq!(
+            pire_ecart, 0.0,
+            "la courbe mesuree s'ecarte de Fresnel au-dela de ce que la discretisation explique"
+        );
+    }
+
     /// La taille des constantes, vérifiée plutôt que supposée — **et elle est maintenant au ras
     /// du plafond**.
     ///
