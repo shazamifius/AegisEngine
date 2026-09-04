@@ -839,6 +839,14 @@ mod tests {
     ///
     /// `rgb` = le facteur d'absorption par canal ; `a` n'est pas lu par le shader.
     fn volume_cube(cote: u32, f: impl Fn(u32, u32, u32) -> [f32; 3]) -> Vec<u8> {
+        volume_cube_source(cote, |x, y, z| {
+            let d = f(x, y, z);
+            [d[0], d[1], d[2], 0.0]
+        })
+    }
+
+    /// Le même, mais chaque texel porte aussi son **terme de source** dans le quatrième canal.
+    fn volume_cube_source(cote: u32, f: impl Fn(u32, u32, u32) -> [f32; 4]) -> Vec<u8> {
         let mut octets = Vec::with_capacity((cote * cote * cote * 16) as usize);
         // ⚠ L'ordre est celui que Vulkan attend : x varie le plus vite, z le plus lentement.
         // *L'écrire à l'envers ne casse rien — ça transpose la matière, ce qui est parfaitement
@@ -846,8 +854,7 @@ mod tests {
         for z in 0..cote {
             for y in 0..cote {
                 for x in 0..cote {
-                    let d = f(x, y, z);
-                    for v in [d[0], d[1], d[2], 0.0] {
+                    for v in f(x, y, z) {
                         octets.extend_from_slice(&v.to_ne_bytes());
                     }
                 }
@@ -967,6 +974,105 @@ mod tests {
             std::fs::write(dossier.join(nom), &png).expect("ecriture");
             println!("  ecrit : target/preuves/{nom} ({} Ko)", png.len() / 1024);
         }
+    }
+
+    /// ⭐⭐⭐ **LES BULLES** — la matière cesse de seulement retirer de la lumière, elle en rend.
+    ///
+    /// # Ce que ce test prouve, et la garde PHYSIQUE qu'il pose
+    ///
+    /// Une bulle d'air dans du sucre n'absorbe presque rien et **renvoie** ce qui l'éclaire : c'est
+    /// le terme de source de l'équation du transfert radiatif. Sans lui, une inclusion ne pourrait
+    /// être qu'un trou plus sombre — *une bulle serait un défaut, jamais un reflet.*
+    ///
+    /// **La garde qui compte n'est pas « l'image change », c'est « aucun pixel ne s'assombrit ».**
+    /// Ajouter une source ne peut, physiquement, que rendre l'image plus claire ou l'y laisser :
+    /// un seul pixel plus sombre signifierait que le terme est branché à l'envers, ou que
+    /// l'atténuation appliquée à la lumière rendue est celle du mauvais segment. *Un test qui se
+    /// contenterait de « c'est différent » laisserait passer les deux.*
+    ///
+    /// ⚠ Ce test ne juge **pas** à quoi une bulle ressemble. C'est son œil, sur
+    /// `preuves/volume-18-bulles.png`.
+    #[test]
+    fn une_source_rend_de_la_lumiere_et_ne_peut_jamais_en_retirer() {
+        let mut k = constantes(0.0, 6.0, COTE);
+        k.matiere = [0.35, 0.9, 1.6, ETA];
+        k.volume_min = [-1.5, -1.5, -1.5, 48.0];
+        k.volume_taille = [3.0, 3.0, 3.0, 0.0];
+
+        const N: u32 = 32;
+        // Des bulles semées sur une grille régulière : ce qui compte ici est qu'elles soient
+        // reproductibles, pas qu'elles soient jolies.
+        let bulle = |x: u32, y: u32, z: u32| -> bool {
+            let d = |v: u32| {
+                let m = (v % 8) as f32 - 3.5;
+                m * m
+            };
+            d(x) + d(y) + d(z) < 4.0
+        };
+        // Sans source : les bulles n'existent que par leur absence d'absorption.
+        let muettes = volume_cube_source(N, |x, y, z| {
+            if bulle(x, y, z) { [0.05, 0.05, 0.05, 0.0] } else { [1.0, 1.0, 1.0, 0.0] }
+        });
+        // Avec source : elles renvoient de la lumière.
+        let vivantes = volume_cube_source(N, |x, y, z| {
+            if bulle(x, y, z) { [0.05, 0.05, 0.05, 0.55] } else { [1.0, 1.0, 1.0, 0.0] }
+        });
+
+        let Some(sans_source) = rendre_avec(
+            &k,
+            vk::Format::B8G8R8A8_SRGB,
+            COTE,
+            Some((N, N, N, &muettes)),
+        ) else {
+            println!("  (aucune image — pas de Vulkan)");
+            return;
+        };
+        let avec_source = rendre_avec(
+            &k,
+            vk::Format::B8G8R8A8_SRGB,
+            COTE,
+            Some((N, N, N, &vivantes)),
+        )
+        .expect("Vulkan etait la a l'instant");
+
+        assert_ne!(
+            sans_source, avec_source,
+            "le terme de source ne change RIEN : le quatrieme canal du volume n'est pas lu"
+        );
+
+        // ── La garde physique : une source AJOUTE, elle ne retire jamais ──
+        let mut assombris = 0usize;
+        let mut gain_total = 0f64;
+        let mut gain_max = 0i32;
+        for (a, b) in sans_source.iter().zip(avec_source.iter()) {
+            let d = *b as i32 - *a as i32;
+            if d < 0 {
+                assombris += 1;
+            }
+            gain_total += d as f64;
+            gain_max = gain_max.max(d);
+        }
+        println!(
+            "  bulles : gain moyen {:.2} niveau(x), gain maximal {gain_max}, \
+             pixels assombris {assombris}",
+            gain_total / sans_source.len() as f64
+        );
+        assert_eq!(
+            assombris, 0,
+            "{assombris} octets se sont ASSOMBRIS en ajoutant de la lumiere — le terme de source \
+             est branche a l'envers, ou attenue par le mauvais segment"
+        );
+        assert!(gain_max > 0, "la source n'eclaircit nulle part");
+
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier de preuves");
+        let mut rvb = Vec::with_capacity(avec_source.len() / 4 * 3);
+        for p in avec_source.chunks_exact(4) {
+            rvb.extend_from_slice(&[p[2], p[1], p[0]]);
+        }
+        let png = crate::image::png::encoder(COTE, COTE, &rvb).expect("png");
+        std::fs::write(dossier.join("volume-3-bulles.png"), &png).expect("ecriture");
+        println!("  ecrit : target/preuves/volume-3-bulles.png ({} Ko)", png.len() / 1024);
     }
 
     /// La taille des constantes, vérifiée plutôt que supposée — **et elle est maintenant au ras

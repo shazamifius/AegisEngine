@@ -86,8 +86,14 @@
 // `rgb` = le facteur qui module l'absorption de référence, par canal. **1 partout = milieu
 // homogène**, et le résultat est alors celui d'avant, à la précision de la somme près.
 //
-// ⚠ `a` n'est PAS lu aujourd'hui. Le canal existe parce que Vulkan ne garantit aucun format à
-// trois canaux flottants — pas parce qu'il ferait quelque chose.
+// `a` = le **terme de source** : ce que la matière RENVOIE vers l'œil par unité de longueur — une
+// bulle qui réfléchit l'ambiante, une brume qui renvoie le soleil. *Sans lui, une matière ne peut
+// que retirer de la lumière, et une bulle d'air dans du sucre serait un trou noir.*
+//
+// ⚠ **Il est SCALAIRE, donc la lumière rendue est neutre**, là où le banc processeur
+// (`epaisseur.rs`) porte une source par canal. Ce n'est pas un oubli : il n'y avait qu'un canal
+// libre, et une bulle d'air réfléchit effectivement sans colorer. *Une source teintée — une matière
+// qui rougeoie — demandera un second volume, et c'est un chantier, pas un paramètre.*
 //
 // ⚠ Celui-là est échantillonné avec **interpolation**, contrairement aux deux cartes : entre deux
 // texels de matière, la valeur intermédiaire décrit un milieu qui existe. *Entre deux normales de
@@ -339,7 +345,19 @@ fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
     // ⚠ L'échantillon se prend au **milieu** de chaque segment, jamais à son début : sur un
     // feuillet mince, prendre le bord fait manquer ou compter deux fois une couche entière selon
     // le pas — et l'erreur ne se voit pas, elle se contente de décaler la teinte.
+    // ⭐⭐ ET LA MATIÈRE NE FAIT PAS QU'EN RETIRER : ELLE EN REND.
+    //
+    // C'est l'équation du transfert radiatif, dans sa forme la plus simple — absorption plus
+    // émission, sans diffusion multiple :
+    //
+    //     L = fond · e^(−τ_total)  +  ∫ source(t) · e^(−τ(0→t)) dt
+    //
+    // *La lumière qu'un point renvoie doit REMONTER le chemin déjà parcouru pour atteindre l'œil,
+    // donc elle est atténuée par ce qui se trouve entre lui et la surface d'entrée — pas par
+    // l'épaisseur totale.* Confondre les deux donne une image plus sombre au centre qu'au bord,
+    // ce qui ressemble à un défaut d'éclairage et n'en est pas un.
     var epaisseur_optique = vec3<f32>(0.0);
+    var lumiere_rendue = vec3<f32>(0.0);
     let pas = max(1, i32(k.volume_min.w));
     let ds = distance_traversee / f32(pas);
     for (var i = 0; i < pas; i = i + 1) {
@@ -350,9 +368,18 @@ fn fs_main(entree: Sortie) -> @location(0) vec4<f32> {
         // ⚠ `textureSampleLevel` et non `textureSample` : dans une boucle, le niveau de détail
         // implicite se calcule à partir de dérivées d'écran qui n'ont aucun sens ici — et la
         // spécification l'interdit sous flux non uniforme.
-        let densite = textureSampleLevel(volume_matiere, echantillonneur, uvw, 0.0).rgb;
-        epaisseur_optique = epaisseur_optique + k.matiere.xyz * densite * ds;
+        let echantillon = textureSampleLevel(volume_matiere, echantillonneur, uvw, 0.0);
+
+        // ⚠ La MOITIÉ de l'épaisseur du segment courant, et c'est la même règle du point milieu
+        // que pour l'échantillon : la lumière est rendue au centre du segment, donc elle ne
+        // traverse que la moitié de celui-ci. *Atténuer par le segment entier, ou par rien,
+        // décale la luminosité d'une façon qui se règle « à l'œil » ensuite — c'est ainsi que
+        // naissent les constantes arbitraires.*
+        let demie = k.matiere.xyz * echantillon.rgb * (ds * 0.5);
+        lumiere_rendue = lumiere_rendue
+            + echantillon.a * exp(-(epaisseur_optique + demie)) * ds;
+        epaisseur_optique = epaisseur_optique + demie + demie;
     }
     let survie = exp(-epaisseur_optique);
-    return vec4<f32>(fond(direction_finale) * survie, 1.0);
+    return vec4<f32>(fond(direction_finale) * survie + lumiere_rendue, 1.0);
 }
