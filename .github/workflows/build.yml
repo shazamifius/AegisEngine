@@ -103,7 +103,23 @@ jobs:
         # l'artefact par accident : s'ils échouent ici alors qu'ils passent sur
         # la machine de développement, ce n'est pas un caprice de la CI — c'est
         # que ces tests dépendaient d'un GPU présent, ce qu'il faut savoir.
-        run: cargo test --release
+        #
+        # ⚠⚠ `--all-targets`, ET C'EST LE POINT (5 septembre 2026).
+        #
+        # Sans lui, `cargo test` **n'exécute pas les tests des examples** — il se
+        # contente de vérifier qu'ils compilent. Or les bancs du moteur vivent
+        # dans `examples/` (`topologie`, `eclairer`), et ils portent des gardes
+        # écrites pour des défauts réels : une scène rendue vide sans qu'aucune
+        # erreur ne soit levée, une ombre absente, une soudure de sommets qui ne
+        # recolle plus rien.
+        #
+        # *Onze gardes étaient dans ce cas le jour où ce drapeau a été ajouté :
+        # elles passaient toutes, et aucune ne tournait. C'est exactement la
+        # famille de défauts n° 1 du projet — un mécanisme jamais exercé —
+        # appliquée aux gardes elles-mêmes.*
+        #
+        # Le compte passe de 268 à 279 tests réellement exécutés.
+        run: cargo test --release --all-targets
 
       - name: ⚠ SONDE PT_INTERP — la seule qui distingue portable de mort
         # `ldd` et `file` répondent tous deux « statically linked » sur un
