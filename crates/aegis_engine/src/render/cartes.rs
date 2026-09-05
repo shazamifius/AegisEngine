@@ -1289,4 +1289,202 @@ mod tests {
             "seulement {vivants} pixels non noirs : l'image est vide, la chaine n'a rien rendu"
         );
     }
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    // UNE VRAIE SCÈNE BLENDER — 5 septembre 2026
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+
+    /// Le centre et le rayon de la sphère qui contient toute la scène.
+    fn boite_englobante(scene: &crate::geometry::glb_loader::Scene) -> (Vec3, f32) {
+        let mut mini = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut maxi = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+        for s in &scene.sommets {
+            let p = Vec3::from(s.position);
+            mini = mini.min(p);
+            maxi = maxi.max(p);
+        }
+        ((mini + maxi) * 0.5, ((maxi - mini) * 0.5).length().max(1e-3))
+    }
+
+    /// Rend une scène glTF complète dans la carte d'entrée, et rapporte ses octets bruts.
+    ///
+    /// ## ⚠ Ce qui la distingue de [`rendre_les_cartes`], et pourquoi elle vit à côté
+    ///
+    /// L'autre fonction porte les **tests de justesse physique** : sa caméra est calée pour que
+    /// chaque pixel corresponde exactement à une direction analytique, et c'est ce qui permet de
+    /// comparer la carte à la vérité. *La toucher pour lui faire accepter une scène quelconque
+    /// aurait mis en jeu quatre mesures d'exactitude pour un gain d'affichage.*
+    ///
+    /// ## ⭐ Le cadrage se CALCULE, il ne se règle pas
+    ///
+    /// La caméra est placée depuis la boîte englobante de la scène : rien à ajuster à l'œil quand
+    /// le modèle change, et **aucune constante arbitraire à justifier pour toujours**. Seule la
+    /// marge est un choix, et elle est écrite comme tel.
+    ///
+    /// `cadrage` impose un centre et un rayon plutôt que de les déduire de la scène. ⚠ **C'est
+    /// indispensable pour comparer deux rendus** : cadrée sur elle-même, toute scène remplit
+    /// l'image, et son objet le plus petit en couvre alors plus que la scène entière. *Une première
+    /// version comparait deux images cadrées différemment — la sonde ne mesurait rien, et elle est
+    /// passée une fois par hasard.*
+    fn rendre_la_scene(
+        cote: u32,
+        scene: &crate::geometry::glb_loader::Scene,
+        cadrage: Option<(Vec3, f32)>,
+    ) -> Option<Vec<u8>> {
+        let ctx = match GpuContext::sans_ecran_format(cote, cote, 1, FORMAT) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("⚠ aucun Vulkan joignable : {e}");
+                return None;
+            }
+        };
+        let memory_props =
+            unsafe { ctx.instance.get_physical_device_memory_properties(ctx.physical_device) };
+
+        let maillage = GpuMesh::upload(&ctx, &memory_props, &scene.sommets, &scene.indices)
+            .expect("la scene n'a pas pu monter sur la carte");
+
+        // ── Le cadrage : imposé, ou déduit de la boîte englobante ──
+        let (centre, rayon) = cadrage.unwrap_or_else(|| boite_englobante(scene));
+
+        // Une marge d'un quart : la scène ne touche pas les bords, sans qu'on ait à la deviner.
+        const MARGE: f32 = 1.25;
+        let fov = 60_f32.to_radians();
+        let recul = rayon * MARGE / (fov * 0.5).tan();
+        // Trois-quarts vue, l'œil AU-DESSUS du centre.
+        //
+        // ⚠ La première version plaçait l'œil en dessous, et la scène de test — une table — cachait
+        // alors derrière son plateau les deux objets posés dessus, soit **3 102 de ses 3 274
+        // triangles**. L'image était belle, le test passait, et il ne montrait qu'un objet sur
+        // trois. *Une preuve qui cache ce qu'elle doit prouver est pire qu'une absence de preuve.*
+        let direction = Vec3::new(0.55, 0.42, -0.72).normalize();
+        let oeil = centre + direction * recul;
+
+        let mut cadre = crate::render::cadre::Cadre::nouveau(&ctx, &memory_props)
+            .expect("le cadre uniforme n'a pas pu etre cree");
+        let mut camera = crate::scene::camera::Camera::new(oeil, centre, 1.0);
+        camera.fov_y_radians = fov;
+        // ⚠ Les plans de coupe suivent la scène : un `near` trop petit devant une scène large
+        // ruine la précision de profondeur, et l'objet se met à clignoter par bandes.
+        camera.z_near = (recul - rayon * MARGE).max(rayon * 0.01);
+        camera.z_far = recul + rayon * 2.0 * MARGE;
+        let view_proj = camera.compute_projection_matrix() * camera.compute_view_matrix();
+
+        let donnees = DonneesImage::nouvelle(
+            view_proj,
+            Mat4::IDENTITY,
+            [oeil.x, oeil.y, oeil.z],
+            crate::render::cadre::Ambiance::default(),
+            &[],
+        );
+        cadre.ecrire(&donnees);
+
+        let instances = crate::render::instances::Instances::nouveau(&ctx, &memory_props, 1)
+            .expect("le tampon d'instances n'a pas pu etre cree");
+        let passe = Cartes::nouvelle(&ctx, cadre.layout_descripteur)
+            .expect("les pipelines de cartes n'ont pas pu etre crees");
+        let profondeur = image_de_profondeur(&ctx, &memory_props, cote)
+            .expect("l'image de profondeur n'a pas pu etre creee");
+
+        instances.recommencer();
+        let octets = rendre_une_carte(
+            &ctx, &passe, Faces::Entree, &cadre, &maillage, &instances, profondeur.1, cote,
+        )
+        .expect("le rendu de la scene a echoue");
+
+        unsafe {
+            ctx.device.device_wait_idle().ok();
+            ctx.device.destroy_image_view(profondeur.1, None);
+            ctx.device.destroy_image(profondeur.0, None);
+            ctx.device.free_memory(profondeur.2, None);
+        }
+        passe.detruire(&ctx.device);
+        cadre.detruire(&ctx.device);
+        Some(octets)
+    }
+
+    /// ⭐⭐⭐ **LA PREMIÈRE SCÈNE BLENDER COMPLÈTE QUE CE MOTEUR AIT RASTÉRISÉE.**
+    ///
+    /// Toutes les images précédentes venaient d'une primitive fabriquée en code — une bille, un
+    /// pavé. Celle-ci vient d'un `.glb` exporté depuis Blender, avec **trois objets** et **trois
+    /// transformations distinctes**, chargé par [`GlbLoader::charger_scene`].
+    ///
+    /// ⚠ **C'est une CARTE DE GÉOMÉTRIE, pas une image éclairée** — le shader des cartes ne lit
+    /// aucune couleur, c'est la frontière du 29 août. Ce qu'elle prouve est précis et limité :
+    /// *le moteur voit la scène entière, à la bonne place, dans la bonne orientation.*
+    ///
+    /// ⚠ **Un test ne peut pas juger une image.** Il vérifie ici deux choses qu'une machine peut
+    /// vérifier — qu'elle n'est pas vide, et que la scène couvre plus que ce que son premier objet
+    /// couvrirait seul. *Le reste, c'est son œil.*
+    #[test]
+    fn la_premiere_scene_blender_complete() {
+        const TABLE: &[u8] = include_bytes!("../../../../assets/modeles/table de teste verre.glb");
+        let scene = crate::geometry::glb_loader::GlbLoader::charger_scene_bytes(TABLE)
+            .expect("la table de test");
+        println!(
+            "  scene : {} parties, {} sommets, {} triangles",
+            scene.parties.len(),
+            scene.sommets.len(),
+            scene.indices.len() / 3
+        );
+
+        // Le cadrage de la scène ENTIÈRE, réutilisé tel quel pour la comparaison plus bas.
+        let cadrage = boite_englobante(&scene);
+        let Some(bruts) = rendre_la_scene(512, &scene, Some(cadrage)) else {
+            println!("  (aucune image ecrite — pas de Vulkan)");
+            return;
+        };
+
+        // ⚠ La carte est en `R32G32B32A32_SFLOAT` : **seize octets par pixel**, pas quatre. Elle
+        // porte `RGB = normale monde` et `A = distance à l'œil` — c'est ce que `cartes.wgsl` écrit,
+        // et ce que `refraction.wgsl` attend. *La lire comme une image 8 bits donnerait une image
+        // quatre fois trop petite, sur des octets qui ne veulent rien dire.*
+        let dossier = std::path::Path::new("target/preuves");
+        std::fs::create_dir_all(dossier).expect("dossier de preuves");
+        let mut rvb = Vec::with_capacity(bruts.len() / 16 * 3);
+        let mut couverts = 0usize;
+        for p in bruts.chunks_exact(16) {
+            let f = |o: usize| f32::from_le_bytes([p[o], p[o + 1], p[o + 2], p[o + 3]]);
+            let distance = f(12);
+            if distance <= 0.0 {
+                rvb.extend_from_slice(&[0, 0, 0]);
+                continue;
+            }
+            couverts += 1;
+            // Une normale vit dans [-1,1] ; l'image la porte dans [0,255]. C'est la convention des
+            // cartes de normales, pas un réglage — aucune constante à justifier.
+            let c = |v: f32| ((v * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+            rvb.extend_from_slice(&[c(f(0)), c(f(4)), c(f(8))]);
+        }
+        let png = crate::image::png::encoder(512, 512, &rvb).expect("png");
+        std::fs::write(dossier.join("scene-blender-complete.png"), png).expect("ecriture");
+        println!("  ecrit : target/preuves/scene-blender-complete.png");
+
+        // Garde anti-image-vide : une image noire passerait pour un rendu réussi.
+        assert!(
+            couverts > 5_000,
+            "seulement {couverts} pixels couverts : la scene n'a rien rendu"
+        );
+
+        // ⭐ LA GARDE QUI COMPTE : **au MÊME cadrage**, la scène entière couvre plus que ce que
+        // l'ancienne voie rendait — c'est-à-dire son premier objet, un tiers du fichier, en silence.
+        let (premiers, indices_premiers) =
+            crate::geometry::glb_loader::GlbLoader::load_glb_raw_bytes(TABLE).expect("ancienne voie");
+        let partielle = crate::geometry::glb_loader::Scene {
+            sommets: premiers,
+            indices: indices_premiers,
+            parties: vec![],
+        };
+        let Some(bruts_partiels) = rendre_la_scene(512, &partielle, Some(cadrage)) else { return };
+        let couverts_partiels = bruts_partiels
+            .chunks_exact(16)
+            .filter(|p| f32::from_le_bytes([p[12], p[13], p[14], p[15]]) > 0.0)
+            .count();
+        println!("  couverture : {couverts} pixels (scene) contre {couverts_partiels} (premier objet seul)");
+        assert!(
+            couverts > couverts_partiels,
+            "la scene complete ({couverts}) ne couvre pas plus que son premier objet \
+             ({couverts_partiels}) — les autres objets manquent"
+        );
+    }
 }

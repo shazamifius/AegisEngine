@@ -1,8 +1,38 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use crate::core::math::{Vec2, Vec3, Vec4};
+use crate::core::math::{Mat4, Vec2, Vec3, Vec4};
 use crate::geometry::vertex::Vertex;
+
+/// Un morceau de scène : la trace d'une primitive dans le maillage fusionné.
+///
+/// Elle permet de dessiner un objet seul — ou de le compter — **sans hiérarchie de scène**.
+/// *`scene/_scene_graph.rs` dort pour une raison : rien n'en a encore besoin, et une brique
+/// rallumée sans être exercée recrée exactement le défaut qu'on vient de corriger.*
+#[derive(Debug, Clone)]
+pub struct Partie {
+    /// Le nom du nœud dans le fichier — celui que l'auteur voit dans Blender.
+    pub nom: String,
+    pub premier_indice: u32,
+    pub nombre_indices: u32,
+    /// La plage de sommets de cette partie dans le tampon fusionné. ⚠ Elle est nécessaire pour
+    /// raisonner sur une primitive SEULE : deux objets distincts qui se touchent ne sont pas la
+    /// même surface, et les confondre inventerait une adjacence qui n'existe pas.
+    pub premier_sommet: u32,
+    pub nombre_sommets: u32,
+}
+
+/// Une scène glTF entière, ses objets replacés puis fusionnés en un seul maillage.
+///
+/// Un seul tampon de sommets et un seul d'indices : c'est ce que le pipeline sait dessiner
+/// aujourd'hui, et `parties` garde de quoi les séparer le jour où il saura faire mieux.
+#[derive(Debug, Clone, Default)]
+pub struct Scene {
+    pub sommets: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    /// Une entrée par primitive lue, dans l'ordre de la fusion.
+    pub parties: Vec<Partie>,
+}
 
 pub struct GlbLoader;
 
@@ -276,38 +306,12 @@ impl GlbLoader {
         // Et le type 5121 (octet non signé) est désormais accepté — un modèle de moins de 256
         // sommets l'emploie légitimement, et il était jusqu'ici ignoré **en silence**, ce qui
         // produisait un maillage sans aucun indice, donc un objet invisible.
-        let mut indices = Vec::new();
-        if let Some(ind_acc_idx) = ind_accessor_idx {
-            let ind_acc = &accessors[ind_acc_idx];
-            let ind_count = ind_acc["count"].as_u64().unwrap_or(0) as usize;
-            let ind_bv_idx = ind_acc["bufferView"].as_u64().unwrap_or(0) as usize;
-            let debut = buffer_views[ind_bv_idx]["byteOffset"].as_u64().unwrap_or(0) as usize
-                + ind_acc["byteOffset"].as_u64().unwrap_or(0) as usize;
-            let component_type = ind_acc["componentType"].as_u64().unwrap_or(0);
-
-            let taille = match component_type {
-                5121 => 1, // UNSIGNED_BYTE
-                5123 => 2, // UNSIGNED_SHORT
-                5125 => 4, // UNSIGNED_INT
-                _ => 0,
-            };
-            if taille == 0 {
-                return Err(format!("glTF : type d'indice {component_type} inconnu.").into());
-            }
-            if debut + ind_count * taille > bin_data.len() {
-                return Err("glTF : les indices débordent du tampon.".into());
-            }
-
-            indices.reserve(ind_count);
-            for i in 0..ind_count {
-                let o = debut + i * taille;
-                indices.push(match taille {
-                    1 => bin_data[o] as u32,
-                    2 => u16::from_le_bytes([bin_data[o], bin_data[o + 1]]) as u32,
-                    _ => u32::from_le_bytes([bin_data[o], bin_data[o + 1], bin_data[o + 2], bin_data[o + 3]]),
-                });
-            }
-        }
+        // ⭐ Même lecture que la voie « scène », et c'est voulu : deux copies d'un décodeur
+        // divergent, et c'est toujours celle qu'on ne relit plus qui se met à mentir.
+        let mut indices = match ind_accessor_idx {
+            Some(i) => Self::lire_indices(accessors, buffer_views, bin_data, i)?,
+            None => Vec::new(),
+        };
 
         if indices.is_empty() {
             for i in 0..vertices.len() as u32 {
@@ -317,6 +321,362 @@ impl GlbLoader {
 
         log::info!("Mesh GLB chargé (normalize={}) : {} sommets, {} indices.", normalize, vertices.len(), indices.len());
         Ok((vertices, indices))
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    // LA SCÈNE COMPLÈTE — la voie ouverte le 5 septembre 2026
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+
+    /// Charge une **scène entière** : tous les maillages, toutes leurs primitives, chacune replacée
+    /// par la transformation de son nœud.
+    ///
+    /// ## ⚠⚠ POURQUOI C'EST UNE FONCTION NOUVELLE ET NON UNE CORRECTION DE `load_glb`
+    ///
+    /// **Les dix modèles du jeu portent TOUS une transformation de nœud non triviale** — mesuré, pas
+    /// supposé : translation et échelle sur huit d'entre eux, rotation sur `plantedecendente` et
+    /// `spike_trap`. `load_glb*` les ignore depuis toujours, et le jeu a été bâti par-dessus cet
+    /// oubli : ses objets sont placés par le jeu lui-même.
+    ///
+    /// **Donc appliquer les transformations dans `load_glb` aurait déplacé et retourné tout le
+    /// décor existant, sans qu'aucun test ne tombe** — un défaut d'image, invisible à la
+    /// compilation. C'est le patron déjà employé trois fois côté réseau : *on ajoute un chemin à
+    /// côté de l'ancien, jamais à sa place.*
+    ///
+    /// ## Ce que cette voie fait de plus, et que l'ancienne ne fera jamais
+    ///
+    /// - **Toutes les primitives**, pas `meshes[0].primitives[0]`. Un fichier Blender à plusieurs
+    ///   objets — ou un objet à plusieurs matériaux — arrivait jusqu'ici amputé **en silence**.
+    /// - **La hiérarchie des nœuds**, composée : un objet parenté suit son parent.
+    /// - **Les normales transformées correctement**, par la comatrice — et non par la matrice
+    ///   elle-même, qui les fausserait dès qu'une échelle est non uniforme.
+    /// - **⚠ L'orientation rétablie quand une échelle est négative.** Le nœud « Cube » du modèle de
+    ///   test vaut −2,95 sur deux axes : c'est un miroir, il inverse le sens de parcours des
+    ///   triangles. Sans compensation, l'élimination des faces arrière jetterait exactement les
+    ///   faces qu'il faut garder — l'objet apparaîtrait retourné, ou creux.
+    ///
+    /// ⚠ **Elle ne normalise jamais la taille.** Une scène a ses dimensions ; les changer n'aurait
+    /// aucun sens pour un ensemble d'objets, et cacherait les échelles relatives qu'on veut voir.
+    pub fn charger_scene(path: impl AsRef<Path>) -> Result<Scene, Box<dyn std::error::Error>> {
+        let mut fichier = File::open(path)?;
+        let mut tampon = Vec::new();
+        fichier.read_to_end(&mut tampon)?;
+        Self::charger_scene_bytes(&tampon)
+    }
+
+    /// Comme [`GlbLoader::charger_scene`], depuis des octets déjà en mémoire.
+    pub fn charger_scene_bytes(octets: &[u8]) -> Result<Scene, Box<dyn std::error::Error>> {
+        let (json_str, bin) = Self::decouper_glb(octets)?;
+        let json: serde_json::Value = serde_json::from_str(json_str)?;
+
+        let vide = Vec::new();
+        let accessors = json["accessors"].as_array().unwrap_or(&vide);
+        let vues = json["bufferViews"].as_array().unwrap_or(&vide);
+        let maillages = json["meshes"].as_array().unwrap_or(&vide);
+        let noeuds = json["nodes"].as_array().unwrap_or(&vide);
+
+        let mut scene = Scene::default();
+
+        // Les racines : celles de la scène désignée, ou tous les nœuds si le fichier n'en nomme
+        // aucune. ⚠ Un fichier sans `scenes` est légal, et l'ignorer donnerait une scène vide.
+        let racines: Vec<usize> = json["scenes"]
+            .as_array()
+            .and_then(|s| {
+                let i = json["scene"].as_u64().unwrap_or(0) as usize;
+                s.get(i)?["nodes"].as_array().map(|n| {
+                    n.iter().filter_map(|v| v.as_u64().map(|x| x as usize)).collect()
+                })
+            })
+            .unwrap_or_else(|| (0..noeuds.len()).collect());
+
+        // Parcours en profondeur, en composant les transformations de parent en enfant.
+        let mut pile: Vec<(usize, Mat4)> = racines.iter().rev().map(|i| (*i, Mat4::IDENTITY)).collect();
+        let mut vus = vec![false; noeuds.len()];
+
+        while let Some((idx, parent)) = pile.pop() {
+            let Some(noeud) = noeuds.get(idx) else { continue };
+            // Une hiérarchie glTF est un arbre ; un fichier abîmé pourrait en faire un cycle, et un
+            // parcours qui y entrerait ne s'arrêterait jamais.
+            if vus[idx] {
+                log::warn!("glTF : le nœud {idx} est atteint deux fois — hiérarchie cyclique, branche ignorée.");
+                continue;
+            }
+            vus[idx] = true;
+
+            let monde = parent * Self::transformation_du_noeud(noeud);
+
+            if let Some(enfants) = noeud["children"].as_array() {
+                for e in enfants.iter().rev() {
+                    if let Some(e) = e.as_u64() {
+                        pile.push((e as usize, monde));
+                    }
+                }
+            }
+
+            let Some(im) = noeud["mesh"].as_u64().map(|v| v as usize) else { continue };
+            let Some(maillage) = maillages.get(im) else { continue };
+            let nom_objet = noeud["name"].as_str()
+                .or_else(|| maillage["name"].as_str())
+                .unwrap_or("(sans nom)");
+
+            for (ip, prim) in maillage["primitives"].as_array().unwrap_or(&vide).iter().enumerate() {
+                // 4 = TRIANGLES. Un ruban ou un éventail chargé comme des triangles s'afficherait
+                // en désordre : on le nomme et on le laisse, plutôt que de le dessiner faux.
+                let mode = prim["mode"].as_u64().unwrap_or(4);
+                if mode != 4 {
+                    log::warn!("glTF : « {nom_objet} » primitive {ip} en mode {mode} — ignorée (seul TRIANGLES = 4 est dessiné).");
+                    continue;
+                }
+                let attributs = &prim["attributes"];
+                let Some(ipos) = attributs["POSITION"].as_u64().map(|v| v as usize) else {
+                    log::warn!("glTF : « {nom_objet} » primitive {ip} sans POSITION — ignorée.");
+                    continue;
+                };
+                let Some(positions) = Self::lire_flottants(accessors, vues, bin, ipos, 3) else {
+                    continue;
+                };
+                let nombre = positions.len() / 3;
+
+                let normales = attributs["NORMAL"].as_u64()
+                    .and_then(|i| Self::lire_flottants(accessors, vues, bin, i as usize, 3));
+                let tangentes = attributs["TANGENT"].as_u64()
+                    .and_then(|i| Self::lire_flottants(accessors, vues, bin, i as usize, 4));
+                let uv0s = attributs["TEXCOORD_0"].as_u64()
+                    .and_then(|i| Self::lire_flottants(accessors, vues, bin, i as usize, 2));
+                let uv1s = attributs["TEXCOORD_1"].as_u64()
+                    .and_then(|i| Self::lire_flottants(accessors, vues, bin, i as usize, 2));
+
+                if normales.is_none() {
+                    log::warn!(
+                        "glTF : « {nom_objet} » n'a pas de normales — repli DÉDUIT DE LA POSITION, \
+                         exact seulement sur une sphère centrée. Son éclairage sera faux."
+                    );
+                }
+
+                // La comatrice transforme les normales sans les fausser sous échelle non uniforme,
+                // et le signe du déterminant dit si la transformation est un miroir.
+                let (comatrice, miroir) = Self::comatrice_et_miroir(&monde);
+                let decalage = scene.sommets.len() as u32;
+
+                for i in 0..nombre {
+                    let p = Vec3::new(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+                    let pm = monde * Vec4::new(p.x, p.y, p.z, 1.0);
+
+                    let n = match &normales {
+                        Some(n) => Vec3::new(n[i * 3], n[i * 3 + 1], n[i * 3 + 2]),
+                        None => Self::normale_de_repli(p),
+                    };
+                    let mut nm = Self::appliquer_3x3(&comatrice, n).normalize_or_zero();
+                    if miroir {
+                        nm = -nm;
+                    }
+
+                    // La tangente garde sa quatrième composante : c'est le signe du bitangent, une
+                    // convention d'orientation — la transformer comme un vecteur la détruirait.
+                    let t = match &tangentes {
+                        Some(t) => {
+                            let v = Self::appliquer_3x3_direct(&monde, Vec3::new(t[i * 4], t[i * 4 + 1], t[i * 4 + 2]))
+                                .normalize_or_zero();
+                            Vec4::new(v.x, v.y, v.z, t[i * 4 + 3])
+                        }
+                        None => Vec4::new(1.0, 0.0, 0.0, 1.0),
+                    };
+                    let uv0 = match &uv0s {
+                        Some(u) => Vec2::new(u[i * 2], u[i * 2 + 1]),
+                        None => Vec2::ZERO,
+                    };
+                    let uv1 = match &uv1s {
+                        Some(u) => Vec2::new(u[i * 2], u[i * 2 + 1]),
+                        None => Vec2::ZERO,
+                    };
+
+                    scene.sommets.push(Vertex::new(Vec3::new(pm.x, pm.y, pm.z), nm, t, uv0, uv1));
+                }
+
+                let premier = scene.indices.len() as u32;
+                let bruts = match prim["indices"].as_u64() {
+                    Some(i) => Self::lire_indices(accessors, vues, bin, i as usize)?,
+                    None => (0..nombre as u32).collect(),
+                };
+                for tri in bruts.chunks(3) {
+                    if tri.len() < 3 {
+                        break;
+                    }
+                    // ⚠ Le miroir inverse le sens de parcours : on le rétablit ici, sans quoi
+                    // l'élimination des faces arrière garderait l'intérieur et jetterait l'extérieur.
+                    let (a, b, c) = if miroir {
+                        (tri[0], tri[2], tri[1])
+                    } else {
+                        (tri[0], tri[1], tri[2])
+                    };
+                    scene.indices.extend_from_slice(&[a + decalage, b + decalage, c + decalage]);
+                }
+
+                scene.parties.push(Partie {
+                    nom: nom_objet.to_string(),
+                    premier_indice: premier,
+                    nombre_indices: scene.indices.len() as u32 - premier,
+                    premier_sommet: decalage,
+                    nombre_sommets: nombre as u32,
+                });
+            }
+        }
+
+        if scene.parties.is_empty() {
+            return Err("glTF : aucune primitive triangulaire dans ce fichier.".into());
+        }
+
+        log::info!(
+            "Scène GLB chargée : {} parties, {} sommets, {} indices.",
+            scene.parties.len(),
+            scene.sommets.len(),
+            scene.indices.len()
+        );
+        Ok(scene)
+    }
+
+    /// Découpe un GLB en son morceau JSON et son morceau binaire.
+    fn decouper_glb(buffer: &[u8]) -> Result<(&str, &[u8]), Box<dyn std::error::Error>> {
+        if buffer.len() < 20 || &buffer[0..4] != b"glTF" {
+            return Err("Format GLB invalide (magic != glTF).".into());
+        }
+        let json_len = u32::from_le_bytes(buffer[12..16].try_into()?) as usize;
+        if u32::from_le_bytes(buffer[16..20].try_into()?) != 0x4E4F534A {
+            return Err("Chunk 0 GLB invalide (type != JSON).".into());
+        }
+        if buffer.len() < 20 + json_len + 8 {
+            return Err("Pas de chunk BIN dans le fichier GLB.".into());
+        }
+        let json_str = std::str::from_utf8(&buffer[20..20 + json_len])?;
+        let bin_offset = 20 + json_len;
+        let bin_len = u32::from_le_bytes(buffer[bin_offset..bin_offset + 4].try_into()?) as usize;
+        let fin = (bin_offset + 8 + bin_len).min(buffer.len());
+        Ok((json_str, &buffer[bin_offset + 8..fin]))
+    }
+
+    /// La transformation d'un nœud glTF : soit sa `matrix`, soit la composition `T · R · S`.
+    fn transformation_du_noeud(noeud: &serde_json::Value) -> Mat4 {
+        // `matrix` est prioritaire et exclut T/R/S — c'est la spécification glTF, et un fichier qui
+        // porterait les deux serait déjà invalide.
+        if let Some(m) = noeud["matrix"].as_array() {
+            if m.len() == 16 {
+                let v: Vec<f32> = m.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect();
+                // glTF écrit ses matrices en colonnes, comme `Mat4`.
+                return Mat4::from_cols(
+                    Vec4::new(v[0], v[1], v[2], v[3]),
+                    Vec4::new(v[4], v[5], v[6], v[7]),
+                    Vec4::new(v[8], v[9], v[10], v[11]),
+                    Vec4::new(v[12], v[13], v[14], v[15]),
+                );
+            }
+        }
+
+        let lire3 = |cle: &str, defaut: Vec3| -> Vec3 {
+            match noeud[cle].as_array() {
+                Some(a) if a.len() == 3 => Vec3::new(
+                    a[0].as_f64().unwrap_or(0.0) as f32,
+                    a[1].as_f64().unwrap_or(0.0) as f32,
+                    a[2].as_f64().unwrap_or(0.0) as f32,
+                ),
+                _ => defaut,
+            }
+        };
+        let t = lire3("translation", Vec3::ZERO);
+        let s = lire3("scale", Vec3::new(1.0, 1.0, 1.0));
+        let r = match noeud["rotation"].as_array() {
+            Some(a) if a.len() == 4 => [
+                a[0].as_f64().unwrap_or(0.0) as f32,
+                a[1].as_f64().unwrap_or(0.0) as f32,
+                a[2].as_f64().unwrap_or(0.0) as f32,
+                a[3].as_f64().unwrap_or(1.0) as f32,
+            ],
+            _ => [0.0, 0.0, 0.0, 1.0],
+        };
+
+        Mat4::from_translation(t) * Self::matrice_du_quaternion(r) * Mat4::from_scale(s)
+    }
+
+    /// Un quaternion glTF `[x, y, z, w]` en matrice de rotation.
+    fn matrice_du_quaternion(q: [f32; 4]) -> Mat4 {
+        let [x, y, z, w] = q;
+        let (x2, y2, z2) = (x + x, y + y, z + z);
+        let (xx, xy, xz) = (x * x2, x * y2, x * z2);
+        let (yy, yz, zz) = (y * y2, y * z2, z * z2);
+        let (wx, wy, wz) = (w * x2, w * y2, w * z2);
+        Mat4::from_cols(
+            Vec4::new(1.0 - (yy + zz), xy + wz, xz - wy, 0.0),
+            Vec4::new(xy - wz, 1.0 - (xx + zz), yz + wx, 0.0),
+            Vec4::new(xz + wy, yz - wx, 1.0 - (xx + yy), 0.0),
+            Vec4::new(0.0, 0.0, 0.0, 1.0),
+        )
+    }
+
+    /// La comatrice de la partie 3×3, et le fait que la transformation soit un **miroir**.
+    ///
+    /// ⚠ **Une normale ne se transforme pas comme un point.** Sous une échelle non uniforme, la
+    /// matrice elle-même la fait pencher du mauvais côté : il faut la transposée de l'inverse.
+    /// La comatrice lui est proportionnelle, et le facteur disparaît à la normalisation — donc
+    /// **aucune division, aucun cas dégénéré à traiter**. Ses lignes sont trois produits vectoriels
+    /// des colonnes.
+    ///
+    /// Le déterminant se lit alors gratuitement : c'est le produit scalaire de la première colonne
+    /// par la première ligne de la comatrice. **Négatif, la transformation retourne l'espace.**
+    fn comatrice_et_miroir(m: &Mat4) -> ([Vec3; 3], bool) {
+        let c0 = Vec3::new(m.cols[0].x, m.cols[0].y, m.cols[0].z);
+        let c1 = Vec3::new(m.cols[1].x, m.cols[1].y, m.cols[1].z);
+        let c2 = Vec3::new(m.cols[2].x, m.cols[2].y, m.cols[2].z);
+        let lignes = [c1.cross(c2), c2.cross(c0), c0.cross(c1)];
+        let determinant = c0.dot(lignes[0]);
+        (lignes, determinant < 0.0)
+    }
+
+    /// Applique une matrice donnée par ses trois **lignes** à un vecteur.
+    fn appliquer_3x3(lignes: &[Vec3; 3], v: Vec3) -> Vec3 {
+        Vec3::new(lignes[0].dot(v), lignes[1].dot(v), lignes[2].dot(v))
+    }
+
+    /// Applique la partie 3×3 d'une `Mat4` à une direction — sans translation, sans correction.
+    /// C'est ce qu'il faut pour une **tangente**, qui suit la surface au lieu de lui être normale.
+    fn appliquer_3x3_direct(m: &Mat4, v: Vec3) -> Vec3 {
+        let r = *m * Vec4::new(v.x, v.y, v.z, 0.0);
+        Vec3::new(r.x, r.y, r.z)
+    }
+
+    /// Lit un accesseur d'indices, quel que soit son type entier.
+    fn lire_indices(
+        accessors: &[serde_json::Value],
+        buffer_views: &[serde_json::Value],
+        bin: &[u8],
+        indice_accesseur: usize,
+    ) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+        let acc = accessors.get(indice_accesseur).ok_or("glTF : accesseur d'indices absent.")?;
+        let nombre = acc["count"].as_u64().unwrap_or(0) as usize;
+        let vue = &buffer_views[acc["bufferView"].as_u64().unwrap_or(0) as usize];
+        let debut = vue["byteOffset"].as_u64().unwrap_or(0) as usize
+            + acc["byteOffset"].as_u64().unwrap_or(0) as usize;
+        let genre = acc["componentType"].as_u64().unwrap_or(0);
+
+        // 5121 = octet, 5123 = court, 5125 = entier. Un modèle de moins de 256 sommets emploie
+        // légitimement le premier ; l'ignorer produirait un objet sans indices, donc invisible.
+        let taille = match genre {
+            5121 => 1,
+            5123 => 2,
+            5125 => 4,
+            _ => return Err(format!("glTF : type d'indice {genre} inconnu.").into()),
+        };
+        if debut + nombre * taille > bin.len() {
+            return Err("glTF : les indices débordent du tampon.".into());
+        }
+
+        let mut sortie = Vec::with_capacity(nombre);
+        for i in 0..nombre {
+            let o = debut + i * taille;
+            sortie.push(match taille {
+                1 => bin[o] as u32,
+                2 => u16::from_le_bytes([bin[o], bin[o + 1]]) as u32,
+                _ => u32::from_le_bytes([bin[o], bin[o + 1], bin[o + 2], bin[o + 3]]),
+            });
+        }
+        Ok(sortie)
     }
 }
 
@@ -436,7 +796,7 @@ mod tests {
         for v in positions { bin.extend_from_slice(&v.to_le_bytes()); }   // 0..36
         for v in normales { bin.extend_from_slice(&v.to_le_bytes()); }    // 36..72
         for v in indices { bin.extend_from_slice(&v.to_le_bytes()); }     // 72..78
-        while bin.len() % 4 != 0 { bin.push(0); }
+        while !bin.len().is_multiple_of(4) { bin.push(0); }
 
         let json = r#"{"asset":{"version":"2.0"},
 "accessors":[
@@ -447,7 +807,7 @@ mod tests {
 "buffers":[{"byteLength":78}],
 "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2,"mode":4}]}]}"#;
         let mut json_octets = json.as_bytes().to_vec();
-        while json_octets.len() % 4 != 0 { json_octets.push(b' '); }
+        while !json_octets.len().is_multiple_of(4) { json_octets.push(b' '); }
 
         let mut glb = Vec::new();
         glb.extend_from_slice(b"glTF");
@@ -490,15 +850,12 @@ mod tests {
         }
     }
 
-    /// ⚠ Ce que le chargeur ne sait TOUJOURS pas faire, écrit comme un test qui l'affirme.
-    ///
-    /// Les dix modèles du dépôt n'ont qu'**un maillage et qu'une primitive** — c'est pourquoi la
-    /// limite `meshes[0]["primitives"][0]` n'a jamais gêné. **Une vraie scène 3D exportée depuis
-    /// Blender (plusieurs objets, ou un objet à plusieurs matériaux) perdra tout sauf son premier
-    /// morceau, en silence.** Ce test grave le fait, pour que la prochaine session ne le
-    /// redécouvre pas en croyant à un bug d'affichage.
+    /// Les dix modèles du jeu n'ont qu'**un maillage et qu'une primitive** — c'est pourquoi la
+    /// limite `meshes[0].primitives[0]` de l'ancienne voie n'a jamais gêné. Ce test garde le fait :
+    /// le jour où l'un d'eux gagnera un second morceau, `load_glb*` l'amputera **en silence**, et
+    /// il faudra le faire passer par [`GlbLoader::charger_scene`].
     #[test]
-    fn nos_modeles_n_ont_qu_une_primitive_et_c_est_pour_ca_que_la_limite_ne_se_voit_pas() {
+    fn les_modeles_du_jeu_restent_mono_primitive_donc_l_ancienne_voie_leur_suffit() {
         let modeles: [(&str, &[u8]); 3] = [
             ("map.glb", include_bytes!("../../../../assets/modeles/map.glb")),
             ("box.glb", include_bytes!("../../../../assets/modeles/box.glb")),
@@ -514,9 +871,220 @@ mod tests {
             assert_eq!(
                 (maillages.len(), primitives),
                 (1, 1),
-                "{nom} porte plusieurs morceaux — le chargeur n'en lira qu'un, EN SILENCE. \
-                 C'est le moment d'ouvrir la lecture multi-primitives."
+                "{nom} porte plusieurs morceaux — `load_glb*` n'en lira qu'un, EN SILENCE. \
+                 Ce modèle doit désormais passer par `charger_scene`."
             );
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    // LA VOIE « SCÈNE » — ouverte le 5 septembre 2026
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+
+    const TABLE: &[u8] = include_bytes!("../../../../assets/modeles/table de teste verre.glb");
+
+    /// ⭐ LA MESURE QUI A MOTIVÉ CE CHANTIER, gardée comme test.
+    ///
+    /// Sa scène de test porte **trois** objets. L'ancienne voie n'en rendait qu'un — un tiers du
+    /// fichier — **sans erreur, sans avertissement**. C'est ce que ce test compare, dans les deux
+    /// sens : il échouerait aussi bien si la nouvelle voie régressait que si l'ancienne se mettait
+    /// à tout lire (auquel cas cette garde n'aurait plus lieu d'être).
+    #[test]
+    fn la_voie_scene_lit_les_trois_objets_que_l_ancienne_amputait() {
+        let scene = GlbLoader::charger_scene_bytes(TABLE).expect("la table de test");
+        assert_eq!(scene.parties.len(), 3, "trois objets dans le fichier, trois parties");
+
+        let (anciens, _) = GlbLoader::load_glb_raw_bytes(TABLE).expect("l'ancienne voie");
+        assert!(
+            scene.sommets.len() > anciens.len(),
+            "la scène ({}) doit porter plus que le premier objet seul ({})",
+            scene.sommets.len(),
+            anciens.len()
+        );
+
+        // Les parties couvrent exactement les indices, sans trou ni chevauchement.
+        let somme: u32 = scene.parties.iter().map(|p| p.nombre_indices).sum();
+        assert_eq!(somme as usize, scene.indices.len());
+        for f in scene.parties.windows(2) {
+            assert_eq!(f[0].premier_indice + f[0].nombre_indices, f[1].premier_indice);
+        }
+
+        // Tout indice pointe sur un sommet qui existe : une fusion mal décalée se verrait ici.
+        let max = scene.indices.iter().copied().max().unwrap_or(0) as usize;
+        assert!(max < scene.sommets.len(), "indice {max} hors des {} sommets", scene.sommets.len());
+    }
+
+    /// ⚠ Les nœuds de sa scène portent des translations proches de `y = 3,7`. Sans elles, les trois
+    /// objets s'empileraient à l'origine — **une scène qui a l'air de marcher et qui est fausse.**
+    #[test]
+    fn les_transformations_de_noeud_sont_appliquees() {
+        let scene = GlbLoader::charger_scene_bytes(TABLE).expect("la table de test");
+        let y_moyen: f32 =
+            scene.sommets.iter().map(|s| s.position[1]).sum::<f32>() / scene.sommets.len() as f32;
+        assert!(
+            y_moyen > 1.0,
+            "les objets sont restés à l'origine (y moyen = {y_moyen}) : la transformation de nœud \
+             n'a pas été appliquée"
+        );
+
+        // L'ancienne voie, elle, ne l'applique PAS — et c'est ce qui rend son remplacement
+        // impossible sans déplacer le décor du jeu.
+        let (anciens, _) = GlbLoader::load_glb_raw_bytes(TABLE).expect("l'ancienne voie");
+        let y_ancien: f32 =
+            anciens.iter().map(|s| s.position[1]).sum::<f32>() / anciens.len() as f32;
+        assert!(
+            y_ancien.abs() < 1.0,
+            "l'ancienne voie s'est mise à transformer (y = {y_ancien}) — le décor du jeu vient de bouger"
+        );
+    }
+
+    /// Un GLB d'un seul triangle, sous la transformation demandée, portant la normale demandée.
+    ///
+    /// *La normale est un paramètre et non un octet à corriger après coup : une première version de
+    /// ce fabricant patchait le binaire à la main et visait deux octets à côté — le test échouait
+    /// alors pour une raison étrangère à ce qu'il mesure, ce qui est la pire espèce de test.*
+    fn glb_a_noeud(
+        translation: [f32; 3],
+        rotation: [f32; 4],
+        echelle: [f32; 3],
+        normale: [f32; 3],
+    ) -> Vec<u8> {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let normales: [f32; 9] = [
+            normale[0], normale[1], normale[2],
+            normale[0], normale[1], normale[2],
+            normale[0], normale[1], normale[2],
+        ];
+        let indices: [u16; 3] = [0, 1, 2];
+
+        let mut bin = Vec::new();
+        for v in positions { bin.extend_from_slice(&v.to_le_bytes()); }
+        for v in normales { bin.extend_from_slice(&v.to_le_bytes()); }
+        for v in indices { bin.extend_from_slice(&v.to_le_bytes()); }
+        while !bin.len().is_multiple_of(4) { bin.push(0); }
+
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+"scene":0,"scenes":[{{"nodes":[0]}}],
+"nodes":[{{"name":"essai","mesh":0,"translation":[{},{},{}],"rotation":[{},{},{},{}],"scale":[{},{},{}]}}],
+"accessors":[
+{{"bufferView":0,"byteOffset":0,"componentType":5126,"count":3,"type":"VEC3"}},
+{{"bufferView":0,"byteOffset":36,"componentType":5126,"count":3,"type":"VEC3"}},
+{{"bufferView":1,"byteOffset":0,"componentType":5123,"count":3,"type":"SCALAR"}}],
+"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":72}},{{"buffer":0,"byteOffset":72,"byteLength":6}}],
+"buffers":[{{"byteLength":78}}],
+"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1}},"indices":2,"mode":4}}]}}]}}"#,
+            translation[0], translation[1], translation[2],
+            rotation[0], rotation[1], rotation[2], rotation[3],
+            echelle[0], echelle[1], echelle[2]
+        );
+        let mut json_octets = json.into_bytes();
+        while !json_octets.len().is_multiple_of(4) { json_octets.push(b' '); }
+
+        let mut glb = Vec::new();
+        glb.extend_from_slice(b"glTF");
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&((12 + 8 + json_octets.len() + 8 + bin.len()) as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_octets.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        glb.extend_from_slice(&json_octets);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+        glb
+    }
+
+    /// ⭐⭐ LA GARDE LA PLUS SUBTILE DE CE CHANTIER, et elle vient de sa scène.
+    ///
+    /// Son nœud « Cube » porte une échelle de **−2,95 sur deux axes** : un miroir. Un miroir inverse
+    /// le sens de parcours des triangles — donc, sans compensation, l'élimination des faces arrière
+    /// **garde l'intérieur et jette l'extérieur**. L'objet apparaît creux ou retourné, et rien dans
+    /// la compilation, les types ou les autres tests ne le dit.
+    ///
+    /// *Ce test échouerait si l'on retirait la compensation, ce qu'aucune relecture ne garantit.*
+    #[test]
+    fn une_echelle_negative_retourne_le_sens_de_parcours_et_la_normale() {
+        let droit = GlbLoader::charger_scene_bytes(&glb_a_noeud(
+            [0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 0.0, 1.0],
+        )).expect("sans miroir");
+        assert_eq!(droit.indices, vec![0, 1, 2], "sans miroir, l'ordre ne bouge pas");
+
+        let miroir = GlbLoader::charger_scene_bytes(&glb_a_noeud(
+            [0.0; 3], [0.0, 0.0, 0.0, 1.0], [-1.0, 1.0, 1.0], [0.0, 0.0, 1.0],
+        )).expect("avec miroir");
+        assert_eq!(
+            miroir.indices, vec![0, 2, 1],
+            "un miroir doit inverser le sens de parcours, sinon la face visible est jetée"
+        );
+
+        // La normale de ce triangle est en +Z ; un miroir sur X ne doit PAS la retourner.
+        let n = miroir.sommets[0].normal;
+        assert!(
+            (n[2] - 1.0).abs() < 1e-5,
+            "la normale devrait rester (0,0,1) sous un miroir en X, elle vaut {n:?}"
+        );
+    }
+
+    /// Une échelle **non uniforme** fait pencher une normale si on la transforme comme un point.
+    /// La comatrice est là pour ça, et voici la vérité analytique qui le prouve : sur un plan
+    /// incliné à 45°, aplatir Y de moitié doit **redresser** la normale, pas la coucher.
+    #[test]
+    fn la_normale_suit_la_comatrice_et_non_la_matrice() {
+        // Normale à 45° dans le plan XY, sur un nœud qui aplatit Y de moitié.
+        let s = std::f32::consts::FRAC_1_SQRT_2;
+        let glb = glb_a_noeud([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0, 0.5, 1.0], [s, s, 0.0]);
+
+        let scene = GlbLoader::charger_scene_bytes(&glb).expect("échelle non uniforme");
+        let n = scene.sommets[0].normal;
+
+        // Aplatir Y de moitié rend la pente DEUX FOIS plus raide, donc la normale se couche vers X :
+        // (M⁻¹)ᵀ·(1,1,0) ∝ (1, 2, 0). Transformer par M donnerait (1, 0.5, 0) — l'inverse exact.
+        let attendu = Vec3::new(1.0, 2.0, 0.0).normalize();
+        assert!(
+            (n[0] - attendu.x).abs() < 1e-4 && (n[1] - attendu.y).abs() < 1e-4,
+            "normale {n:?}, attendue {attendu:?} — la matrice a été employée à la place de la comatrice"
+        );
+    }
+
+    /// Une hiérarchie doit composer : un enfant translaté dans un parent translaté cumule les deux.
+    #[test]
+    fn la_hierarchie_des_noeuds_se_compose() {
+        let scene = GlbLoader::charger_scene_bytes(TABLE).expect("la table");
+        // Sa scène est plate ; ce qui se garde ici, c'est qu'aucun objet n'a été perdu ni doublé.
+        assert_eq!(scene.parties.len(), 3);
+        let noms: Vec<&str> = scene.parties.iter().map(|p| p.nom.as_str()).collect();
+        assert!(noms.contains(&"Circle"), "noms lus : {noms:?}");
+        assert!(noms.contains(&"Cube"), "noms lus : {noms:?}");
+    }
+
+    /// ⚠ GARDE ANTI-RÉGRESSION : l'ancienne voie ne doit RIEN changer pour le jeu.
+    ///
+    /// Les dix modèles portent tous une transformation de nœud que `load_glb*` ignore, et le jeu
+    /// place ses objets lui-même. *Si un jour quelqu'un « corrige » l'ancienne voie pour appliquer
+    /// ces transformations, tout le décor bougera d'un coup — et seul ce test le dira.*
+    #[test]
+    fn l_ancienne_voie_ignore_toujours_les_transformations_de_noeud() {
+        let modeles: [(&str, &[u8]); 3] = [
+            ("map.glb", include_bytes!("../../../../assets/modeles/map.glb")),
+            ("saw_blade.glb", include_bytes!("../../../../assets/modeles/saw_blade.glb")),
+            ("spike_trap.glb", include_bytes!("../../../../assets/modeles/spike_trap.glb")),
+        ];
+        for (nom, octets) in modeles {
+            let (bruts, _) = GlbLoader::load_glb_raw_bytes(octets).expect(nom);
+            let json_len = u32::from_le_bytes(octets[12..16].try_into().unwrap()) as usize;
+            let json: serde_json::Value =
+                serde_json::from_slice(&octets[20..20 + json_len]).expect(nom);
+            let t = &json["nodes"][0]["translation"];
+            if let Some(a) = t.as_array() {
+                let ty = a[1].as_f64().unwrap_or(0.0) as f32;
+                if ty.abs() > 0.5 {
+                    let y: f32 = bruts.iter().map(|s| s.position[1]).sum::<f32>() / bruts.len() as f32;
+                    assert!(
+                        (y - ty).abs() > 0.1,
+                        "{nom} : l'ancienne voie a appliqué la translation ({y} ≈ {ty}) — le jeu vient de bouger"
+                    );
+                }
+            }
         }
     }
 }
