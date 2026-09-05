@@ -389,8 +389,54 @@ lancer n'est pas intrinsèque aux cascades, l'original fait du ray marching — 
 bibliographie de ce papier**, qui menait à *Love and Deepspace*. **Lire les références des références
 vaut plus qu'une recherche de plus.**
 
-**2.** Le fameux « coût borné » des cascades est **une propriété de la 2D qui ne survit pas au passage
-en 3D**. Un jeu 2D qui les emploie en production ne prouve donc **rien** pour nous.
+**2.** Il a été écrit ici que le « coût borné » des cascades était *« une propriété de la 2D qui ne
+survit pas au passage en 3D »*. **⚠⚠ C'est FAUX, et l'original de Sannikov le dérive explicitement
+pour les trois cas** (§ *Representing radiance cascades in memory*, lu en entier le 5 septembre 2026).
+
+### La dérivation, et elle tient en une ligne par cas
+
+Une cascade $i$ coûte $M_i = P_i \cdot Q_i$ — le nombre de sondes fois le nombre de directions par
+sonde. L'espacement des sondes double à chaque cascade, et la finesse angulaire double aussi :
+
+| Où vivent les sondes | Sondes $P_i$ | Directions $Q_i$ | Coût $M_i$ | Total sur $N$ cascades |
+|---|---|---|---|---|
+| **Plan 2D**, directions sur un cercle | $(2^{-i})^2$ | $2^{i}$ | $M_0/2^{i}$ | $\;\mathbf{2M_0}$ — **borné** |
+| **Volume 3D**, directions sur une sphère | $(2^{-i})^3$ | $(2^{i})^2$ | $M_0/2^{i}$ | $\;\mathbf{2M_0}$ — **borné, exactement pareil** |
+| ⭐ **Surface 2D dans un monde 3D**, directions sur une sphère | $(2^{-i})^2$ | $(2^{i})^2$ | $\;\mathbf{M_0}$ | $\;\mathbf{N \cdot M_0}$ — **linéaire** |
+
+> **Le coût borné survit donc parfaitement au passage en 3D volumique.** Ce qui change de régime,
+> c'est le cas **surfacique** : chaque cascade y coûte le même prix, et le total croît linéairement
+> avec leur nombre. *C'est l'inverse de ce que ce dossier affirmait.*
+
+### ⚠ Mais l'asymptotique n'est pas ce qui décide, et c'est le vrai enseignement
+
+Avec 4 ou 5 cascades — ce que *Split Radiance Cascades* dit suffire — l'écart entre $2M_0$ et
+$5M_0$ vaut **2,5×**. Or $M_0$, lui, n'est pas du même ordre selon où les sondes vivent. Pour une
+scène de 20 m à 25 cm d'espacement :
+
+$$P_0^{\text{volume}} = (20/0{,}25)^3 = 512\,000 \qquad\text{contre}\qquad P_0^{\text{surface}} \approx \frac{1\,200\ \text{m}^2}{(0{,}25)^2} = 19\,200$$
+
+**Un facteur ≈ 27**, que le 2,5× asymptotique ne rattrape jamais. *La surface ne gagne pas parce
+qu'elle serait mieux bornée — elle l'est moins — mais parce que sa cascade 0 est un ordre de
+grandeur plus petite.*
+
+Et Sannikov le dit lui-même dans *Split RC* : en volume, **les sondes fines sont gaspillées dans le
+vide**, *« il y aura de larges zones vides où les sondes ne contribuent à aucune surface »*. C'est
+« jamais d'excédent » écrit par quelqu'un d'autre — et c'est ce qui motive leur table de hachage
+creuse, semée **uniquement près des surfaces visibles**.
+
+> ### ⭐ Ce que ça règle pour `0.a`, et ce que ça ne règle pas
+> **Un support surfacique — surfels OU micro-triangles barycentriques — place les deux candidats
+> dans le MÊME régime** ($d = 2$, coût $N \cdot M_0$). **Le transport ne les départage donc pas.**
+> Il départage *surface contre volume*, et le volume était déjà écarté. *C'est un résultat négatif
+> pour qui espérait que le transport tranche `0.a` — et c'était mon cas.*
+>
+> Ce qu'il apporte en revanche : **le nombre de cascades devient un coût direct et linéaire**, là où
+> la 2D le rendait gratuit. $n_{\max} = \lceil \log_4(\text{diagonale}/t_0)\rceil - 1$ cesse d'être
+> une commodité pour devenir un poste de budget.
+
+*Un jeu 2D qui emploie les cascades en production ne prouve toujours rien pour nous — mais pour une
+autre raison que celle qui était écrite ici.*
 
 ---
 
