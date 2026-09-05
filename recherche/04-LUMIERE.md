@@ -168,11 +168,53 @@ parent. Trois conséquences, et elles se chiffrent :
 > facteur seize ([02 — Le budget](02-BUDGET.md) §3), ne pas stocker la position ni la normale d'un
 > échantillon de radiance est exactement le genre d'économie qui décide.
 
-**`CONJECTURÉ`.** Rien de ceci n'est mesuré. La question qui décide n'est pas philosophique, elle est
-chiffrable, et elle n'a pas été chiffrée :
+### ⚠⚠ CORRECTION DU 5 SEPTEMBRE 2026 — la question posée ici était mal posée
 
-> Combien coûte le parcours de rayons entre micro-triangles, **sans** structure d'accélération
-> spatiale, comparé au parcours entre surfels **avec** ?
+Ce paragraphe demandait : *« combien coûte le parcours de rayons entre micro-triangles, **sans**
+structure d'accélération spatiale, comparé au parcours entre surfels **avec** ? »*
+
+**Elle suppose qu'un support de radiance puisse se passer de visibilité, et c'est faux.** La
+connectivité d'un maillage donne les **voisins** d'un échantillon sur la surface ; elle ne dit rien
+de ce qu'un rayon frappe à l'autre bout de la scène. *Un rayon traverse du vide, et le vide n'a pas
+de topologie.* Ainsi formulée, la mesure aurait rendu « micro-triangles = infiniment cher » et
+tranché pour les surfels **pour une raison fausse**.
+
+> **Ce sont deux axes indépendants** — le **support** (où la lumière est stockée) et la
+> **visibilité** (comment un rayon trouve ce qu'il touche) — auxquels s'ajoute le **transport**
+> (comment l'énergie passe d'un point du support à un autre ; les cascades en sont un).
+> **Le §2 de cette page en portait déjà la preuve** : il donne Lumen pour « champs de distance **+**
+> cache de surface » et Split RC pour « hachage **+** une BVH ». *Deux structures chacun, présentées
+> comme une seule décision.*
+
+**La contrainte de direction — innover par TRIANGLE et pas par SURFEL — porte sur le SUPPORT.** Elle
+ne dit rien de la visibilité, où toutes les méthodes publiées emploient une seconde structure.
+
+### ⭐ Et voici ce qui a été mesuré depuis, sur un `.glb` Blender réel
+
+*Banc : `cargo run --release -p aegis_engine --example topologie --no-default-features`.*
+
+- **100 % d'adjacence exploitable**, zéro non-manifold. ⚠ Sur une topologie **quad triangulée** —
+  le meilleur cas possible : c'est un **plafond**, pas une moyenne.
+- **73,5 % de sommets dupliqués** par l'exportateur : la lecture par indices bruts ne voit que
+  **37 %** de l'adjacence réelle. *La connectivité n'est gratuite qu'après une soudure au
+  chargement — exacte, bit à bit, sans aucune tolérance à régler.*
+- **Dispersion des aires : 20 610 ×.** L'objection n° 1 de cette page (« mille à un ») est **plus
+  dure** que ce qu'elle annonçait.
+- **⛔ Et un résultat négatif, structurel :** un micro-maillage ne peut jamais porter moins
+  d'échantillons que le maillage n'a de triangles — c'est un **plancher**, qu'un surfel n'a pas. Plus
+  le fait que la subdivision ne progresse **que par puissances de 4**, donc dépasse la densité visée
+  au lieu de l'atteindre : **≈ 2 × d'échantillons en trop**. Les 6 octets contre 16 en rapportent
+  2,67, il reste ~30 % de gain — **et il disparaît dès que la lumière visée est plus grossière que la
+  géométrie** (mesuré : −39 % à 30 cm, la densité qu'`On-Surface Caches` emploie réellement).
+
+> **Donc le carrefour ne se tranche pas « en général ».** Le bon support dépend du rapport entre la
+> finesse de la lumière voulue et la finesse du maillage : **plus fine → micro-triangles ; plus
+> grossière → surfels.** *Et cette finesse est le chiffre qui manque.*
+
+**La mesure qui décide, re-posée** :
+
+> À structure de visibilité **identique**, quel support touche le moins d'octets par échantillon de
+> radiance mis à jour — et comment ce chiffre varie-t-il avec la **cohérence du motif d'accès** ?
 
 *Écarter les surfels par conviction sans avoir mesuré l'alternative serait exactement ce que ce
 dossier interdit dans l'autre sens — choisir dans un catalogue sans poser la question que le catalogue
@@ -381,8 +423,35 @@ flowchart TD
 ### Ce qui n'a pas été fait, et qu'il ne faut pas prendre pour acquis
 
 1. Le papier fondateur de Sannikov **n'a pas été lu en entier**.
-2. Les planches de *Love and Deepspace* **n'ont pas été trouvées** — c'est le trou le plus coûteux
-   de ce chantier.
+2. Les planches de *Love and Deepspace* **n'ont toujours pas été trouvées** (la vidéo est derrière le
+   GDC Vault). ⭐ Mais la **description officielle de la session** a été lue le 5 septembre 2026, et
+   elle dit l'essentiel : leur lancer de rayons logiciel se fait **sur les surfels eux-mêmes** — donc
+   chez eux visibilité et support coïncident — et un tiers de leur exposé porte sur **les trous entre
+   surfels**, un défaut qu'un maillage n'a pas.
 3. **Aucun surfel, aucune cascade, aucune sonde n'existe dans ce moteur.** Pas une ligne.
 4. Le coût d'un $\beta$ spectral **n'est pas mesuré**.
-5. Le coût du parcours entre micro-triangles sans structure d'accélération **n'est pas mesuré**.
+5. ~~Le coût du parcours entre micro-triangles sans structure d'accélération~~ — **question retirée
+   le 5 septembre 2026, elle était mal posée** (§4). Ce qui reste non mesuré, et qui décide :
+   **à quelle finesse la lumière indirecte doit-elle vivre ?** Le support en dépend entièrement.
+
+### ⭐⭐ Ce que la lecture du 5 septembre a rendu, et qui renverse la hiérarchie de ce dossier
+
+`On-Surface Caches` (HPG 2024) décompose son coût, et aucune autre source ne le faisait :
+
+| Ce qui coûte | Temps | Part |
+|---|---|---|
+| **Le cache** — entretenir le support | 0,27 – 0,32 ms | **15 – 20 %** |
+| **L'effet** — lancer les rayons, intégrer | 0,78 – 1,72 ms | **55 – 65 %** |
+| L'affichage | 0,39 – 0,62 ms | 20 – 25 % |
+
+> **Le support de radiance pèse un cinquième du coût ; le transport en pèse les deux tiers.**
+> Le choix surfel / triangle décide de la qualité, de la mémoire par échantillon et de ce qui sera
+> possible ensuite — **il ne décide pas du budget.** Or c'est le transport, le poste à 65 %, qui
+> n'a jamais été instruit : les cascades y sont tenues pour acquises depuis le début.
+
+**Et un levier que personne n'avait chiffré :** le coût de ce système **décroît** quand le nombre
+d'observateurs augmente (croissance sous-linéaire), parce qu'une surface éclairée sert à tous ceux
+qui la regardent. **En casque, les deux yeux sont deux observateurs à ~99 % de recouvrement** : le
+facteur ×2 qui écrase tout le budget de [02](02-BUDGET.md) s'effondre vers ×1 pour l'indirect —
+*sans aucun des inconvénients de la reprojection temporelle.* Cette propriété appartient à la famille
+« radiance sur la surface » entière, surfels compris.

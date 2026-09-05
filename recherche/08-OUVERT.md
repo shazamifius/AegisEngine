@@ -19,12 +19,70 @@ l'ombrage stéréo et le découplage temporel **d'un seul coup**.
 | Option | Pour | Contre |
 |---|---|---|
 | **Surfels** | Quatre équipes indépendantes y convergent, dont une **en production sur mobile**. Pas d'UV, supporte le skinning, empreinte prévisible | Un nuage sans topologie : recherche spatiale pour trouver les voisins, coutures d'interpolation, gestion naissance/mort |
-| **Micro-triangles barycentriques** | Connectivité gratuite, interpolation continue, suivent la déformation sans être re-semés, **moins de mémoire par échantillon** (ni position ni normale à stocker) | **Personne ne l'a fait.** Aucune mesure, aucun précédent, aucun code à lire |
+| **Micro-triangles barycentriques** | Connectivité gratuite, interpolation continue, suivent la déformation sans être re-semés, **moins de mémoire par échantillon** (ni position ni normale à stocker) | Aucun précédent **barycentrique**. ⚠ Un plancher structurel : jamais moins d'échantillons que le maillage n'a de triangles |
 
-> **Ce qu'il faut mesurer pour trancher, et ce n'est pas philosophique :**
-> **Combien coûte le parcours de rayons entre micro-triangles, *sans* structure d'accélération
-> spatiale, comparé au parcours entre surfels *avec* ?** Sur une machine limitée par la mémoire d'un
-> facteur seize, la réponse peut renverser la préférence dans les deux sens.
+### ⚠⚠ DEUX CORRECTIONS DU 5 SEPTEMBRE 2026 — cette section affirmait deux choses fausses
+
+**1. « Personne ne l'a fait » était faux.** *Radiance Caching with On-Surface Caches* (HPG 2024,
+TU Graz + Huawei) fait tenir la radiance **exclusivement sur la surface**, en temps réel, mesuré et
+comparé à Lumen et AMD-GI1.0. Sa paramétrisation est un **atlas d'îlots auto-générés**, pas des
+coordonnées barycentriques — ce n'est donc pas exactement cette voie, mais c'en est le voisin le plus
+proche, et il est chiffré. *L'absence de précédent n'était pas une propriété du sujet : c'était une
+propriété de notre recherche.*
+
+**2. La mesure demandée était mal posée**, et elle aurait envoyé une session sur une fausse piste.
+Elle supposait que les micro-triangles se passent d'accélération spatiale. **Ils ne le peuvent pas :**
+la connectivité d'un maillage donne les VOISINS d'un échantillon sur la surface ; elle ne dit rien de
+ce qu'un rayon frappe à l'autre bout de la scène. Un rayon traverse du vide, et le vide n'a pas de
+topologie. *Formulée ainsi, la mesure aurait rendu « micro-triangles = infiniment cher » et tranché
+pour les surfels **pour une raison fausse**.*
+
+> ### Ce sont DEUX AXES INDÉPENDANTS, pas deux options concurrentes
+>
+> - **Le support de radiance** — où la lumière est stockée, interpolée, suivie sous déformation ;
+> - **La structure de visibilité** — comment un rayon trouve ce qu'il touche.
+>
+> **Ce dossier en portait déjà la preuve sans la voir** : son propre tableau (§2 de
+> [04](04-LUMIERE.md)) donne Lumen pour « champs de distance **+** cache de surface » et Split RC
+> pour « table de hachage **+** une BVH ». Deux structures, écrites noir sur blanc, présentées comme
+> une seule décision.
+>
+> **Et un troisième axe manquait : le SCHÉMA DE TRANSPORT** — comment l'énergie passe d'un point du
+> support à un autre. Les cascades de radiance en sont un. *Il a été tranché avant le support, alors
+> que `0.a` est annoncé comme « rien d'autre ne peut être décidé avant ».*
+
+> **La mesure qui décide vraiment, re-posée :**
+> **À structure de visibilité IDENTIQUE, quel support touche le moins d'octets par échantillon de
+> radiance mis à jour — et comment ce chiffre varie-t-il avec la cohérence du motif d'accès ?**
+
+### ⭐ Ce que la mesure du 5 septembre a effectivement rendu
+
+*Banc : `cargo run --release -p aegis_engine --example topologie --no-default-features`.*
+
+| Ce qui a été mesuré | Résultat | Nature |
+|---|---|---|
+| Adjacence exploitable sur un `.glb` Blender réel | **100 %**, zéro non-manifold, zéro triangle dégénéré | `MESURÉ` — ⚠ sur une topologie **quad triangulée**, c'est-à-dire le meilleur cas possible : c'est un **plafond**, pas une moyenne |
+| Sommets dupliqués par l'exportateur | **73,5 %** — la lecture par indices bruts ne voit que **37 %** de l'adjacence réelle | `MESURÉ` — la connectivité n'est gratuite qu'**après** une soudure au chargement |
+| Dispersion des aires de triangles | **20 610 ×** entre le plus grand et le plus petit (le corpus annonçait « mille à un ») | `MESURÉ` |
+| Coût mémoire comparé, radiance scalaire | **+29 à +42 %** en faveur du micro-triangle à 1–5 cm · **égalité** à 20 cm · **−39 %** à 30 cm | `CALCULÉ` |
+
+> ### ⛔ Le résultat NÉGATIF, et il est structurel
+> **Un micro-maillage ne peut jamais porter moins d'échantillons que le maillage n'a de triangles.**
+> C'est un plancher ; un surfel n'en a pas — un seul disque de 30 cm recouvre dix triangles fins.
+> S'y ajoute que **la subdivision ne progresse que par puissances de 4** : elle dépasse la densité
+> visée au lieu de l'atteindre, mesuré à **≈ 2 × d'échantillons en trop**. Les 6 octets contre 16 en
+> rapportent 2,67 — il reste ~30 % de gain net, **et il s'évapore dès que la lumière visée est plus
+> grossière que la géométrie.**
+>
+> **Donc `C1` ne se tranche pas « en général ».** Le bon support dépend du rapport entre la finesse
+> de la lumière voulue et la finesse du maillage : **plus fine que le maillage → micro-triangles ;
+> plus grossière → surfels.** Et cette finesse est un chiffre que personne n'a encore.
+
+⚠ **Et une limite du chiffrage ci-dessus, à ne pas perdre :** le rapport 6/16 suppose une radiance
+**scalaire**. `On-Surface Caches` mesure **1 134 octets par entrée** parce qu'il stocke un hémisphère
+directionnel 8×8 — ce qu'exigent les reflets et les cascades. Dans ce cas les deux familles paient le
+même hémisphère, l'avantage mémoire disparaît, et **le sur-échantillonnage de 2 × fait perdre la voie
+barycentrique**. Il ne lui resterait alors que la connectivité.
 
 Détail complet : [04 — La lumière indirecte](04-LUMIERE.md) §4.
 
@@ -116,7 +174,10 @@ en octets ce qu'il gagne en souplesse. *La bonne réponse est probablement de fa
 
 | # | Ce qu'il faut mesurer | Ce que ça débloque | Faisable ici ? |
 |---|---|---|---|
-| **M1** | Le parcours entre micro-triangles **sans** structure spatiale, contre surfels **avec** | **C1**, donc tout le reste | ✅ oui, sur un banc processeur d'abord |
+| ~~M1~~ | ~~Le parcours entre micro-triangles **sans** structure spatiale, contre surfels **avec**~~ | — | ⛔ **MAL POSÉE, retirée le 5 sept. 2026** — voir `C1` : elle supposait qu'un support de radiance puisse se passer de visibilité |
+| **M1a** | **À visibilité identique**, les octets touchés par échantillon mis à jour, sous un motif d'accès cohérent puis incohérent | **C1** | ✅ oui, banc processeur |
+| **M1b** | La fraction d'arêtes 2-manifold sur du contenu **sale** — importé, décimé, scanné | `C1` : l'argument « connectivité gratuite » ne vaut aujourd'hui que sur un maillage propre | 🟡 il manque le contenu, pas l'outil : le banc `topologie` existe |
+| **M1c** | La finesse à laquelle la lumière indirecte doit vivre, lue sur une **vraie scène** | **C1 en dépend entièrement** — c'est le chiffre qui manque, et il ne se trouve pas sur le papier | ✅ oui, depuis le 5 sept. : le moteur charge et rastérise une scène Blender complète |
 | **M2** | Le coût de la passe qui rastérise une **scène complète** dans les deux cartes | Le chaînon manquant entre la physique et une image de jeu | ✅ oui |
 | **M3** | Le coût d'un $\beta$ spectral en octets par image | **C3** | ✅ oui, dès qu'une cascade existe |
 | **M4** | La cause du **pire cas à 10× la moyenne** | L'asservissement (§C4) : sans elle, on ne sait pas ce qu'on asservit | ✅ oui, et c'est **prioritaire** |
@@ -135,7 +196,9 @@ en octets ce qu'il gagne en souplesse. *La bonne réponse est probablement de fa
 
 | Document | État | Pourquoi ça compte |
 |---|---|---|
-| **Les planches de *Love and Deepspace*** (GDC 2026) | ⛔ **introuvables** — seul le résumé de session a été lu | ⭐⭐⭐ **le trou le plus coûteux du chantier.** C'est le seul cas connu de cascades 3D + surfels **en production sur mobile, en lancer de rayons logiciel** : exactement ce qu'on cherche à faire, déjà fait par quelqu'un |
+| **Les planches de *Love and Deepspace*** (GDC 2026) | 🟡 **toujours introuvables** (la vidéo est derrière le GDC Vault), mais la **description officielle de la session** a été lue le 5 sept. 2026 | ⭐⭐⭐ Elle donne les trois points techniques, et **deux sont des aveux de coût** : *« comment faire du lancer de rayons logiciel **sur eux** »* — donc chez eux la visibilité **EST** le support — et *« comment **résoudre les trous entre surfels** »*, ce qu'un maillage n'a pas. Leur déclencheur est le nôtre : *« après l'introduction du contenu créé par les joueurs, le pré-calcul statique ne suivait plus »* |
+| **Radiance Caching with On-Surface Caches** (HPG 2024) | ✅ **lu en entier**, archivé | ⭐⭐⭐ **Le précédent que ce dossier déclarait inexistant.** Radiance exclusivement sur la surface, temps réel. **1 134 o par entrée** (hémisphère directionnel 8×8), **1,45 à 2,64 ms** sur RTX 3090 Ti en 1080p **un œil avec RT matériel**, 32 à 456 Mo de caches. ⛔ Transposé à notre budget : **hors budget d'un facteur ~10**, comme ReSTIR |
+| **HSGI** (LIGHTSPEED, GDC 2023) · **surfel-maintenance** (m4xc) | ✅ lus, archivés | Ils chiffrent **le coût caché des surfels** : table de hachage multi-niveaux à 3 passes GPU, semis à **~1 ms sur un iGPU de bureau** après optimisation, plus le recyclage. *Un coût que le micro-triangle n'a pas du tout* |
 | **Le papier fondateur de Sannikov** | 🟡 référencé, pas lu en entier | Les formules de cascades citées ici viennent d'une **source pédagogique**, pas de l'original. **À revérifier avant d'écrire une ligne de code dessus** |
 | **Les notes de HypeHype** (56 Ko) | 🟡 récupérées, non dépouillées | Le patron d'échantillonnage par tuiles à deux étages, et la règle « fp16 partout, écrit dès le départ » |
 | **Smolder** — volumétrique, SIGGRAPH 2026 | ⛔ non ouvert | Moins l'effet que **l'intégration** : comment le volumétrique cohabite avec le reste sans devenir un chemin de rendu à part |
@@ -251,7 +314,7 @@ portent leur nature et leur commande de re-vérification exactement pour ça.
 |---|---|---|
 | **Physique de la matière** | 4 phénomènes conquis, démontrés contre des vérités analytiques | **M2** — la passe qui les amène dans une image |
 | **Lumière indirecte** | ⛔ rien. Une famille éliminée par la mesure, une famille candidate | **C1** sur le papier, puis **M1** |
-| **Géométrie** | rendu 100 % triangulaire · chargeur mono-primitive | Charger une vraie scène Blender |
+| **Géométrie** | rendu 100 % triangulaire · ⭐ **une scène Blender complète se charge et se rastérise** depuis le 5 sept. 2026 (`GlbLoader::charger_scene` : toutes les primitives, hiérarchie composée, transformations appliquées, miroirs rétablis) | **M1c** — lire sur elle la finesse à laquelle la lumière doit vivre |
 | **Adaptativité** | l'instrument existe et est prouvé · la boucle n'existe pas | **M4** — expliquer le pire cas |
 | **VR** | ⛔ **rien.** Pas d'OpenXR, pas de stéréo, pas d'Android | `VK_KHR_multiview`, puis un `.apk` |
 | **Outillage** | tests d'image GPU ✅ · CI ⛔ | **0.b** |
