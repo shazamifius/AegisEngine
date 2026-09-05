@@ -85,7 +85,7 @@ fn main() {
         println!("            · {} ({} triangles)", p.nom, p.nombre_indices / 3);
     }
 
-    match rendre(&scene, 900) {
+    match rendre(&scene, 900, None, None) {
         Ok(Some(Rendu { octets, largeur, hauteur })) => {
             let png = match aegis_engine::image::png::encoder(largeur, hauteur, &octets) {
                 Ok(p) => p,
@@ -126,7 +126,17 @@ struct Rendu {
 ///
 /// `Ok(None)` si aucun Vulkan n'est joignable : sur une machine sans carte, cet outil s'abstient au
 /// lieu d'échouer — *il ne mesure alors rien, et il le dit.*
-fn rendre(scene: &Scene, cote: u32) -> Result<Option<Rendu>, Box<dyn std::error::Error>> {
+/// `cadrage` impose un centre et un rayon au lieu de les déduire de la scène.
+///
+/// ⚠ **Indispensable pour comparer deux rendus.** Cadrée sur elle-même, toute scène remplit
+/// l'image : une table seule et une table garnie n'occuperaient alors pas les mêmes pixels, et la
+/// comparaison ne mesurerait que le cadrage.
+fn rendre(
+    scene: &Scene,
+    cote: u32,
+    cadrage: Option<(Vec3, f32)>,
+    vers_le_soleil: Option<Vec3>,
+) -> Result<Option<Rendu>, Box<dyn std::error::Error>> {
     let gpu = match GpuContext::sans_ecran_format(cote, cote, 1, FORMAT_ECRAN) {
         Ok(c) => c,
         Err(e) => {
@@ -185,7 +195,7 @@ fn rendre(scene: &Scene, cote: u32) -> Result<Option<Rendu>, Box<dyn std::error:
     });
 
     // ── Le cadrage, calculé depuis la scène ─────────────────────────────────────────────────
-    let (centre, rayon) = boite_englobante(scene);
+    let (centre, rayon) = cadrage.unwrap_or_else(|| boite_englobante(scene));
     const MARGE: f32 = 1.3;
     let fov = 55_f32.to_radians();
     let recul = rayon * MARGE / (fov * 0.5).tan();
@@ -205,7 +215,7 @@ fn rendre(scene: &Scene, cote: u32) -> Result<Option<Rendu>, Box<dyn std::error:
     // Un seul soleil, et la carte d'ombre le suit : la matrice de lumière doit couvrir la scène,
     // sinon ce qui en sort ne projette rien — compromis de toute carte d'ombre unique.
     let ambiance = Ambiance::default();
-    let vers_le_soleil = Vec3::new(0.62, 0.58, 0.33).normalize();
+    let vers_le_soleil = vers_le_soleil.unwrap_or(Vec3::new(0.62, 0.58, 0.33)).normalize();
     let soleil = GpuLight::new_directional(
         // ⚠⚠ Le vecteur pointe **VERS** la lumière, jamais dans le sens où elle voyage.
         //
@@ -272,19 +282,19 @@ fn rendre(scene: &Scene, cote: u32) -> Result<Option<Rendu>, Box<dyn std::error:
     unsafe {
         // 1. La carte d'ombre, hors de toute passe et avant celle qui la lira.
         //
-        // ⚠⚠ LE CADRE SE LIE **AVANT**, et son absence ne produit aucune erreur.
+        // ⚠ LE CADRE SE LIE AVANT, parce qu'une passe qui LIT un descripteur doit l'avoir lié.
         //
-        // `Ombre::dessiner` reçoit un `_layout` qu'elle n'utilise pas — son propre commentaire le
-        // dit : *« conservé parce que c'est par lui que le descripteur du cadre se lierait si cette
-        // passe en avait besoin »*. Or **elle en a besoin** : son shader lit `cadre.light_view_proj`
-        // pour placer le monde du point de vue de la lumière. Elle compte donc sur un descripteur
-        // déjà lié par l'appelant — ce qui est vrai dans le jeu, où d'autres passes précèdent, et
-        // faux ici, où elle est la première commande du tampon.
+        // `Ombre::dessiner` reçoit un `_layout` qu'elle n'utilise pas — son propre commentaire dit
+        // qu'il servirait « si cette passe en avait besoin ». Or **elle en a besoin** : son shader
+        // lit `cadre.light_view_proj` pour placer le monde du point de vue de la lumière. Elle
+        // compte donc sur un descripteur lié par l'appelant.
         //
-        // *Sans cette ligne, la carte d'ombre se remplit de valeurs sans rapport et la scène
-        // n'affiche AUCUNE ombre — pas une ombre fausse, pas une erreur : rien. Un soleil rasant
-        // laissait l'image intacte, ce qui est exactement le symptôme d'un mécanisme jamais
-        // exercé.*
+        // ⚠⚠ **CE QUE JE NE PEUX PAS AFFIRMER, ET QUE J'AI POURTANT ÉCRIT UNE FOIS :** que son
+        // absence explique les ombres manquantes du premier essai. Elle les a fait apparaître, oui
+        // — mais les retirer ensuite ne les fait pas disparaître. *Lire un descripteur non lié est
+        // un comportement INDÉFINI : il peut rendre les bonnes données par accident, et changer
+        // d'avis d'une exécution à l'autre.* La ligne reste parce qu'elle est juste, pas parce que
+        // sa nécessité est démontrée. **La vraie cause du premier essai n'est pas établie.**
         cadre.lier(&gpu.device, cmd, layout);
         ombre.dessiner(&gpu.device, cmd, layout, &file, &instances, &[&maillage]);
 
@@ -520,4 +530,183 @@ fn racine_du_depot() -> PathBuf {
         }
     }
     p
+}
+
+/// Une scène réduite aux parties dont le nom **n'est pas** dans `sauf`.
+///
+/// Sert à comparer « la table seule » et « la table garnie » : les objets posés dessus
+/// disparaissent, la table ne bouge pas d'un pixel.
+#[cfg(test)]
+fn scene_sans(scene: &Scene, sauf: &[&str]) -> Scene {
+    let mut sortie = Scene::default();
+    for p in &scene.parties {
+        if sauf.contains(&p.nom.as_str()) {
+            continue;
+        }
+        let s0 = p.premier_sommet as usize;
+        let decalage = sortie.sommets.len() as u32;
+        sortie
+            .sommets
+            .extend_from_slice(&scene.sommets[s0..s0 + p.nombre_sommets as usize]);
+        let i0 = p.premier_indice as usize;
+        let premier = sortie.indices.len() as u32;
+        for i in &scene.indices[i0..i0 + p.nombre_indices as usize] {
+            sortie.indices.push(i - p.premier_sommet + decalage);
+        }
+        sortie.parties.push(aegis_engine::geometry::glb_loader::Partie {
+            nom: p.nom.clone(),
+            premier_indice: premier,
+            nombre_indices: p.nombre_indices,
+            premier_sommet: decalage,
+            nombre_sommets: p.nombre_sommets,
+        });
+    }
+    sortie
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Les gardes — chacune tient un défaut réel, trouvé le 5 septembre 2026
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TABLE: &[u8] = include_bytes!("../../../assets/modeles/table de teste verre.glb");
+
+    fn scene_de_test() -> Scene {
+        GlbLoader::charger_scene_bytes(TABLE).expect("la table de test")
+    }
+
+    /// La luminosité perçue d'un pixel RVB — la pondération standard, pas une moyenne plate.
+    fn luminance(p: &[u8]) -> i32 {
+        (p[0] as i32 * 54 + p[1] as i32 * 183 + p[2] as i32 * 19) >> 8
+    }
+
+    /// ⭐⭐ LA GARDE DE L'OMBRE PORTÉE, et sa première version était CREUSE.
+    ///
+    /// Une scène peut sortir **sans aucune ombre** — pas une ombre fausse, pas une erreur : rien.
+    /// C'est arrivé au premier essai de ce programme, et c'est le genre de manque qu'aucun test de
+    /// compilation n'attrape. *Cette garde a été éprouvée en supprimant `Ombre::dessiner` : elle
+    /// rend alors exactement 0 pixel déplacé, et elle échoue.*
+    ///
+    /// ## ⚠⚠ Pourquoi la première version de ce test ne valait rien
+    ///
+    /// Elle comparait la table garnie à la table nue et comptait les pixels **assombris**. Or un
+    /// pixel où la bouteille *recouvre* le plateau s'assombrit aussi, sans qu'aucune ombre n'existe.
+    /// **Elle mesurait la présence des objets, pas leur ombre** — et elle est passée avec le défaut
+    /// réintroduit exprès. *Une garde qui n'a jamais dit non n'a pas été testée.*
+    ///
+    /// ## Ce que celle-ci mesure, et pourquoi elle ne peut pas se tromper de la même façon
+    ///
+    /// **Les pixels qu'un objet recouvre ne dépendent pas de la position du soleil ; son ombre, si.**
+    /// On rend donc quatre images — la table garnie et la table nue, sous deux soleils opposés — et
+    /// on compare les deux ensembles de pixels assombris. Sans ombre portée, ces ensembles sont
+    /// **rigoureusement identiques** : ce sont les mêmes pixels recouverts, sous un éclairage
+    /// différent. Avec ombre, ils diffèrent, parce que l'ombre a changé de côté.
+    ///
+    /// *C'est une comparaison d'ensembles, pas un seuil de qualité : aucune constante nouvelle.*
+    #[test]
+    fn les_objets_poses_sur_la_table_y_projettent_une_ombre() {
+        let complete = scene_de_test();
+        let nue = scene_sans(&complete, &["Circle", "Circle.001"]);
+        assert_eq!(nue.parties.len(), 1, "il ne doit rester que le plateau et ses pieds");
+
+        // ⚠ LE MÊME cadrage partout : sinon on comparerait des points de vue, pas des ombres.
+        let cadrage = Some(boite_englobante(&complete));
+        // Deux soleils rasants et opposés en X : les ombres tombent de part et d'autre.
+        let couchant = Some(Vec3::new(0.80, 0.38, 0.22));
+        let levant = Some(Vec3::new(-0.80, 0.38, 0.22));
+
+        let mut empreintes = Vec::new();
+        for soleil in [couchant, levant] {
+            let Some(avec) = rendre(&complete, 384, cadrage, soleil).expect("garnie") else {
+                println!("  (aucun Vulkan — ce test s'abstient et ne mesure rien)");
+                return;
+            };
+            let Some(sans) = rendre(&nue, 384, cadrage, soleil).expect("nue") else { return };
+            assert_eq!(avec.octets.len(), sans.octets.len());
+
+            // Les pixels qui montraient la table et que la scène garnie assombrit : recouverts par
+            // un objet, OU dans son ombre. On ne sait pas encore lesquels — c'est la comparaison
+            // des deux soleils qui le dira.
+            let assombris: Vec<bool> = avec
+                .octets
+                .chunks_exact(3)
+                .zip(sans.octets.chunks_exact(3))
+                .map(|(a, s)| {
+                    let (la, ls) = (luminance(a), luminance(s));
+                    ls > 8 && ls - la > 8
+                })
+                .collect();
+            empreintes.push(assombris);
+        }
+
+        let bouges = empreintes[0]
+            .iter()
+            .zip(empreintes[1].iter())
+            .filter(|(a, b)| a != b)
+            .count();
+
+        assert!(
+            bouges > 200,
+            "seulement {bouges} pixels changent quand le soleil passe d'un côté à l'autre : les \
+             zones assombries sont les mêmes des deux côtés, donc ce sont les objets EUX-MÊMES et \
+             non leur ombre. La carte d'ombre n'agit pas — vérifier que `Ombre::dessiner` est bien \
+             appelée, que sa matrice de lumière couvre la scène, et que le descripteur du cadre \
+             est lié."
+        );
+    }
+
+    /// ⚠ Le tampon d'instances est partagé par toutes les passes d'une image. À capacité trop
+    /// faible, `poser` rend `None`, `dessiner_un` ne dessine rien, et **aucune erreur n'est levée** :
+    /// l'image sort entièrement noire. Le compteur du moteur ne le dirait qu'à l'image suivante,
+    /// laquelle n'existe pas dans un rendu unique.
+    #[test]
+    fn une_scene_rendue_n_est_jamais_vide() {
+        let scene = scene_de_test();
+        let Some(rendu) = rendre(&scene, 512, None, None).expect("le rendu") else {
+            println!("  (aucun Vulkan — ce test s'abstient et ne mesure rien)");
+            return;
+        };
+        let dessines = rendu.octets.chunks_exact(3).filter(|p| luminance(p) > 8).count();
+        let total = rendu.octets.len() / 3;
+        assert!(
+            dessines > total / 40,
+            "{dessines} pixels dessinés sur {total} : la scène est vide ou presque"
+        );
+    }
+
+    /// Retirer des objets doit retirer des pixels : garde élémentaire contre un rendu qui
+    /// ignorerait la scène qu'on lui donne et rendrait toujours la même image.
+    #[test]
+    fn retirer_des_objets_reduit_ce_qui_est_dessine() {
+        let complete = scene_de_test();
+        let nue = scene_sans(&complete, &["Circle", "Circle.001"]);
+        let cadrage = Some(boite_englobante(&complete));
+
+        let Some(avec) = rendre(&complete, 384, cadrage, None).expect("garnie") else { return };
+        let Some(sans) = rendre(&nue, 384, cadrage, None).expect("nue") else { return };
+
+        let compte = |r: &Rendu| r.octets.chunks_exact(3).filter(|p| luminance(p) > 8).count();
+        assert!(
+            compte(&avec) > compte(&sans),
+            "la scène garnie ({}) ne couvre pas plus que la table nue ({})",
+            compte(&avec),
+            compte(&sans)
+        );
+    }
+
+    /// `scene_sans` doit produire des indices qui pointent tous dans ses propres sommets — une
+    /// erreur de décalage donnerait une géométrie explosée, ou un plantage de la carte.
+    #[test]
+    fn une_sous_scene_garde_des_indices_valides() {
+        let complete = scene_de_test();
+        let nue = scene_sans(&complete, &["Circle", "Circle.001"]);
+        assert!(!nue.indices.is_empty());
+        let max = nue.indices.iter().copied().max().unwrap() as usize;
+        assert!(max < nue.sommets.len(), "indice {max} pour {} sommets", nue.sommets.len());
+        let somme: u32 = nue.parties.iter().map(|p| p.nombre_indices).sum();
+        assert_eq!(somme as usize, nue.indices.len());
+    }
 }
