@@ -1206,6 +1206,15 @@ fn octets_par_pixel(format: vk::Format) -> Result<u32, Box<dyn std::error::Error
         | vk::Format::R8G8B8A8_SRGB
         | vk::Format::B8G8R8A8_UNORM
         | vk::Format::B8G8R8A8_SRGB => 4,
+        // ⭐ Le format HDR par défaut des cibles de ce moteur : trois canaux flottants **empaquetés
+        // dans un seul mot de 32 bits** (11+11+10 bits, sans alpha). Il tient dans quatre octets là
+        // où `R16G16B16A16_SFLOAT` en demande huit — la moitié de la bande passante pour la cible
+        // la plus lue de la chaîne, sur une machine où la mémoire est la ressource rare.
+        //
+        // *Ajouté le 5 septembre 2026, quand le premier programme à vouloir relire une cible HDR
+        // s'est heurté au refus de cette table. Le refus a fait exactement son travail : il a nommé
+        // le format au lieu de laisser lire un tampon deux fois trop grand.*
+        vk::Format::B10G11R11_UFLOAT_PACK32 => 4,
         vk::Format::R16G16B16A16_SFLOAT => 8,
         vk::Format::R32G32B32A32_SFLOAT => 16,
         autre => {
