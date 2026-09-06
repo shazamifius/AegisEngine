@@ -1,18 +1,29 @@
 use ash::vk;
 use ash::Device;
 
-/// Gestionnaire de Pipelines Compute Native Vulkan 1.4.
+/// Crée les pipelines de CALCUL — le seul moyen, pour un shader, d'écrire dans une mémoire.
 ///
-/// ### Utilité dans l'Architecture :
-/// Les Compute Pipelines permettent d'exécuter des calculs massivement parallèles
-/// sur GPU hors de la chaîne de rasterisation classique :
-/// 1. Solveur hydrodynamique des fluides **MLS-MPM**.
-/// 2. Tri et projection du **3D Gaussian Splatting (3DGS)**.
-/// 3. Rasteriseur logiciel 64-bits Nanite-style sur **Visibility Buffer**.
+/// ## ⭐ Pourquoi cette brique compte plus que sa taille ne le laisse croire
+///
+/// Toute la thèse du moteur repose sur un geste : *l'état vit sur la surface, et un shader le fait
+/// évoluer*. Ce geste exige d'écrire dans un tampon persistant depuis un shader — ce que la chaîne
+/// de rastérisation ne sait pas faire, puisqu'elle n'écrit que dans des attachements.
+///
+/// **Le 6 septembre 2026, une sonde l'a établi : le moteur n'avait AUCUNE passe de calcul vivante
+/// et AUCUN tampon de stockage vivant.** Le mécanisme primitif dont dépendait le plan à cinq étages
+/// n'existait pas, et aucun document ne le disait — ils raisonnaient tous sur le papier.
+///
+/// ⚠ **Ce fichier a dormi sous un préfixe `_` du 29 août au 6 septembre 2026**, et il annonçait
+/// « Vulkan 1.4 » à trois endroits. **C'était faux** : un pipeline de calcul existe depuis
+/// **Vulkan 1.0**, et le moteur ne demande que la 1.3. *Un commentaire qui exige une version qu'on
+/// n'a pas fait renoncer un lecteur à s'en servir — la famille de défauts n° 1 du projet, dans sa
+/// forme la plus discrète.*
 pub struct ComputePipelineManager;
 
 impl ComputePipelineManager {
-    /// Crée un Pipeline Compute Vulkan 1.4 autonome.
+    /// Crée un pipeline de calcul autonome.
+    ///
+    /// *Aucune capacité à demander au périphérique : c'est du Vulkan 1.0.*
     pub fn create_compute_pipeline(
         device: &Device,
         shader_module: vk::ShaderModule,
@@ -34,18 +45,18 @@ impl ComputePipelineManager {
                 .map_err(|(_, err)| err)?
         };
 
-        log::info!("Pipeline Compute Vulkan 1.4 créé avec succès.");
         Ok(pipelines[0])
     }
 
     /// Calcule le nombre de groupes de threads (Workgroups) nécessaires pour couvrir une taille de problème N.
     ///
-    /// Formula : `workgroups = (total_items + workgroup_size - 1) / workgroup_size`
+    /// *Le cas `workgroup_size == 0` est écarté avant l'appel à `div_ceil`, qui
+    /// paniquerait.*
     pub fn calculate_workgroup_count(total_items: u32, workgroup_size: u32) -> u32 {
         if workgroup_size == 0 {
             return 0;
         }
-        (total_items + workgroup_size - 1) / workgroup_size
+        total_items.div_ceil(workgroup_size)
     }
 }
 

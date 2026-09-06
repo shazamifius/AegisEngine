@@ -31,3 +31,14 @@ pub const REFRACTION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/refr
 /// Deux points d'entrée dans le même module, comme le halo : `build.rs` écrit le même SPIR-V pour
 /// le sommet et le fragment, et une seconde constante identique ne tromperait que son lecteur.
 pub const CARTES_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cartes.vert.spv"));
+
+/// ⭐ **LA MÉMOIRE DE SURFACE — le premier shader de CALCUL de ce moteur** (6 septembre 2026).
+///
+/// Une sonde a établi ce jour-là que le moteur n'avait *aucune* passe de calcul vivante et *aucun*
+/// tampon de stockage vivant : il ne savait pas écrire dans une mémoire depuis un shader, alors que
+/// toute la thèse — *l'état vit sur la surface, un shader le fait évoluer* — repose sur ce geste.
+///
+/// ⚠ Un seul point d'entrée, donc **une seule constante**. Les shaders graphiques du moteur en
+/// portent deux et se voient écrire le même SPIR-V sous deux noms ; ici une seconde constante
+/// identique ne tromperait que son lecteur.
+pub const SURFACE_COMP_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/surface.comp.spv"));

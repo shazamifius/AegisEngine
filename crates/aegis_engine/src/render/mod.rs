@@ -1,4 +1,5 @@
 pub mod cadre;
+pub mod compute_pipeline;
 pub mod cibles;
 pub mod ecran;
 pub mod epaisseur;
@@ -8,6 +9,7 @@ pub mod occlusion;
 pub mod ombre;
 pub mod pipeline;
 pub mod push_constants;
+pub mod surface;
 pub mod texture;
 pub mod cartes;
 pub mod verre;

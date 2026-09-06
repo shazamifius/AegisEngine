@@ -112,18 +112,38 @@ fn le_poids_du_code(racine: &Path) {
 }
 
 /// Les shaders **réellement compilés** — la source de vérité est `build.rs`, pas un dossier.
+///
+/// ⚠⚠ **Cette sonde a menti le 6 septembre 2026, le jour même où un douzième shader est né.**
+/// Elle ne reconnaissait un shader qu'à son fichier `.vert.spv`, donc elle voyait les onze shaders
+/// GRAPHIQUES et restait aveugle au premier shader de CALCUL — qui n'a qu'un point d'entrée, donc
+/// pas de `.vert.spv`. Elle annonçait « 11 shaders » avec l'autorité d'une commande, alors que le
+/// moteur en compilait douze.
+///
+/// *C'est la forme la plus vicieuse du défaut que ce banc existe pour empêcher : une sonde qui ne
+/// se tait pas quand elle ne sait pas, mais rend un compte plausible et faux.* Elle lit désormais
+/// les deux familles, et se dit incapable si l'une d'elles disparaît de `build.rs`.
 fn les_shaders_compiles(racine: &Path) {
     titre("LES SHADERS RÉELLEMENT COMPILÉS (lus dans build.rs)");
     let build = lire(&racine.join("crates/aegis_engine/build.rs"));
-    let noms: Vec<&str> = build
-        .lines()
-        .filter(|l| l.contains(".vert.spv\""))
-        .filter_map(|l| {
-            let apres = &l[l.find("(\"")? + 2..];
-            Some(&apres[..apres.find(".wgsl\"")?])
-        })
-        .collect();
-    println!("  {} shaders : {}", noms.len(), noms.join(", "));
+    let noms_de = |marqueur: &str| -> Vec<String> {
+        build
+            .lines()
+            .filter(|l| l.contains(marqueur))
+            .filter_map(|l| {
+                let apres = &l[l.find("(\"")? + 2..];
+                Some(apres[..apres.find(".wgsl\"")?].to_string())
+            })
+            .collect()
+    };
+    let graphiques = noms_de(".vert.spv\"");
+    let calculs = noms_de(".comp.spv\"");
+    if graphiques.is_empty() || calculs.is_empty() {
+        println!("  ⚠⚠ SONDE INCAPABLE : une des deux familles est introuvable dans build.rs");
+        println!("     ({} graphiques, {} de calcul). Ne pas croire ce compte.",
+            graphiques.len(), calculs.len());
+    }
+    println!("  {} shaders graphiques : {}", graphiques.len(), graphiques.join(", "));
+    println!("  {} shader(s) de calcul : {}", calculs.len(), calculs.join(", "));
 }
 
 fn ce_qui_dort(racine: &Path) {

@@ -75,6 +75,24 @@ fn main() {
         ("cartes.wgsl", "cartes.vert.spv", "cartes.frag.spv"),
     ];
 
+    // ⭐ Les shaders de CALCUL — un seul point d'entrée, donc un seul fichier.
+    //
+    // Les onze shaders ci-dessus portent deux points d'entrée dans le même module, et `build.rs`
+    // écrit alors le MÊME SPIR-V sous deux noms. Un shader de calcul n'a qu'un `@compute` : lui
+    // écrire un second fichier identique ne tromperait que son lecteur — c'est exactement ce que
+    // `shaders/mod.rs` reproche déjà aux constantes du halo.
+    let calculs = [("surface.wgsl", "surface.comp.spv")];
+
+    for (src_file, out_file) in calculs {
+        let dossier = Path::new("src/shaders");
+        let src_path = dossier.join(src_file);
+        let code = fs::read_to_string(&src_path).unwrap_or_else(|_| panic!("Impossible de lire {}", src_file));
+        let spv = compile_wgsl(&assembler(&code, dossier), src_file);
+        let u8_bytes: Vec<u8> = spv.iter().flat_map(|w| w.to_le_bytes()).collect();
+        fs::write(Path::new(&out_dir).join(out_file), &u8_bytes)
+            .unwrap_or_else(|_| panic!("Échec de l'écriture du SPIR-V de calcul pour {}", out_file));
+    }
+
     for (src_file, vert_out, frag_out) in shaders {
         let dossier = Path::new("src/shaders");
         let src_path = dossier.join(src_file);
