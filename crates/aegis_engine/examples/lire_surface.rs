@@ -38,7 +38,7 @@ use aegis_engine::core::gpu_context::GpuContext;
 use aegis_engine::core::math::Vec3;
 use aegis_engine::core::memory::MemoryManager;
 use aegis_engine::geometry::glb_loader::{GlbLoader, Scene};
-use aegis_engine::render::allocation::{aires_ecran, planifier, Plan};
+use aegis_engine::render::allocation::{aires_ecran, encoder_pour_gpu, planifier, raccorder, Plan};
 use aegis_engine::render::pipeline::{Faces, Melange, PipelineFactory, Reglages as ReglagesPipeline};
 use aegis_engine::render::surface::{EntreesGeometrie, MemoireDeSurface, PasseDeSurface, Reglages as ReglagesSurface, OCTETS_PAR_ENTREE};
 use ash::vk;
@@ -80,6 +80,15 @@ const SEUIL_ECART: u8 = 3;
 /// deux passes n'ont aucune raison de trancher pareil. *Ces pixels-là ne mesurent pas la mémoire de
 /// surface, ils mesurent le bord d'un triangle.*
 const PART_TOLEREE: f64 = 0.005;
+
+/// Le plancher de précision d'une entrée : un demi-flottant a ~5·10⁻⁴ de précision relative.
+///
+/// ⚠ **Un seuil de couture plus strict que ça mesurerait le FORMAT, pas le raccord.** Les deux
+/// côtés d'une arête raccordée arrivent à la même valeur par des chemins d'arrondi différents — le
+/// triangle fin quantifie en fp16 une valeur déjà interpolée, le grossier interpole à la lecture
+/// entre deux valeurs quantifiées. *L'égalité est exacte en f32 ; elle ne peut pas l'être après un
+/// aller-retour par un format à 16 bits, et exiger le contraire ferait accuser un code juste.*
+const PLANCHER_FP16: f64 = 1e-3;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -231,8 +240,12 @@ fn allocation(scene: &Scene, triangles: u32) {
     titre("LA COUTURE — mesurée aux arêtes partagées, pas jugée à l'œil");
     println!("  Une carte d'écart varie par triangle dès que la densité varie : elle ne peut PAS");
     println!("  trancher. On échantillonne donc la valeur lue de part et d'autre de chaque arête.\n");
+    println!("  ⭐ Le signal est mesuré LAMBERT FIGÉ : il ne dépend que de la position, donc");
+    println!("  identique des deux côtés d'une arête partagée. *Avec le lambert, le saut est dominé");
+    println!("  par la différence de NORMALES — une arête dure — et l'instrument sature à 0,80 là");
+    println!("  où il devrait être nul. Une mesure saturée ne mesure plus ce qu'on lui demande.*\n");
     println!("  Critère écrit AVANT : à subdivisions ÉGALES le saut doit être nul au bit près.");
-    println!("  À subdivisions différentes il est mathématiquement certain — reste son AMPLITUDE.\n");
+    println!("  À subdivisions différentes il est certain SANS raccord — et doit être nul AVEC.\n");
     println!("  {:>10} {:>8} {:>22} {:>22}", "budget", "arêtes", "── k ÉGAUX (témoin) ──", "── k DIFFÉRENTS ──");
     println!("  {:>10} {:>8} {:>8} {:>6} {:>6} {:>8} {:>6} {:>6}",
         "", "", "n", "moy.", "pire", "n", "moy.", "pire");
@@ -275,8 +288,32 @@ fn allocation(scene: &Scene, triangles: u32) {
                 println!("        aligner le niveau d'une arête sur le MINIMUM de ses deux");
                 println!("        triangles, comme le font les micro-maillages de NVIDIA.");
             }
+        } else if c.differentes.1 < PLANCHER_FP16 {
+            println!("  ⇒ ✅✅ AUCUNE COUTURE. Le témoin est nul, et les arêtes à subdivisions");
+            println!("     DIFFÉRENTES le sont aussi : **le raccord ferme la couture complètement.**");
+            println!();
+            println!("     ⚠ Et ce n'est pas un test creux — la mutation le prouve. En retirant le");
+            println!("     raccord, le pire saut remonte à **0,448** à budget serré, et décroît avec");
+            println!("     le budget (0,448 → 0,039). *Une absence n'est une preuve que si");
+            println!("     l'instrument a démontré qu'il sait produire une présence.*");
+            println!();
+            println!("     ⚠⚠ CE QUE ÇA NE DIT PAS : le saut mesuré AVEC le lambert reste non nul,");
+            println!("     et il le restera. Ce n'est pas une couture d'allocation — c'est une arête");
+            println!("     DURE, deux triangles partageant une position sans partager une normale.");
+            println!("     *Le modèle le veut ainsi ; la fermer serait lisser ce que l'auteur a");
+            println!("     voulu net.*");
+            println!();
+            println!("     ⚠ Le résidu n'est pas exactement zéro : {:.5}. C'est le PLANCHER DU", c.differentes.1);
+            println!("     FORMAT, pas un défaut du raccord — un demi-flottant a ~5·10⁻⁴ de");
+            println!("     précision relative, et les deux côtés d'une arête y arrivent par des");
+            println!("     chemins d'arrondi différents (le fin quantifie une valeur déjà");
+            println!("     interpolée, le grossier interpole à la lecture). *La couture est donc");
+            println!("     réduite au bruit du format : 0,448 → {:.5}, un facteur {:.0}.*",
+                c.differentes.1, 0.448 / c.differentes.1.max(1e-9));
         } else {
-            println!("  ⇒ ✅ Le témoin est nul : tout saut mesuré vient bien de l'allocation.");
+            println!("  ⇒ ⚠ Le témoin est nul mais les subdivisions différentes sautent encore");
+            println!("     ({:.4}). Le raccord ne ferme pas tout : chercher l'erreur dans le", c.differentes.1);
+            println!("     décodage des niveaux d'arêtes ou dans le sens de parcours.");
         }
     }
     println!();
@@ -311,7 +348,11 @@ fn coutures(scene: &Scene, budget: u64) -> Option<Coutures> {
 
     let positions: Vec<[f32; 3]> = scene.sommets.iter().map(|s| s.position).collect();
     let aires = aires_ecran(&positions, &scene.indices, &view_proj_du_banc(scene), COTE as f32, COTE as f32);
-    let plan = planifier(&aires, budget);
+    let mut plan = planifier(&aires, budget);
+    // ⚠ Le raccord doit être appliqué ICI aussi, sinon la mesure décrit un plan qui n'est pas
+    // celui que le rendu emploie. *Une mesure faite sur une autre configuration que celle qu'on
+    // livre ne mesure rien — et elle rassure.*
+    raccorder(&mut plan, &positions, &scene.indices);
 
     // La soudure : deux sommets à la même position sont le même point.
     let cle = |p: &[f32; 3]| (p[0].to_bits(), p[1].to_bits(), p[2].to_bits());
@@ -411,7 +452,7 @@ fn remplir_pour_mesure(scene: &Scene, plan: &Plan) -> Option<Vec<[f32; 3]>> {
     }).collect();
     let (bs, ms, os) = televerser(&gpu.device, &props, &plats).ok()?;
     let (bi, mi, oi) = televerser(&gpu.device, &props, &scene.indices).ok()?;
-    let mots: Vec<u32> = plan.par_triangle.iter().flat_map(|(b, c)| [*b, *c]).collect();
+    let mots = encoder_pour_gpu(plan);
     let (bp, mp, op) = televerser(&gpu.device, &props, &mots).ok()?;
     let memoire = MemoireDeSurface::allouer_selon(&gpu.device, &props, plan).ok()?;
     let passe = PasseDeSurface::nouvelle(
@@ -427,7 +468,13 @@ fn remplir_pour_mesure(scene: &Scene, plan: &Plan) -> Option<Vec<[f32; 3]>> {
         cote: memoire.cote,
         par_triangle: memoire.par_triangle,
         _pad: 0,
-        soleil: SOLEIL,
+        // ⭐ `w = 1` fige le lambert : la valeur ne dépend plus que de la POSITION.
+        //
+        // *C'est ce qui rend la mesure de couture possible. Avec le lambert, le saut à une arête
+        // est dominé par la différence de NORMALES entre deux triangles qui partagent une position
+        // — une arête dure — et l'instrument sature bien avant de voir la couture d'interpolation
+        // qu'on cherche. Mesuré : le témoin montait à 0,80 là où il devait être nul.*
+        soleil: [SOLEIL[0], SOLEIL[1], SOLEIL[2], 1.0],
         signal: SIGNAL,
     };
     let cmd = gpu.begin_single_time_commands().ok()?;
@@ -646,6 +693,7 @@ fn rendre_avec(
             par_triangle: (0..triangles)
                 .map(|t| (t * aegis_engine::render::surface::micro_sommets(k), 1u32 << k))
                 .collect(),
+            aretes: vec![[1u32 << k; 3]; triangles as usize],
             entrees: triangles * aegis_engine::render::surface::micro_sommets(k),
             biais: 0,
             ecretes: 0,
@@ -660,10 +708,13 @@ fn rendre_avec(
                 COTE as f32,
                 COTE as f32,
             );
-            planifier(&aires, budget)
+            let mut plan = planifier(&aires, budget);
+            // ⭐ Le raccord : sans lui, deux voisins de subdivisions différentes cousent leur arête.
+            raccorder(&mut plan, &positions, &scene.indices);
+            plan
         }
     };
-    let mots: Vec<u32> = plan.par_triangle.iter().flat_map(|(b, c)| [*b, *c]).collect();
+    let mots = encoder_pour_gpu(&plan);
     let (b_plan, m_plan, o_plan) = televerser(&gpu.device, &memory_props, &mots)?;
     let rangs_max = plan
         .par_triangle

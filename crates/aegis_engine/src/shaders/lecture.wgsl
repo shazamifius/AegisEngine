@@ -88,7 +88,11 @@ fn entree(base_tri: u32, i: u32, j: u32, n: u32) -> vec3<f32> {
 // c'est l'argument que le budget ne mesurait pas.
 fn lire_surface(triangle: u32, u: f32, v: f32) -> vec3<f32> {
     let base_tri = plan[triangle * 2u];
-    let n = plan[triangle * 2u + 1u];
+    // ⚠ Le second mot du plan porte la subdivision dans ses 16 bits BAS et les niveaux des trois
+    // arêtes dans ses bits hauts. *La lecture n'a pas besoin de ces niveaux — le raccord agit à
+    // l'ÉCRITURE, en décimant les valeurs stockées sur le bord. Lire ici comme si le mot entier
+    // était la subdivision donnerait une adresse absurde, et une image plausible.*
+    let n = plan[triangle * 2u + 1u] & 0xffffu;
     let fn_ = f32(n);
     // ⚠ Le clamp n'est pas une prudence : à u + v == 1 exactement — sur l'arête opposée au premier
     // coin — le plancher rendrait i + j == n et le coin (i+1, j+1) sortirait du triangle, où il

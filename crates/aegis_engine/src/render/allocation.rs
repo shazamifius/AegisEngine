@@ -55,9 +55,12 @@
 //! l'étanchéité en alignant le niveau d'une arête sur le **minimum** des deux triangles qui la
 //! partagent, et Nanite verrouille les bords de ses clusters. **Rien de tout cela n'est fait ici.**
 //!
-//! ⭐ *Le banc `lire_surface` sait déjà voir une couture — sa carte d'écart distingue les arêtes des
-//! faces. La question se MESURE donc, au lieu de se supposer, et c'est le premier geste à faire
-//! avec ce fichier.*
+//! ### ✅ MESURÉ, puis FERMÉ — 6 septembre 2026
+//!
+//! La couture a d'abord été **mesurée** : 2,3× à 5,4× le bruit de fond des arêtes dures. Puis
+//! [`raccorder`] l'a fermée, par la règle des micro-maillages — *le niveau d'une arête est le
+//! **minimum** des deux triangles qui la partagent, et le plus fin décime son bord pour
+//! correspondre au plus grossier.*
 
 use crate::render::surface::micro_sommets;
 
@@ -84,6 +87,12 @@ pub struct Plan {
     /// *Deux `u32` par triangle, et c'est le prix de la non-uniformité — 8 octets qui n'existaient
     /// pas quand $k$ était le même pour tous. Sur une scène de 3 274 triangles : 26 Ko.*
     pub par_triangle: Vec<(u32, u32)>,
+    /// Par triangle et par arête, la subdivision EFFECTIVE de son bord, en segments.
+    ///
+    /// Vaut la subdivision du triangle tant que [`raccorder`] n'a pas tourné ; ensuite, le
+    /// **minimum** des deux triangles qui partagent l'arête. L'ordre des arêtes est celui des coins :
+    /// `[ (v0,v1), (v1,v2), (v2,v0) ]`.
+    pub aretes: Vec<[u32; 3]>,
     /// Le total des micro-sommets, tous triangles confondus.
     pub entrees: u32,
     /// Le biais appliqué à la subdivision idéale pour tenir le budget.
@@ -167,7 +176,91 @@ pub fn planifier(aires: &[f32], budget_octets: u64) -> Plan {
         base += micro_sommets(ajuste);
     }
 
-    Plan { par_triangle, entrees: base, biais, ecretes }
+    // Sans raccord, le bord d'un triangle a sa propre subdivision — d'où la couture.
+    let aretes = par_triangle.iter().map(|(_, c)| [*c, *c, *c]).collect();
+    Plan { par_triangle, aretes, entrees: base, biais, ecretes }
+}
+
+/// ⭐⭐⭐ **LE RACCORD DES ARÊTES — ce qui rend l'étage 0 étanche.**
+///
+/// Sans lui, deux triangles voisins de subdivisions différentes interpolent le long de leur arête
+/// commune entre des micro-sommets qui **ne coïncident pas**. La discontinuité est mathématiquement
+/// certaine, et elle a été mesurée à **2,3–5,4×** le bruit de fond avant d'être fermée.
+///
+/// ## La règle, et elle est celle des micro-maillages de NVIDIA
+///
+/// > **Le niveau d'une arête est le MINIMUM des deux triangles qui la partagent.**
+///
+/// Le triangle le plus fin **décime** son bord : les micro-sommets qui ne tombent pas sur le pas
+/// grossier cessent de porter leur propre valeur et sont interpolés linéairement entre leurs deux
+/// voisins alignés. *Les deux côtés font alors la même interpolation linéaire entre les mêmes
+/// points — l'égalité n'est pas approchée, elle est exacte.*
+///
+/// ⭐ **Et rien n'est perdu à l'intérieur du triangle** : seul son BORD est décimé. Un grand
+/// triangle finement subdivisé garde toute sa densité intérieure ; il ne cède que sur la ligne où
+/// il doit s'accorder avec son voisin.
+///
+/// ## ⚠ Les arêtes se trouvent par SOUDURE des positions, jamais par les indices
+///
+/// Le banc `topologie` mesure **73,5 % de sommets dupliqués** par l'exportateur Blender : une
+/// recherche par indices ne verrait que **37 %** de l'adjacence réelle, raccorderait un tiers des
+/// arêtes et laisserait les autres coutures en place — *en donnant l'impression d'avoir traité le
+/// sujet.*
+///
+/// ⚠ La soudure est **exacte, bit à bit**. Aucune tolérance à régler : deux sommets sont le même
+/// point ou ils ne le sont pas. *Une tolérance ferait fusionner deux surfaces distinctes qui se
+/// touchent, et inventerait une adjacence — le banc `topologie` met en garde contre exactement ça.*
+pub fn raccorder(plan: &mut Plan, positions: &[[f32; 3]], indices: &[u32]) {
+    use std::collections::HashMap;
+
+    let cle = |p: &[f32; 3]| (p[0].to_bits(), p[1].to_bits(), p[2].to_bits());
+    let mut soude: HashMap<(u32, u32, u32), u32> = HashMap::new();
+    let mut canonique = vec![0u32; positions.len()];
+    for (i, p) in positions.iter().enumerate() {
+        let n = soude.len() as u32;
+        canonique[i] = *soude.entry(cle(p)).or_insert(n);
+    }
+
+    // Le niveau minimal rencontré sur chaque arête soudée.
+    let mut minimum: HashMap<(u32, u32), u32> = HashMap::new();
+    for (t, tri) in indices.chunks_exact(3).enumerate() {
+        let cote = plan.par_triangle[t].1;
+        for c in 0..3usize {
+            let a = canonique[tri[c] as usize];
+            let b = canonique[tri[(c + 1) % 3] as usize];
+            let e = minimum.entry((a.min(b), a.max(b))).or_insert(cote);
+            *e = (*e).min(cote);
+        }
+    }
+
+    for (t, tri) in indices.chunks_exact(3).enumerate() {
+        for c in 0..3usize {
+            let a = canonique[tri[c] as usize];
+            let b = canonique[tri[(c + 1) % 3] as usize];
+            plan.aretes[t][c] = minimum[&(a.min(b), a.max(b))];
+        }
+    }
+}
+
+/// Encode le plan pour le GPU : deux `u32` par triangle.
+///
+/// Le second mot porte la subdivision du triangle dans ses 16 bits bas, et les **exposants** des
+/// trois arêtes sur 4 bits chacun dans les bits hauts.
+///
+/// *Quatre bits suffisent puisque [`K_MAX`] vaut 8 — et les empaqueter ici plutôt que d'ajouter un
+/// troisième mot garde le plan à 8 octets par triangle, ce qui était son coût avant le raccord.*
+pub fn encoder_pour_gpu(plan: &Plan) -> Vec<u32> {
+    plan.par_triangle
+        .iter()
+        .zip(plan.aretes.iter())
+        .flat_map(|((base, cote), aretes)| {
+            let k = |c: u32| c.trailing_zeros();
+            [
+                *base,
+                (*cote & 0xffff) | (k(aretes[0]) << 16) | (k(aretes[1]) << 20) | (k(aretes[2]) << 24),
+            ]
+        })
+        .collect()
 }
 
 /// Les aires projetées à l'écran de chaque triangle, en pixels.
@@ -308,6 +401,86 @@ mod tests {
         assert_eq!(plan.biais, 0, "le biais ne doit jamais monter au-dessus de zéro");
         let attendu = 1u32 << k_ideal(64.0);
         assert!(plan.par_triangle.iter().all(|(_, cote)| *cote == attendu));
+    }
+
+    /// ⭐⭐ **La garde du raccord : deux triangles voisins doivent voir le MÊME niveau d'arête.**
+    ///
+    /// C'est la propriété dont dépend l'étanchéité de l'étage 0 : si les deux côtés d'une arête
+    /// n'ont pas le même niveau effectif, ils interpolent entre des points différents, et la couture
+    /// revient. *Le banc `lire_surface` mesure l'effet ; ce test garde la CAUSE, et il tourne sans
+    /// GPU.*
+    #[test]
+    fn les_deux_cotes_d_une_arete_voient_le_meme_niveau() {
+        // Deux triangles qui partagent l'arête (1,2), avec des aires très différentes — donc des
+        // subdivisions très différentes avant raccord.
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let indices = [0, 1, 2, 1, 3, 2];
+        let mut plan = planifier(&[10_000.0, 4.0], u64::MAX / 2);
+        assert_ne!(
+            plan.par_triangle[0].1, plan.par_triangle[1].1,
+            "le cas de test doit produire deux subdivisions différentes, sinon il ne teste rien"
+        );
+        raccorder(&mut plan, &positions, &indices);
+
+        // L'arête partagée : (1,2) est l'arête 1 du premier triangle et l'arête 2 du second.
+        assert_eq!(
+            plan.aretes[0][1], plan.aretes[1][2],
+            "les deux côtés de l'arête partagée doivent porter le même niveau"
+        );
+        assert_eq!(
+            plan.aretes[0][1],
+            plan.par_triangle[0].1.min(plan.par_triangle[1].1),
+            "le niveau d'une arête doit être le MINIMUM des deux triangles"
+        );
+        // ⚠ Et l'intérieur ne doit PAS avoir été décimé : seul le bord cède.
+        assert_eq!(plan.aretes[0][0], plan.par_triangle[0].1, "une arête de BORD garde son niveau");
+    }
+
+    /// ⚠ Le raccord doit tenir sur un maillage dont l'exportateur a DUPLIQUÉ les sommets.
+    ///
+    /// *Le banc `topologie` mesure 73,5 % de duplication : un raccord qui cherche l'adjacence par
+    /// les indices ne verrait que 37 % des arêtes, en raccorderait un tiers, et laisserait les
+    /// autres coutures en place — **avec l'air d'avoir traité le sujet**.*
+    #[test]
+    fn le_raccord_survit_aux_sommets_dupliques_par_l_exportateur() {
+        // Les mêmes deux triangles, mais chacun avec ses propres sommets — aucun indice partagé.
+        let positions = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0],
+        ];
+        let indices = [0, 1, 2, 3, 4, 5];
+        let mut plan = planifier(&[10_000.0, 4.0], u64::MAX / 2);
+        raccorder(&mut plan, &positions, &indices);
+        assert_eq!(
+            plan.aretes[0][1], plan.aretes[1][2],
+            "l'adjacence doit être retrouvée par la POSITION, pas par les indices"
+        );
+    }
+
+    /// L'empaquetage GPU doit se relire exactement — sinon le shader lit une adresse absurde.
+    #[test]
+    fn l_encodage_gpu_se_relit_sans_perte() {
+        let mut plan = planifier(&[10_000.0, 4.0, 250.0], u64::MAX / 2);
+        raccorder(
+            &mut plan,
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]],
+            &[0, 1, 2, 1, 3, 2, 1, 4, 3],
+        );
+        let mots = encoder_pour_gpu(&plan);
+        for (t, ((base, cote), aretes)) in plan.par_triangle.iter().zip(&plan.aretes).enumerate() {
+            assert_eq!(mots[t * 2], *base);
+            let mot = mots[t * 2 + 1];
+            assert_eq!(mot & 0xffff, *cote, "la subdivision doit vivre dans les 16 bits bas");
+            for (e, niveau) in aretes.iter().enumerate() {
+                let k = (mot >> (16 + 4 * e)) & 0xf;
+                assert_eq!(1u32 << k, *niveau, "l\'arête {e} du triangle {t} se relit mal");
+            }
+        }
     }
 
     /// Une aire nulle ou un sommet derrière la caméra ne doit pas produire de valeur absurde.

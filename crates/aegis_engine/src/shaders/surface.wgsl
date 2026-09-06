@@ -14,8 +14,14 @@ struct Reglages {
     // Les micro-sommets d'un triangle : (n+1)(n+2)/2.
     par_triangle: u32,
     _pad: u32,
-    // La direction dans laquelle le soleil VOYAGE — de la lumière vers la surface.
-    // Le sens est écrit parce qu'une convention supposée au lieu d'être lue a déjà coûté au projet.
+    // `xyz` : la direction dans laquelle le soleil VOYAGE — de la lumière vers la surface. Le sens
+    // est écrit parce qu'une convention supposée au lieu d'être lue a déjà coûté au projet.
+    //
+    // ⭐ `w = 1` FIGE le lambert à 1, ne laissant que la modulation spatiale. Ce n'est pas un mode
+    // de rendu, c'est un INSTRUMENT : la valeur ne dépend alors plus que de la POSITION, identique
+    // des deux côtés d'une arête partagée. *Sans ça, le saut mesuré à une arête est dominé par la
+    // différence de NORMALES — une arête dure — et l'instrument sature avant de voir la couture
+    // qu'on cherche.*
     soleil: vec4<f32>,
     // ⚠⚠ `xyz` = la teinte du signal, `w` = sa fréquence spatiale. **Elles viennent du DEHORS, et
     // c'est une frontière, pas une commodité.** Le moteur fournit ce qui est VRAI (de la lumière
@@ -81,6 +87,36 @@ fn depuis_rang(r: u32, n: u32) -> vec2<u32> {
     return vec2<u32>(r - debut_rangee(j, n), j);
 }
 
+// La lumière en un point barycentrique (u, v) du triangle.
+//
+// Extraite pour pouvoir être évaluée AILLEURS que sur le micro-sommet du fil — c'est exactement ce
+// qu'exige le raccord des arêtes ci-dessous.
+fn lumiere_en(a: u32, b: u32, c: u32, u: f32, v: f32) -> vec3<f32> {
+    let w = 1.0 - u - v;
+    // La position ne se stocke PAS : elle se recalcule. C'est tout l'argument mémoire de la voie
+    // barycentrique — 24 octets par entrée qu'OSC-GI paie et qu'on ne paie pas.
+    let p = w * position(a) + u * position(b) + v * position(c);
+    let nrm = normalize(w * normale(a) + u * normale(b) + v * normale(c));
+    let lambert = select(
+        max(dot(nrm, -normalize(reglages.soleil.xyz)), 0.0),
+        1.0,
+        reglages.soleil.w > 0.5
+    );
+    let modulation = reglages.signal.xyz * (0.5 + 0.5 * sin(p * reglages.signal.w));
+    return modulation * lambert;
+}
+
+// La coordonnée barycentrique du point situé à la fraction `f` de l'arête `e`.
+//
+//   arête 0 = (v0 → v1) : (u, v) = (f, 0)
+//   arête 1 = (v1 → v2) : (u, v) = (1 − f, f)
+//   arête 2 = (v2 → v0) : (u, v) = (0, 1 − f)
+fn bary_arete(e: u32, f: f32) -> vec2<f32> {
+    if (e == 0u) { return vec2<f32>(f, 0.0); }
+    if (e == 1u) { return vec2<f32>(1.0 - f, f); }
+    return vec2<f32>(0.0, 1.0 - f);
+}
+
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let rang = gid.x;      // le micro-sommet dans son triangle
@@ -91,7 +127,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // L'adresse se LIT : ce triangle a sa propre base et sa propre subdivision.
     let base_tri = plan[triangle * 2u];
-    let n = plan[triangle * 2u + 1u];
+    let mot = plan[triangle * 2u + 1u];
+    let n = mot & 0xffffu;
+    // Les niveaux EFFECTIFS des trois arêtes, en exposants, empaquetés par quatre bits.
+    let ke = vec3<u32>((mot >> 16u) & 0xfu, (mot >> 20u) & 0xfu, (mot >> 24u) & 0xfu);
     // ⚠ Le dispatch est dimensionné sur le PLUS SUBDIVISÉ des triangles ; les fils en trop d'un
     // triangle grossier sortent ici. *Sans ce test, ils écriraient dans la plage du triangle
     // suivant — un débordement silencieux qui rendrait une image presque juste.*
@@ -109,23 +148,49 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b = indices[triangle * 3u + 1u];
     let c = indices[triangle * 3u + 2u];
 
-    // La position du micro-sommet ne se stocke PAS : elle se recalcule. C'est tout l'argument
-    // mémoire de la voie barycentrique — 24 octets par entrée qu'OSC-GI paie et qu'on ne paie pas.
-    let p = w * position(a) + u * position(b) + v * position(c);
-    let nrm = normalize(w * normale(a) + u * normale(b) + v * normale(c));
-
-    // Le lambert d'un soleil unique. `soleil.xyz` va DE la lumière VERS la surface, donc l'énergie
-    // reçue par une face vaut le cosinus entre sa normale et la direction opposée.
-    let lambert = max(dot(nrm, -normalize(reglages.soleil.xyz)), 0.0);
-
-    // ⚠ Une modulation qui varie dans l'espace, pour que le banc puisse distinguer une adresse
-    // JUSTE d'une adresse qui écrirait la bonne valeur au mauvais endroit. Un lambert seul rendrait
-    // deux micro-sommets de même normale indiscernables — et le test passerait sur une adresse
-    // fausse. *Se demander ce que la garde mesure QUAND elle passe.*
+    // ⭐⭐⭐ LE RACCORD DES ARÊTES — la règle des micro-maillages, et ce qui rend l'étage 0 étanche.
     //
-    // La teinte et la fréquence viennent de l'appelant : ce shader ne choisit aucune couleur.
-    let modulation = reglages.signal.xyz * (0.5 + 0.5 * sin(p * reglages.signal.w));
-    let lumiere = modulation * lambert;
+    // Un micro-sommet posé SUR une arête dont le niveau effectif est plus grossier que celui du
+    // triangle ne porte pas sa propre valeur : il est interpolé entre les deux micro-sommets alignés
+    // sur le pas grossier qui l'encadrent.
+    //
+    // *Les deux triangles qui partagent l'arête ont le MÊME niveau effectif — c'est le minimum des
+    // deux — donc ils interpolent entre les mêmes points, avec les mêmes poids. L'égalité n'est pas
+    // approchée : elle est exacte.*
+    //
+    // ⚠ Seul le BORD est décimé. Un grand triangle finement subdivisé garde toute sa densité
+    // intérieure ; il ne cède que sur la ligne où il doit s'accorder avec son voisin.
+    //
+    // ⚠ Un COIN appartient à deux arêtes — mais il tombe toujours sur le pas grossier des deux
+    // (t vaut 0 ou n, et le pas divise n), donc les deux branches rendent la même chose et l'ordre
+    // des tests n'a aucune importance. *Le vérifier vaut mieux que de l'espérer : c'est le genre de
+    // cas où deux règles correctes se contredisent à leur intersection.*
+    var arete = -1;
+    var t = 0u;
+    if (ij.y == 0u) { arete = 0; t = ij.x; }
+    else if (ij.x + ij.y == n) { arete = 1; t = ij.y; }
+    else if (ij.x == 0u) { arete = 2; t = n - ij.y; }
+
+    var lumiere: vec3<f32>;
+    if (arete >= 0 && (1u << ke[u32(arete)]) < n) {
+        let e = u32(arete);
+        let pas = n / (1u << ke[e]);
+        let t0 = (t / pas) * pas;
+        if (t0 == t) {
+            lumiere = lumiere_en(a, b, c, u, v);
+        } else {
+            let poids = f32(t - t0) / f32(pas);
+            let d0 = bary_arete(e, f32(t0) / f32(n));
+            let d1 = bary_arete(e, f32(t0 + pas) / f32(n));
+            lumiere = mix(
+                lumiere_en(a, b, c, d0.x, d0.y),
+                lumiere_en(a, b, c, d1.x, d1.y),
+                poids
+            );
+        }
+    } else {
+        lumiere = lumiere_en(a, b, c, u, v);
+    }
 
     let base = (base_tri + rang) * 2u;
     surface[base] = pack2x16float(vec2<f32>(lumiere.x, lumiere.y));

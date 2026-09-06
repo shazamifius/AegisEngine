@@ -47,7 +47,7 @@ use aegis_engine::core::gpu_context::GpuContext;
 use aegis_engine::core::math::Vec3;
 use aegis_engine::core::memory::MemoryManager;
 use aegis_engine::geometry::glb_loader::GlbLoader;
-use aegis_engine::render::allocation::Plan;
+use aegis_engine::render::allocation::{encoder_pour_gpu, Plan};
 use aegis_engine::render::surface::{
     depuis_rang, EntreesGeometrie, micro_sommets, MemoireDeSurface, PasseDeSurface, Reglages, OCTETS_PAR_ENTREE,
 };
@@ -172,11 +172,12 @@ fn remplir(
     // mesure dans `lire_surface`, qui sait voir une couture ; ici elle brouillerait le sujet.*
     let plan = Plan {
         par_triangle: (0..triangles).map(|t| (t * micro_sommets(k), 1u32 << k)).collect(),
+        aretes: vec![[1u32 << k; 3]; triangles as usize],
         entrees: triangles * micro_sommets(k),
         biais: 0,
         ecretes: 0,
     };
-    let mots: Vec<u32> = plan.par_triangle.iter().flat_map(|(b, c)| [*b, *c]).collect();
+    let mots = encoder_pour_gpu(&plan);
     let (tampon_plan, mem_plan, octets_plan) = televerser(&gpu.device, &memory_props, &mots)?;
 
     let memoire = MemoireDeSurface::allouer(&gpu.device, &memory_props, triangles, k)?;
