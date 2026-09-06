@@ -17,6 +17,13 @@ struct Reglages {
     // La direction dans laquelle le soleil VOYAGE — de la lumière vers la surface.
     // Le sens est écrit parce qu'une convention supposée au lieu d'être lue a déjà coûté au projet.
     soleil: vec4<f32>,
+    // ⚠⚠ `xyz` = la teinte du signal, `w` = sa fréquence spatiale. **Elles viennent du DEHORS, et
+    // c'est une frontière, pas une commodité.** Le moteur fournit ce qui est VRAI (de la lumière
+    // sur une surface) ; choisir une couleur est le rôle du jeu, et un test du projet échoue si un
+    // shader du moteur en contient une. *La première version de ce fichier portait
+    // `vec3(1.0, 0.85, 0.7)` en dur — la garde ne l'a pas vue, parce qu'elle ne regardait pas les
+    // shaders de calcul. Elle les regarde depuis.*
+    signal: vec4<f32>,
 }
 
 var<push_constant> reglages: Reglages;
@@ -96,12 +103,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // reçue par une face vaut le cosinus entre sa normale et la direction opposée.
     let lambert = max(dot(nrm, -normalize(reglages.soleil.xyz)), 0.0);
 
-    // ⚠ Une teinte qui varie doucement dans l'espace, pour que le banc puisse distinguer une
-    // adresse JUSTE d'une adresse qui écrirait la bonne valeur au mauvais endroit. Un lambert seul
-    // rendrait deux micro-sommets de même normale indiscernables — et le test passerait sur une
-    // adresse fausse. *Se demander ce que la garde mesure QUAND elle passe.*
-    let teinte = vec3<f32>(1.0, 0.85, 0.7) * (0.5 + 0.5 * sin(p * 3.0));
-    let lumiere = teinte * lambert;
+    // ⚠ Une modulation qui varie dans l'espace, pour que le banc puisse distinguer une adresse
+    // JUSTE d'une adresse qui écrirait la bonne valeur au mauvais endroit. Un lambert seul rendrait
+    // deux micro-sommets de même normale indiscernables — et le test passerait sur une adresse
+    // fausse. *Se demander ce que la garde mesure QUAND elle passe.*
+    //
+    // La teinte et la fréquence viennent de l'appelant : ce shader ne choisit aucune couleur.
+    let modulation = reglages.signal.xyz * (0.5 + 0.5 * sin(p * reglages.signal.w));
+    let lumiere = modulation * lambert;
 
     let base = (triangle * reglages.par_triangle + rang) * 2u;
     surface[base] = pack2x16float(vec2<f32>(lumiere.x, lumiere.y));

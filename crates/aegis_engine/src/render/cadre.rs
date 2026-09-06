@@ -602,6 +602,8 @@ mod tests {
         ("copie.wgsl", include_str!("../shaders/copie.wgsl")),
         ("refraction.wgsl", include_str!("../shaders/refraction.wgsl")),
         ("cartes.wgsl", include_str!("../shaders/cartes.wgsl")),
+        ("lecture.wgsl", include_str!("../shaders/lecture.wgsl")),
+        ("surface.wgsl", include_str!("../shaders/surface.wgsl")),
     ];
 
     /// ⚠⚠ LE TEST QUI REND LA FRONTIÈRE INATTEIGNABLE, pas seulement écrite.
@@ -675,12 +677,19 @@ mod tests {
 
         let mut manquants = Vec::new();
         for ligne in build.lines() {
-            // ⚠ Seules les lignes du TABLEAU comptent — celles qui nomment aussi un `.vert.spv`.
+            // ⚠ Seules les lignes du TABLEAU comptent — celles qui nomment un fichier SPIR-V.
             // Sans ce filtre la sonde ramassait `format!("{}.wgsl", …)`, du texte de `build.rs`
             // qui *parle* de shaders sans en déclarer aucun, et accusait un fichier nommé
             // `{}.wgsl`. *Une sonde qui compte son propre vocabulaire ne mesure rien ;* c'est le
             // même piège que le `grep` qui trouve les formules qu'il cite lui-même.
-            if !ligne.contains(".vert.spv\"") {
+            //
+            // ⚠⚠ **Cette ligne ne cherchait que `.vert.spv` jusqu'au 6 septembre 2026, et la garde
+            // avait donc un ANGLE MORT : les shaders de CALCUL, qui n'ont qu'un point d'entrée.**
+            // `surface.wgsl` est entré dans le moteur avec une couleur en dur, et cette garde ne
+            // l'a pas vue — c'est `lecture.wgsl`, un shader graphique portant la même couleur, qui
+            // l'a fait tomber le lendemain. *Une garde qui ne couvre pas toutes les familles couvre
+            // surtout celle à laquelle on pensait en l'écrivant.*
+            if !ligne.contains(".vert.spv\"") && !ligne.contains(".comp.spv\"") {
                 continue;
             }
             let Some(debut) = ligne.find("(\"") else { continue };

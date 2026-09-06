@@ -64,6 +64,19 @@ const K_PAR_DEFAUT: u32 = 3;
 /// La direction dans laquelle le soleil VOYAGE — de la lumière vers la surface.
 const SOLEIL: [f32; 4] = [-0.4, -0.85, -0.35, 0.0];
 
+/// Le signal de test : une teinte et une fréquence spatiale.
+///
+/// ⚠⚠ **Il vit ici, dans le banc, et pas dans le shader — c'est la frontière du projet.** Le moteur
+/// fournit ce qui est VRAI (de la lumière sur une surface) ; choisir une couleur est le rôle du jeu,
+/// et un test échoue si un shader du moteur en porte une. *La première version de ces deux shaders
+/// portait `vec3(1.0, 0.85, 0.7)` en dur.*
+///
+/// ⚠ La fréquence 3,0 est délibérément ÉLEVÉE : elle fait plusieurs cycles sur un seul triangle du
+/// plateau, donc elle met la mémoire de surface dans son pire cas. *Un banc qui choisit un signal
+/// facile ne mesure rien.*
+const SIGNAL: [f32; 4] = [1.0, 0.85, 0.7, 3.0];
+
+
 /// Le budget du Quest 2, en octets de trafic mémoire par image. `CALCULÉ`, jamais mesuré.
 const TRAFIC_PAR_IMAGE: f64 = 44_000_000_000.0 / 72.0;
 const PIXELS_QUEST2: f64 = 2.0 * 1832.0 * 1920.0;
@@ -169,6 +182,7 @@ fn remplir(
         par_triangle: memoire.par_triangle,
         _pad: 0,
         soleil: SOLEIL,
+        signal: SIGNAL,
     };
 
     let cmd = gpu.begin_single_time_commands()?;
@@ -231,12 +245,13 @@ fn confronter(
             let p = pa * w + pb * u + pc * v;
             let nrm = (na * w + nb * u + nc * v).normalize();
             let lambert = nrm.dot(soleil * -1.0).max(0.0);
-            let teinte = [
-                1.0 * (0.5 + 0.5 * (p.x * 3.0).sin()),
-                0.85 * (0.5 + 0.5 * (p.y * 3.0).sin()),
-                0.7 * (0.5 + 0.5 * (p.z * 3.0).sin()),
+            let f = SIGNAL[3];
+            let module = [
+                SIGNAL[0] * (0.5 + 0.5 * (p.x * f).sin()),
+                SIGNAL[1] * (0.5 + 0.5 * (p.y * f).sin()),
+                SIGNAL[2] * (0.5 + 0.5 * (p.z * f).sin()),
             ];
-            let attendu = [teinte[0] * lambert, teinte[1] * lambert, teinte[2] * lambert];
+            let attendu = [module[0] * lambert, module[1] * lambert, module[2] * lambert];
 
             let obtenu = relu[(t * par_triangle + r) as usize];
             if obtenu == [0.0, 0.0, 0.0] && attendu.iter().any(|c| *c > TOLERANCE) {

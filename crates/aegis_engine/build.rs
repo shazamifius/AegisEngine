@@ -73,6 +73,7 @@ fn main() {
         ("copie.wgsl", "copie.vert.spv", "copie.frag.spv"),
         ("refraction.wgsl", "refraction.vert.spv", "refraction.frag.spv"),
         ("cartes.wgsl", "cartes.vert.spv", "cartes.frag.spv"),
+        ("lecture.wgsl", "lecture.vert.spv", "lecture.frag.spv"),
     ];
 
     // ⭐ Les shaders de CALCUL — un seul point d'entrée, donc un seul fichier.

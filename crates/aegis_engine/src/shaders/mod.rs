@@ -32,6 +32,14 @@ pub const REFRACTION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/refr
 /// le sommet et le fragment, et une seconde constante identique ne tromperait que son lecteur.
 pub const CARTES_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cartes.vert.spv"));
 
+/// ⭐⭐ **L'ÉCRAN LIT LA SURFACE** — le fragment cesse de calculer sa lumière et va la chercher à
+/// l'adresse barycentrique (T, u, v) qu'une passe de calcul a remplie.
+///
+/// Deux points d'entrée dans le même module, comme le halo et les cartes : `build.rs` écrit le même
+/// SPIR-V pour le sommet et le fragment, et une seconde constante identique ne tromperait que son
+/// lecteur.
+pub const LECTURE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lecture.vert.spv"));
+
 /// ⭐ **LA MÉMOIRE DE SURFACE — le premier shader de CALCUL de ce moteur** (6 septembre 2026).
 ///
 /// Une sonde a établi ce jour-là que le moteur n'avait *aucune* passe de calcul vivante et *aucun*

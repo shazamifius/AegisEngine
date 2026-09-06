@@ -258,6 +258,13 @@ pub struct Reglages {
     /// convention de direction *supposée au lieu d'être lue*. Un vecteur d'éclairage sans sa
     /// convention est un piège à demi armé.
     pub soleil: [f32; 4],
+    /// `xyz` = la teinte du signal, `w` = sa fréquence spatiale.
+    ///
+    /// ⚠⚠ **Elles viennent de l'appelant, et c'est la frontière du projet, pas une commodité.**
+    /// Le moteur fournit ce qui est VRAI ; choisir une couleur est le rôle du jeu, et un test échoue
+    /// si un shader du moteur en porte une. *La première version de `surface.wgsl` portait une
+    /// teinte en dur, et la garde ne l'a pas vue — elle ne regardait pas les shaders de calcul.*
+    pub signal: [f32; 4],
 }
 
 /// La passe de calcul qui remplit la mémoire de surface.
