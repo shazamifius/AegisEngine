@@ -180,7 +180,7 @@ en octets ce qu'il gagne en souplesse. *La bonne réponse est probablement de fa
 | **M1c** | La finesse à laquelle la lumière indirecte doit vivre, lue sur une **vraie scène** | **C1 en dépend entièrement** — c'est le chiffre qui manque, et il ne se trouve pas sur le papier | ✅ oui, depuis le 5 sept. : le moteur charge et rastérise une scène Blender complète |
 | **M2** | Le coût de la passe qui rastérise une **scène complète** dans les deux cartes | Le chaînon manquant entre la physique et une image de jeu | ✅ oui |
 | **M3** | Le coût d'un $\beta$ spectral en octets par image | **C3** | ✅ oui, dès qu'une cascade existe |
-| **M4** | La cause du **pire cas à 10× la moyenne** | L'asservissement (§C4) : sans elle, on ne sait pas ce qu'on asservit | ✅ oui, et c'est **prioritaire** |
+| **M4** | La cause du **pire cas à 10× la moyenne** | L'asservissement (§C4) : sans elle, on ne sait pas ce qu'on asservit | 🟡 **entamée le 5 sept. 2026** — deux suspects éliminés, deux restent |
 | **M5** | La version Vulkan réelle du Quest 2 | Si c'est 1.1, le repli est `VK_KHR_dynamic_rendering` en extension | 🟡 par la documentation constructeur, pas par la mesure |
 | **M6** | Le coût GPU réel sur un mobile | Tout le budget | ⛔ **impossible sans un `.apk`** — le terminal Android n'a pas accès au pilote GPU |
 | **M7** | Quoi que ce soit sur Quest 2 | Tout | ⛔ **jamais** |
