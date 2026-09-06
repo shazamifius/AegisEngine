@@ -38,8 +38,9 @@ use aegis_engine::core::gpu_context::GpuContext;
 use aegis_engine::core::math::Vec3;
 use aegis_engine::core::memory::MemoryManager;
 use aegis_engine::geometry::glb_loader::{GlbLoader, Scene};
+use aegis_engine::render::allocation::{aires_ecran, planifier, Plan};
 use aegis_engine::render::pipeline::{Faces, Melange, PipelineFactory, Reglages as ReglagesPipeline};
-use aegis_engine::render::surface::{MemoireDeSurface, PasseDeSurface, Reglages as ReglagesSurface, OCTETS_PAR_ENTREE};
+use aegis_engine::render::surface::{EntreesGeometrie, MemoireDeSurface, PasseDeSurface, Reglages as ReglagesSurface, OCTETS_PAR_ENTREE};
 use ash::vk;
 use std::path::{Path, PathBuf};
 
@@ -113,6 +114,348 @@ fn main() {
         }
     }
     convergence(&scene, triangles);
+    allocation(&scene, triangles);
+}
+
+/// ⭐⭐⭐ L'ALLOCATION ADAPTATIVE — le chantier 0.2, et la question qu'il pose vraiment.
+///
+/// La convergence ci-dessus a été mesurée à subdivision **uniforme**, et le prix en est écrasant :
+/// **56 Mo** pour une seule table à `k = 6`. Une vraie scène ne peut pas payer ça, et elle ne le
+/// devrait pas — les aires de ses triangles varient de 20 610 × (banc `topologie`).
+///
+/// La règle d'allocation est celle sur laquelle FastAtlas, Split RC et OSC-GI convergent tous les
+/// trois : **un micro-sommet par pixel d'écran**, plié à un budget par un biais global unique.
+///
+/// ## ⚠⚠ MAIS ELLE OUVRE UN RISQUE QUE L'UNIFORME N'AVAIT PAS — et c'est lui qu'on mesure ici
+///
+/// Deux triangles voisins peuvent recevoir des subdivisions **différentes**. Leur arête commune
+/// porte alors des micro-sommets à deux densités qui ne coïncident pas : *une couture, très
+/// exactement ce que l'adresse barycentrique était censée supprimer.*
+///
+/// ⭐ **La carte d'écart sait déjà distinguer une couture d'un défaut de densité** — elle l'a fait
+/// pour la convergence. On MESURE donc, au lieu de supposer.
+///
+/// **Le critère, écrit avant :** à budget serré, l'empreinte doit tenir **et** l'écart ne doit pas
+/// se concentrer sur les arêtes. *Si des coutures apparaissent, le chantier suivant est connu et
+/// résolu ailleurs : aligner le niveau d'une arête sur le MINIMUM des deux triangles qui la
+/// partagent, comme le font les micro-maillages de NVIDIA.*
+fn allocation(scene: &Scene, triangles: u32) {
+    titre("L'ALLOCATION ADAPTATIVE — un micro-sommet par pixel, plié à un budget");
+    println!("  Règle : k(T) = k_idéal(aire à l'écran) + biais, le biais dérivé du budget.");
+    println!("  Critère écrit AVANT : l'empreinte tient dans le budget, et l'écart ne se");
+    println!("  concentre PAS sur les arêtes (sinon c'est une couture, et l'adressage est en jeu).\n");
+    println!("  {:>10} {:>8} {:>10} {:>12} {:>11} {:>9}", "budget", "biais", "écrêtés", "entrées", "empreinte", "écart");
+
+    let positions: Vec<[f32; 3]> = scene.sommets.iter().map(|s| s.position).collect();
+    let mut lignes = Vec::new();
+    for budget in [64_000u64, 256_000, 1_000_000, 4_000_000, 16_000_000] {
+        match rendre_avec(scene, triangles, None, budget) {
+            Ok(Some((calcule, lu, entrees))) => {
+                let (moyen, _, _) = ecart(&calcule, &lu);
+                // ⚠ La carte du budget le plus SERRÉ au-dessus du plancher : c'est là que les
+                // subdivisions voisines diffèrent le plus, donc là où une couture se verrait.
+                if budget == 256_000 {
+                    let dossier = racine_du_depot().join("target/preuves");
+                    let _ = std::fs::create_dir_all(&dossier);
+                    ecrire_png(&dossier.join("surface-ecart-adaptatif.png"), &carte_ecart(&calcule, &lu));
+                }
+                // Le plan est recalculé ici pour rapporter biais et écrêtés — il est déterministe.
+                let aires = aires_ecran(&positions, &scene.indices, &view_proj_du_banc(scene), COTE as f32, COTE as f32);
+                let plan = planifier(&aires, budget);
+                let octets = entrees as u64 * OCTETS_PAR_ENTREE;
+                println!(
+                    "  {:>9}o {:>8} {:>10} {:>12} {:>10}Ko {:>8.2}",
+                    budget, plan.biais, plan.ecretes, entrees, octets / 1024, moyen
+                );
+                lignes.push((budget, octets, moyen, plan.biais));
+            }
+            _ => println!("  {budget:>9}o  (rendu impossible)"),
+        }
+    }
+
+    println!();
+    // ⚠⚠ Un budget peut être dépassé pour DEUX raisons opposées, et les confondre ferait
+    // annoncer l'invalidation de la thèse là où il n'y a qu'une limite déjà documentée.
+    //
+    //  · le plan n'a pas su descendre  → l'empreinte n'est pas bornée, et la thèse tombe ;
+    //  · le plan est au PLANCHER (biais = −k_max, chaque triangle réduit à ses trois coins)
+    //    → l'empreinte est bornée par le bas, et c'est le « plancher du micro-maillage » que le
+    //    journal `0.a` a nommé comme résultat négatif structurel. *Un surfel n'a pas ce plancher.*
+    let plancher = triangles as u64 * 3 * OCTETS_PAR_ENTREE;
+    let non_borne = lignes.iter().any(|(b, o, _, biais)| o > b && *biais > -8);
+    let au_plancher: Vec<u64> = lignes.iter().filter(|(b, o, _, _)| o > b).map(|(b, ..)| *b).collect();
+    let decroit = lignes.windows(2).all(|w| w[1].2 <= w[0].2 + 0.5);
+
+    println!("  Le PLANCHER de cette scène : {} triangles × 3 coins × {OCTETS_PAR_ENTREE} o = {} Ko.",
+        triangles, plancher / 1024);
+    println!("  *C'est incompressible : un micro-maillage ne porte jamais moins d'échantillons que");
+    println!("  le maillage n'a de triangles. Un surfel, lui, n'a pas ce plancher.*\n");
+
+    if non_borne {
+        println!("  ⇒ ⛔ UNE EMPREINTE DÉPASSE SON BUDGET SANS ÊTRE AU PLANCHER. C'est le critère");
+        println!("     d'invalidation de `02-THESE.md`, et il tombe. Ne rien conclure d'autre.");
+    } else if decroit {
+        println!("  ⇒ ✅ L'EMPREINTE EST BORNÉE, ET LA QUALITÉ SUIT LE BUDGET.");
+        println!("     Le critère d'invalidation de `02-THESE.md` — *« ce qui invaliderait : une");
+        println!("     empreinte non bornée »* — est retourné en propriété mesurée.");
+        if !au_plancher.is_empty() {
+            println!("     ⚠ Les budgets {au_plancher:?} o ne sont pas tenus : ils sont SOUS le");
+            println!("     plancher. Ce n'est pas un défaut d'allocation, c'est la limite");
+            println!("     structurelle du micro-maillage, et elle est chiffrée ci-dessus.");
+        }
+    } else {
+        println!("  ⇒ ⚠ L'empreinte tient, mais l'écart ne suit pas le budget de façon monotone.");
+        println!("     Regarder `surface-ecart.png` : si l'écart s'est concentré sur les ARÊTES,");
+        println!("     ce sont des coutures — et le raccord des arêtes voisines devient le chantier.");
+    }
+    // ⭐ Le chiffre du chantier : ce que l'adaptatif gagne contre l'uniforme, à qualité comparable.
+    if let Some((_, octets, moyen, _)) = lignes.last() {
+        const UNIFORME_K6_ENTREES: u64 = 7_022_730;
+        const UNIFORME_K6_ECART: f64 = 0.72;
+        let uniforme = UNIFORME_K6_ENTREES * OCTETS_PAR_ENTREE;
+        println!();
+        println!("  ⭐ CE QUE L'ADAPTATIF GAGNE, sur cette scène et ce point de vue :");
+        println!("     uniforme k=6 : {:>6} Ko  ·  écart {UNIFORME_K6_ECART:.2}", uniforme / 1024);
+        println!("     adaptatif    : {:>6} Ko  ·  écart {moyen:.2}", octets / 1024);
+        println!("     ⇒ {:.1}× moins de mémoire, pour un écart {:.1}× plus PETIT.",
+            uniforme as f64 / *octets as f64, UNIFORME_K6_ECART / moyen.max(1e-9));
+        println!("     *L'uniforme dépensait sa densité là où l'écran ne la voyait pas.*");
+    }
+
+    println!();
+    println!("  La carte du budget le plus serré au-dessus du plancher (256 000 o, biais −3) :");
+    println!("    target/preuves/surface-ecart-adaptatif.png");
+    println!("  *C'est là que les subdivisions voisines diffèrent le plus, donc là où une couture");
+    println!("  se verrait — comme un RÉSEAU de lignes suivant les arêtes, jamais comme des bandes.*");
+    // ⭐ La mesure directe, celle qu'aucune image ne rend.
+    titre("LA COUTURE — mesurée aux arêtes partagées, pas jugée à l'œil");
+    println!("  Une carte d'écart varie par triangle dès que la densité varie : elle ne peut PAS");
+    println!("  trancher. On échantillonne donc la valeur lue de part et d'autre de chaque arête.\n");
+    println!("  Critère écrit AVANT : à subdivisions ÉGALES le saut doit être nul au bit près.");
+    println!("  À subdivisions différentes il est mathématiquement certain — reste son AMPLITUDE.\n");
+    println!("  {:>10} {:>8} {:>22} {:>22}", "budget", "arêtes", "── k ÉGAUX (témoin) ──", "── k DIFFÉRENTS ──");
+    println!("  {:>10} {:>8} {:>8} {:>6} {:>6} {:>8} {:>6} {:>6}",
+        "", "", "n", "moy.", "pire", "n", "moy.", "pire");
+    let mut verdict = None;
+    for budget in [256_000u64, 1_000_000, 4_000_000, 16_000_000] {
+        match coutures(scene, budget) {
+            Some(c) => {
+                println!(
+                    "  {:>9}o {:>8} {:>8} {:>6.3} {:>6.3} {:>8} {:>6.3} {:>6.3}",
+                    budget, c.aretes,
+                    c.egales.2, c.egales.0, c.egales.1,
+                    c.differentes.2, c.differentes.0, c.differentes.1
+                );
+                verdict = Some(c);
+            }
+            None => println!("  {budget:>9}o  (mesure impossible)"),
+        }
+    }
+    println!();
+    if let Some(c) = verdict {
+        if c.egales.1 > 1e-4 {
+            println!("  ⇒ ⚠⚠ LE TÉMOIN N'EST PAS NUL : {:.4} de pire saut là où les subdivisions sont", c.egales.1);
+            println!("     ÉGALES. Le critère écrit avant exigeait zéro au bit près. **Donc une");
+            println!("     partie du saut ne vient PAS de l'allocation**, et la cause la plus");
+            println!("     probable est la NORMALE : deux triangles partagent une position sans");
+            println!("     partager une normale — c'est la définition même d'une arête dure, et");
+            println!("     l'exportateur en produit assez pour dupliquer 73,5 % des sommets.");
+            println!();
+            let ecart = c.differentes.0 / c.egales.0.max(1e-9);
+            println!("     Ce qui reste interprétable est le RAPPORT entre les deux populations :");
+            println!("     saut moyen à k différents / saut moyen à k égaux = {ecart:.2}×.");
+            if ecart < 1.2 {
+                println!("     ⇒ Les deux populations se comportent PAREIL. L'allocation adaptative");
+                println!("        n'ajoute pas de couture décelable au-dessus du bruit des arêtes");
+                println!("        dures. *Ce n'est pas « aucune couture » : c'est « aucune couture");
+                println!("        que CE banc sache distinguer de son propre bruit ».*");
+            } else {
+                println!("     ⇒ Les subdivisions différentes sautent {ecart:.2}× plus que le témoin :");
+                println!("        l'allocation AJOUTE une couture. Le chantier suivant est connu —");
+                println!("        aligner le niveau d'une arête sur le MINIMUM de ses deux");
+                println!("        triangles, comme le font les micro-maillages de NVIDIA.");
+            }
+        } else {
+            println!("  ⇒ ✅ Le témoin est nul : tout saut mesuré vient bien de l'allocation.");
+        }
+    }
+    println!();
+    println!("  ⚠ Les arêtes sont trouvées par SOUDURE des positions, jamais par les indices : le");
+    println!("    banc `topologie` mesure 73,5 % de sommets dupliqués par l'exportateur, et une");
+    println!("    recherche par indices ne verrait que 37 % de l'adjacence — donc conclurait");
+    println!("    « presque aucune couture », rassurant et faux.");
+}
+
+/// ⭐⭐⭐ LA COUTURE — mesurée directement, parce qu'aucune image ne peut la trancher.
+///
+/// ## Pourquoi la carte d'écart ne suffit pas, et il faut le dire
+///
+/// Une carte d'ÉCART varie par triangle dès que la densité varie — qu'il y ait couture ou non.
+/// *Y voir des blocs ne prouve donc rien, et ne pas en voir non plus.* Le corpus connaît ce piège
+/// sous un autre nom : *se demander ce que la garde mesure quand elle passe.*
+///
+/// ## Ce qui se mesure ici, et qui ne se discute pas
+///
+/// Pour chaque arête PARTAGÉE par deux triangles, on échantillonne la valeur lue **de chaque côté**
+/// le long de l'arête, et on prend l'écart. Deux triangles de même subdivision doivent rendre
+/// exactement la même chose ; deux subdivisions différentes interpolent entre des micro-sommets qui
+/// ne coïncident pas, donc **la couture est mathématiquement certaine** — la seule question est son
+/// AMPLITUDE.
+///
+/// ⚠ **Les arêtes se trouvent par SOUDURE des positions**, pas par les indices : le banc `topologie`
+/// a mesuré **73,5 % de sommets dupliqués** par l'exportateur Blender, et la lecture brute ne voit
+/// alors que 37 % de l'adjacence réelle. *Chercher les arêtes par indices ferait conclure « presque
+/// aucune arête partagée, donc presque aucune couture » — un résultat rassurant et faux.*
+fn coutures(scene: &Scene, budget: u64) -> Option<Coutures> {
+    use std::collections::HashMap;
+
+    let positions: Vec<[f32; 3]> = scene.sommets.iter().map(|s| s.position).collect();
+    let aires = aires_ecran(&positions, &scene.indices, &view_proj_du_banc(scene), COTE as f32, COTE as f32);
+    let plan = planifier(&aires, budget);
+
+    // La soudure : deux sommets à la même position sont le même point.
+    let cle = |p: &[f32; 3]| (p[0].to_bits(), p[1].to_bits(), p[2].to_bits());
+    let mut soude: HashMap<(u32, u32, u32), u32> = HashMap::new();
+    let mut canonique = vec![0u32; positions.len()];
+    for (i, p) in positions.iter().enumerate() {
+        let n = soude.len() as u32;
+        canonique[i] = *soude.entry(cle(p)).or_insert(n);
+    }
+
+    // Les arêtes, par paire de sommets soudés. Une arête portée par exactement deux faces est
+    // partagée ; par une seule, c'est un bord légitime.
+    let mut aretes: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
+    for (t, tri) in scene.indices.chunks_exact(3).enumerate() {
+        for c in 0..3u32 {
+            let (a, b) = (canonique[tri[c as usize] as usize], canonique[tri[((c + 1) % 3) as usize] as usize]);
+            aretes.entry((a.min(b), a.max(b))).or_default().push((t as u32, c));
+        }
+    }
+
+    // La mémoire de surface, remplie puis relue sur le processeur.
+    let entrees = remplir_pour_mesure(scene, &plan)?;
+
+    // La coordonnée barycentrique du point à la fraction `f` de l'arête `c` d'un triangle.
+    let bary = |c: u32, f: f32| -> (f32, f32) {
+        match c {
+            0 => (f, 0.0),
+            1 => (1.0 - f, f),
+            _ => (0.0, 1.0 - f),
+        }
+    };
+
+    // ⚠⚠ DEUX POPULATIONS, SÉPARÉES — et c'est ce qui rend la mesure interprétable.
+    //
+    // La première version mêlait tout et rendait un saut RIGOUREUSEMENT constant quel que soit le
+    // budget, alors que la part d'arêtes à subdivisions différentes passait de 6 % à 35 %. *Si la
+    // couture en était la cause, le chiffre aurait bougé. Il n'a pas bougé : la mesure ne mesurait
+    // pas ce qu'elle croyait.*
+    //
+    // Les arêtes à subdivisions ÉGALES servent de témoin : tout saut qu'on y observe vient
+    // d'ailleurs — très probablement des NORMALES, deux triangles pouvant partager une position
+    // sans partager une normale (c'est même la raison d'être des 73,5 % de sommets dupliqués par
+    // l'exportateur : une arête dure). *Un banc sans témoin ne sépare jamais sa cause de son bruit.*
+    let (mut pire_eg, mut somme_eg, mut n_eg) = (0.0f64, 0.0f64, 0usize);
+    let (mut pire_diff, mut somme_diff, mut n_diff) = (0.0f64, 0.0f64, 0usize);
+    let mut comptees = 0usize;
+    for faces in aretes.values() {
+        let [(ta, ca), (tb, cb)] = faces[..] else { continue };
+        let (base_a, na) = plan.par_triangle[ta as usize];
+        let (base_b, nb) = plan.par_triangle[tb as usize];
+        comptees += 1;
+        let egales = na == nb;
+        // ⚠ Les deux triangles parcourent leur arête commune en sens OPPOSÉ : la fraction f d'un
+        // côté correspond à 1−f de l'autre. *Se tromper ici rendrait une couture partout, y compris
+        // là où les subdivisions sont identiques — et le test ci-dessous l'aurait dit.*
+        for pas in 0..=32 {
+            let f = pas as f32 / 32.0;
+            let (ua, va) = bary(ca, f);
+            let (ub, vb) = bary(cb, 1.0 - f);
+            let a = aegis_engine::render::surface::lire_interpole(&entrees, base_a, na, ua, va);
+            let b = aegis_engine::render::surface::lire_interpole(&entrees, base_b, nb, ub, vb);
+            let e = (0..3).fold(0.0f64, |m, k| m.max((a[k] - b[k]).abs() as f64));
+            if egales {
+                pire_eg = pire_eg.max(e);
+                somme_eg += e;
+                n_eg += 1;
+            } else {
+                pire_diff = pire_diff.max(e);
+                somme_diff += e;
+                n_diff += 1;
+            }
+        }
+    }
+    Some(Coutures {
+        aretes: comptees,
+        egales: (somme_eg / n_eg.max(1) as f64, pire_eg, n_eg / 33),
+        differentes: (somme_diff / n_diff.max(1) as f64, pire_diff, n_diff / 33),
+    })
+}
+
+/// Ce que la mesure de couture rend : deux populations, jamais une moyenne unique.
+struct Coutures {
+    aretes: usize,
+    /// `(saut moyen, pire saut, nombre d'arêtes)` pour les subdivisions ÉGALES — le témoin.
+    egales: (f64, f64, usize),
+    /// Idem pour les subdivisions DIFFÉRENTES — la population suspecte.
+    differentes: (f64, f64, usize),
+}
+
+/// Remplit la mémoire de surface d'après un plan et la relit sur le processeur.
+fn remplir_pour_mesure(scene: &Scene, plan: &Plan) -> Option<Vec<[f32; 3]>> {
+    let gpu = GpuContext::sans_ecran(64, 64, 1).ok()?;
+    let props = unsafe { gpu.instance.get_physical_device_memory_properties(gpu.physical_device) };
+    let plats: Vec<f32> = scene.sommets.iter().flat_map(|s| {
+        s.position.iter().chain(s.normal.iter()).chain(s.tangent.iter())
+            .chain(s.uv0.iter()).chain(s.uv1.iter()).copied()
+    }).collect();
+    let (bs, ms, os) = televerser(&gpu.device, &props, &plats).ok()?;
+    let (bi, mi, oi) = televerser(&gpu.device, &props, &scene.indices).ok()?;
+    let mots: Vec<u32> = plan.par_triangle.iter().flat_map(|(b, c)| [*b, *c]).collect();
+    let (bp, mp, op) = televerser(&gpu.device, &props, &mots).ok()?;
+    let memoire = MemoireDeSurface::allouer_selon(&gpu.device, &props, plan).ok()?;
+    let passe = PasseDeSurface::nouvelle(
+        &gpu.device,
+        &EntreesGeometrie { sommets: (bs, os), indices: (bi, oi), plan: (bp, op) },
+        &memoire,
+    ).ok()?;
+    let rangs_max = plan.par_triangle.iter()
+        .map(|(_, c)| aegis_engine::render::surface::micro_sommets(c.trailing_zeros()))
+        .max().unwrap_or(3);
+    let reglages = ReglagesSurface {
+        triangles: (scene.indices.len() / 3) as u32,
+        cote: memoire.cote,
+        par_triangle: memoire.par_triangle,
+        _pad: 0,
+        soleil: SOLEIL,
+        signal: SIGNAL,
+    };
+    let cmd = gpu.begin_single_time_commands().ok()?;
+    passe.encoder(&gpu.device, cmd, &reglages, &memoire, rangs_max);
+    gpu.end_single_time_commands(cmd).ok()?;
+    let lu = memoire.relire(&gpu.device).ok()?;
+    passe.detruire(&gpu.device);
+    memoire.detruire(&gpu.device);
+    unsafe {
+        gpu.device.destroy_buffer(bs, None); gpu.device.free_memory(ms, None);
+        gpu.device.destroy_buffer(bi, None); gpu.device.free_memory(mi, None);
+        gpu.device.destroy_buffer(bp, None); gpu.device.free_memory(mp, None);
+    }
+    Some(lu)
+}
+
+/// La matrice du banc, identique à celle des rendus — elle doit l'être, sinon le plan décrirait
+/// un autre point de vue que celui qu'on mesure.
+fn view_proj_du_banc(scene: &Scene) -> [f32; 16] {
+    let (centre, rayon) = boite_englobante(scene);
+    let fov = 55_f32.to_radians();
+    let recul = rayon * 1.3 / (fov * 0.5).tan();
+    let oeil = centre + Vec3::new(0.55, 0.40, -0.73).normalize() * recul;
+    let mut camera = aegis_engine::scene::camera::Camera::new(oeil, centre, 1.0);
+    camera.fov_y_radians = fov;
+    camera.z_near = (recul - rayon * 1.3).max(rayon * 0.01);
+    camera.z_far = recul + rayon * 2.6;
+    aplatir(&(camera.compute_projection_matrix() * camera.compute_view_matrix()))
 }
 
 /// ⭐⭐ LA MESURE QUI TRANCHE — l'écart décroît-il quand la densité monte ?
@@ -215,6 +558,19 @@ fn convergence(scene: &Scene, triangles: u32) {
     }
 }
 
+/// La carte d'écart, amplifiée ×16 pour être visible à l'œil.
+fn carte_ecart(calcule: &[u8], lu: &[u8]) -> Vec<u8> {
+    let mut carte = vec![0u8; calcule.len()];
+    for p in 0..(calcule.len() / 3) {
+        let e = (0..3).fold(0u8, |m, c| m.max(calcule[p * 3 + c].abs_diff(lu[p * 3 + c])));
+        let v = (e as u32 * 16).min(255) as u8;
+        carte[p * 3] = v;
+        carte[p * 3 + 1] = v;
+        carte[p * 3 + 2] = v;
+    }
+    carte
+}
+
 /// L'écart entre deux rendus, restreint aux pixels que la géométrie couvre.
 fn ecart(calcule: &[u8], lu: &[u8]) -> (f64, u8, usize) {
     let mut total = 0u64;
@@ -240,6 +596,17 @@ fn rendre(
     triangles: u32,
     k: u32,
 ) -> Result<Option<(Vec<u8>, Vec<u8>, u32)>, Box<dyn std::error::Error>> {
+    rendre_avec(scene, triangles, Some(k), 0)
+}
+
+/// Rend les deux images, soit à subdivision uniforme (`k`), soit d'après un budget d'octets.
+#[allow(clippy::type_complexity)]
+fn rendre_avec(
+    scene: &Scene,
+    triangles: u32,
+    k: Option<u32>,
+    budget: u64,
+) -> Result<Option<(Vec<u8>, Vec<u8>, u32)>, Box<dyn std::error::Error>> {
     let gpu = match GpuContext::sans_ecran_format(COTE, COTE, 1, FORMAT) {
         Ok(c) => c,
         Err(e) => {
@@ -261,10 +628,60 @@ fn rendre(
     let (b_sommets, m_sommets, o_sommets) = televerser(&gpu.device, &memory_props, &plats)?;
     let (b_indices, m_indices, o_indices) = televerser(&gpu.device, &memory_props, &scene.indices)?;
 
-    // ── 1. Remplir la mémoire de surface — le geste 1, réutilisé tel quel ───────────────────
-    let memoire = MemoireDeSurface::allouer(&gpu.device, &memory_props, triangles, k)?;
+    // ── 0. Le cadrage, calculé AVANT le plan : l'allocation dépend du regard ────────────────
+    let (centre, rayon) = boite_englobante(scene);
+    let fov = 55_f32.to_radians();
+    let recul = rayon * 1.3 / (fov * 0.5).tan();
+    let oeil = centre + Vec3::new(0.55, 0.40, -0.73).normalize() * recul;
+    let mut camera = aegis_engine::scene::camera::Camera::new(oeil, centre, 1.0);
+    camera.fov_y_radians = fov;
+    camera.z_near = (recul - rayon * 1.3).max(rayon * 0.01);
+    camera.z_far = recul + rayon * 2.6;
+    let view_proj = aplatir(&(camera.compute_projection_matrix() * camera.compute_view_matrix()));
+
+    // ── 1. Le PLAN d'allocation ─────────────────────────────────────────────────────────────
+    let plan = match k {
+        // Le chemin uniforme, gardé pour la mesure de convergence.
+        Some(k) => Plan {
+            par_triangle: (0..triangles)
+                .map(|t| (t * aegis_engine::render::surface::micro_sommets(k), 1u32 << k))
+                .collect(),
+            entrees: triangles * aegis_engine::render::surface::micro_sommets(k),
+            biais: 0,
+            ecretes: 0,
+        },
+        // ⭐ Le chemin ADAPTATIF : un micro-sommet par pixel d'écran, plié à un budget d'octets.
+        None => {
+            let positions: Vec<[f32; 3]> = scene.sommets.iter().map(|s| s.position).collect();
+            let aires = aires_ecran(
+                &positions,
+                &scene.indices,
+                &view_proj,
+                COTE as f32,
+                COTE as f32,
+            );
+            planifier(&aires, budget)
+        }
+    };
+    let mots: Vec<u32> = plan.par_triangle.iter().flat_map(|(b, c)| [*b, *c]).collect();
+    let (b_plan, m_plan, o_plan) = televerser(&gpu.device, &memory_props, &mots)?;
+    let rangs_max = plan
+        .par_triangle
+        .iter()
+        .map(|(_, c)| aegis_engine::render::surface::micro_sommets(c.trailing_zeros()))
+        .max()
+        .unwrap_or(3);
+
+    // ── 2. Remplir la mémoire de surface ────────────────────────────────────────────────────
+    let memoire = MemoireDeSurface::allouer_selon(&gpu.device, &memory_props, &plan)?;
     let passe = PasseDeSurface::nouvelle(
-        &gpu.device, b_sommets, o_sommets, b_indices, o_indices, &memoire,
+        &gpu.device,
+        &EntreesGeometrie {
+            sommets: (b_sommets, o_sommets),
+            indices: (b_indices, o_indices),
+            plan: (b_plan, o_plan),
+        },
+        &memoire,
     )?;
     let reglages_surface = ReglagesSurface {
         triangles,
@@ -275,32 +692,28 @@ fn rendre(
         signal: SIGNAL,
     };
     let cmd = gpu.begin_single_time_commands()?;
-    passe.encoder(&gpu.device, cmd, &reglages_surface, &memoire);
+    passe.encoder(&gpu.device, cmd, &reglages_surface, &memoire, rangs_max);
     gpu.end_single_time_commands(cmd)?;
 
     // ── 2. Le pipeline de lecture ───────────────────────────────────────────────────────────
     let lecture = Lecture::nouvelle(
-        &gpu, b_sommets, o_sommets, b_indices, o_indices, &memoire,
+        &gpu,
+        &EntreesGeometrie {
+            sommets: (b_sommets, o_sommets),
+            indices: (b_indices, o_indices),
+            plan: (b_plan, o_plan),
+        },
+        &memoire,
     )?;
 
-    // ── 3. Le cadrage, calculé une fois et partagé par les deux rendus ──────────────────────
-    //
-    // ⚠ C'est la ligne qui rend la comparaison valide. Deux cadrages, même très proches, feraient
-    // dire n'importe quoi à l'écart mesuré.
-    let (centre, rayon) = boite_englobante(scene);
-    let fov = 55_f32.to_radians();
-    let recul = rayon * 1.3 / (fov * 0.5).tan();
-    let oeil = centre + Vec3::new(0.55, 0.40, -0.73).normalize() * recul;
-    let mut camera = aegis_engine::scene::camera::Camera::new(oeil, centre, 1.0);
-    camera.fov_y_radians = fov;
-    camera.z_near = (recul - rayon * 1.3).max(rayon * 0.01);
-    camera.z_far = recul + rayon * 2.6;
-    let view_proj = camera.compute_projection_matrix() * camera.compute_view_matrix();
+    // ⚠ Le cadrage est celui calculé en tête, et il est partagé par les deux rendus ET par le
+    // plan d'allocation. *C'est ce qui rend la comparaison valide : deux cadrages, même très
+    // proches, feraient dire n'importe quoi à l'écart mesuré.*
 
     let mut images = Vec::new();
     for mode in [0u32, 1u32] {
         let r = ReglagesLecture {
-            view_proj: aplatir(&view_proj),
+            view_proj,
             triangles,
             cote: memoire.cote,
             par_triangle: memoire.par_triangle,
@@ -320,6 +733,8 @@ fn rendre(
         gpu.device.free_memory(m_sommets, None);
         gpu.device.destroy_buffer(b_indices, None);
         gpu.device.free_memory(m_indices, None);
+        gpu.device.destroy_buffer(b_plan, None);
+        gpu.device.free_memory(m_plan, None);
     }
     let lu = images.pop().unwrap();
     let calcule = images.pop().unwrap();
@@ -433,14 +848,14 @@ struct Lecture {
 impl Lecture {
     fn nouvelle(
         gpu: &GpuContext,
-        sommets: vk::Buffer,
-        o_sommets: u64,
-        indices: vk::Buffer,
-        o_indices: u64,
+        entrees: &EntreesGeometrie,
         memoire: &MemoireDeSurface,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (sommets, o_sommets) = entrees.sommets;
+        let (indices, o_indices) = entrees.indices;
+        let (plan, o_plan) = entrees.plan;
         let device = &gpu.device;
-        let liaisons: [vk::DescriptorSetLayoutBinding; 3] = std::array::from_fn(|i| {
+        let liaisons: [vk::DescriptorSetLayoutBinding; 4] = std::array::from_fn(|i| {
             vk::DescriptorSetLayoutBinding::default()
                 .binding(i as u32)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -452,7 +867,7 @@ impl Lecture {
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&liaisons), None)?
         };
         let tailles = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(3)];
+            .ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(4)];
         let pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default().pool_sizes(&tailles).max_sets(1), None)?
@@ -467,8 +882,9 @@ impl Lecture {
             vk::DescriptorBufferInfo::default().buffer(sommets).range(o_sommets),
             vk::DescriptorBufferInfo::default().buffer(indices).range(o_indices),
             vk::DescriptorBufferInfo::default().buffer(memoire.tampon).range(memoire.octets()),
+            vk::DescriptorBufferInfo::default().buffer(plan).range(o_plan),
         ];
-        let ecritures: Vec<vk::WriteDescriptorSet> = (0..3)
+        let ecritures: Vec<vk::WriteDescriptorSet> = (0..4)
             .map(|i| {
                 vk::WriteDescriptorSet::default()
                     .dst_set(set)

@@ -181,6 +181,36 @@ impl MemoireDeSurface {
         Ok(Self { tampon, memoire, entrees, cote: 1 << k, par_triangle })
     }
 
+    /// Alloue la mémoire d'après un [`Plan`](crate::render::allocation::Plan) — la subdivision
+    /// varie alors d'un triangle à l'autre.
+    ///
+    /// ⚠ **`cote` et `par_triangle` deviennent des valeurs de FAÇADE dans ce mode.** Ils ne
+    /// décrivent plus tous les triangles, seulement le premier ; l'adresse réelle se lit dans la
+    /// table du plan. *Ils sont laissés parce que le chemin uniforme les emploie encore, et un champ
+    /// qui ne veut plus dire la même chose selon le chemin est exactement le genre de piège que ce
+    /// projet paie — d'où cette phrase, faute de pouvoir les supprimer aujourd'hui.*
+    pub fn allouer_selon(
+        device: &ash::Device,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        plan: &crate::render::allocation::Plan,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (tampon, memoire) = MemoryManager::create_buffer(
+            device,
+            memory_props,
+            plan.octets().max(OCTETS_PAR_ENTREE),
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        let premier = plan.par_triangle.first().map(|(_, c)| *c).unwrap_or(1);
+        Ok(Self {
+            tampon,
+            memoire,
+            entrees: plan.entrees,
+            cote: premier,
+            par_triangle: micro_sommets(premier.trailing_zeros()),
+        })
+    }
+
     /// Les octets réellement occupés.
     pub fn octets(&self) -> u64 {
         self.entrees as u64 * OCTETS_PAR_ENTREE
@@ -214,6 +244,58 @@ impl MemoireDeSurface {
             device.free_memory(self.memoire, None);
         }
     }
+}
+
+/// ⭐⭐ **La LECTURE, côté processeur — le pendant exact de `lire_surface` dans `lecture.wgsl`.**
+///
+/// Trouve le micro-triangle qui contient $(u,v)$ et interpole entre ses trois coins.
+///
+/// ## Pourquoi elle existe en double
+///
+/// Non pas pour le rendu — l'écran lit sur la carte — mais pour **mesurer ce qu'aucune image ne
+/// tranche** : le saut d'une valeur de part et d'autre d'une arête partagée par deux triangles de
+/// subdivisions différentes. *Une carte d'écart ne peut pas répondre à cette question : elle varie
+/// par triangle dès que la densité varie, qu'il y ait couture ou non.*
+///
+/// ⚠ **C'est une ré-implémentation, avec ce que ça coûte :** une erreur de conception partagée par
+/// les deux chemins passerait. Le test `les_deux_lectures_disent_la_meme_chose` la contraint au
+/// moins à rester alignée sur l'arithmétique du shader.
+pub fn lire_interpole(
+    entrees: &[[f32; 3]],
+    base: u32,
+    n: u32,
+    u: f32,
+    v: f32,
+) -> [f32; 3] {
+    let uu = u.clamp(0.0, 1.0);
+    let vv = v.clamp(0.0, 1.0 - uu);
+    let (gu, gv) = (uu * n as f32, vv * n as f32);
+    let mut i = gu.floor() as u32;
+    let mut j = gv.floor() as u32;
+    if i + j >= n {
+        // Sur l'arête, on recule d'une cellule pour rester dans le domaine.
+        if i > 0 {
+            i = i.saturating_sub(1);
+        } else {
+            j = j.saturating_sub(1);
+        }
+    }
+    let (fu, fv) = (gu - i as f32, gv - j as f32);
+    let e = |di: u32, dj: u32| entrees[(base + rang(i + di, j + dj, n)) as usize];
+    // ⚠⚠ `i + j + 2 <= n` N'EST PAS UNE PRÉCAUTION : sans lui, la branche « micro-triangle
+    // inversé » atteint le coin (i+1, j+1), qui n'existe pas sur la dernière cellule.
+    //
+    // En théorie le cas ne peut pas se produire — sur la diagonale extérieure, `i + j = n − 1`
+    // force `fu + fv ≤ 1`. **En virgule flottante, si.** Un `fu + fv` qui vaut 1,0000001 fait
+    // basculer dans la mauvaise branche. *Ici ça panique, et c'est une chance : dans le shader, le
+    // même dépassement lirait la plage du triangle SUIVANT et rendrait une image plausible.*
+    let inverse = fu + fv > 1.0 && i + j + 2 <= n;
+    let (p0, p1, p2, w0, w1, w2) = if !inverse {
+        (e(0, 0), e(1, 0), e(0, 1), 1.0 - fu - fv, fu, fv)
+    } else {
+        (e(1, 0), e(0, 1), e(1, 1), 1.0 - fv, 1.0 - fu, fu + fv - 1.0)
+    };
+    std::array::from_fn(|c| p0[c] * w0 + p1[c] * w1 + p2[c] * w2)
 }
 
 /// Défait un `pack2x16float` du WGSL : deux demi-flottants IEEE-754 dans un `u32`.
@@ -267,6 +349,20 @@ pub struct Reglages {
     pub signal: [f32; 4],
 }
 
+/// Les trois tampons que la passe LIT : la géométrie, et le plan d'allocation.
+///
+/// *Regroupés parce qu'ils voyagent toujours ensemble — et parce qu'une fonction à huit paramètres
+/// dont six sont des paires est une fonction où l'on finit par intervertir deux arguments du même
+/// type sans qu'aucun compilateur ne le dise.*
+pub struct EntreesGeometrie {
+    /// `(tampon, octets)` des sommets, en flottants bruts.
+    pub sommets: (vk::Buffer, u64),
+    /// `(tampon, octets)` des indices.
+    pub indices: (vk::Buffer, u64),
+    /// `(tampon, octets)` du plan d'allocation : deux `u32` par triangle.
+    pub plan: (vk::Buffer, u64),
+}
+
 /// La passe de calcul qui remplit la mémoire de surface.
 pub struct PasseDeSurface {
     layout_descripteur: vk::DescriptorSetLayout,
@@ -280,13 +376,13 @@ impl PasseDeSurface {
     /// Construit la passe et la branche sur les trois tampons qu'elle lit et écrit.
     pub fn nouvelle(
         device: &ash::Device,
-        sommets: vk::Buffer,
-        octets_sommets: u64,
-        indices: vk::Buffer,
-        octets_indices: u64,
+        entrees: &EntreesGeometrie,
         memoire: &MemoireDeSurface,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let liaisons: [vk::DescriptorSetLayoutBinding; 3] = std::array::from_fn(|i| {
+        let (sommets, octets_sommets) = entrees.sommets;
+        let (indices, octets_indices) = entrees.indices;
+        let (plan, octets_plan) = entrees.plan;
+        let liaisons: [vk::DescriptorSetLayoutBinding; 4] = std::array::from_fn(|i| {
             vk::DescriptorSetLayoutBinding::default()
                 .binding(i as u32)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -302,7 +398,7 @@ impl PasseDeSurface {
 
         let tailles = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(3)];
+            .descriptor_count(4)];
         let pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default().pool_sizes(&tailles).max_sets(1),
@@ -321,8 +417,9 @@ impl PasseDeSurface {
             vk::DescriptorBufferInfo::default().buffer(sommets).offset(0).range(octets_sommets),
             vk::DescriptorBufferInfo::default().buffer(indices).offset(0).range(octets_indices),
             vk::DescriptorBufferInfo::default().buffer(memoire.tampon).offset(0).range(memoire.octets()),
+            vk::DescriptorBufferInfo::default().buffer(plan).offset(0).range(octets_plan),
         ];
-        let ecritures: Vec<vk::WriteDescriptorSet> = (0..3)
+        let ecritures: Vec<vk::WriteDescriptorSet> = (0..4)
             .map(|i| {
                 vk::WriteDescriptorSet::default()
                     .dst_set(set)
@@ -384,7 +481,14 @@ impl PasseDeSurface {
     /// image à moitié écrite sans qu'aucune erreur ne soit levée. *Elle est donc gardée pour ce
     /// jour-là — mais écrire qu'elle « corrige un défaut » aujourd'hui serait une garantie que le
     /// code ne tient pas, et c'est une mutation qui l'a montré, pas une relecture.*
-    pub fn encoder(&self, device: &ash::Device, cmd: vk::CommandBuffer, reglages: &Reglages, memoire: &MemoireDeSurface) {
+    pub fn encoder(
+        &self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        reglages: &Reglages,
+        memoire: &MemoireDeSurface,
+        rangs_max: u32,
+    ) {
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
             device.cmd_bind_descriptor_sets(
@@ -401,9 +505,15 @@ impl PasseDeSurface {
             );
             device.cmd_push_constants(cmd, self.layout, vk::ShaderStageFlags::COMPUTE, 0, octets);
             // Un fil par micro-sommet en X, un triangle en Y. Le groupe fait 64 en X.
+            //
+            // ⚠ `rangs_max` est le nombre de micro-sommets du triangle **le plus subdivisé** — pas
+            // une moyenne. Les fils en trop d'un triangle grossier sortent dans le shader, qui relit
+            // la subdivision réelle dans le plan. *C'est le gaspillage assumé d'un dispatch
+            // rectangulaire sur une allocation qui ne l'est pas ; le mesurer est le chantier
+            // suivant, l'ignorer serait le vrai défaut.*
             device.cmd_dispatch(
                 cmd,
-                ComputePipelineManager::calculate_workgroup_count(memoire.par_triangle, 64),
+                ComputePipelineManager::calculate_workgroup_count(rangs_max, 64),
                 reglages.triangles,
                 1,
             );
@@ -488,6 +598,55 @@ mod tests {
         assert_eq!(demi_vers_f32(0x3800), 0.5);
         assert_eq!(demi_vers_f32(0xbc00), -1.0);
         assert!((demi_vers_f32(0x3555) - 1.0 / 3.0).abs() < 1e-3);
+    }
+
+    /// ⭐ La lecture processeur doit rendre exactement la valeur stockée AUX micro-sommets.
+    ///
+    /// *Si elle ne le fait pas, toute mesure de couture bâtie dessus accuserait l'allocation d'un
+    /// défaut qui viendrait de l'instrument.*
+    #[test]
+    fn la_lecture_rend_les_valeurs_aux_micro_sommets() {
+        let n = 4u32;
+        let total = micro_sommets(2) as usize;
+        // Une valeur reconnaissable par micro-sommet : son propre rang.
+        let entrees: Vec<[f32; 3]> = (0..total).map(|r| [r as f32, 0.0, 0.0]).collect();
+        for j in 0..=n {
+            for i in 0..=(n - j) {
+                let lu = lire_interpole(&entrees, 0, n, i as f32 / n as f32, j as f32 / n as f32);
+                assert!(
+                    (lu[0] - rang(i, j, n) as f32).abs() < 1e-3,
+                    "au micro-sommet ({i},{j}) la lecture rend {} au lieu de {}",
+                    lu[0],
+                    rang(i, j, n)
+                );
+            }
+        }
+    }
+
+    /// Entre deux micro-sommets, la lecture doit rester DANS l'intervalle de ses trois coins.
+    ///
+    /// *Une interpolation dont les poids ne somment pas à 1, ou qui piocherait hors du
+    /// micro-triangle, sortirait de cet encadrement — et rendrait une image plausible.*
+    #[test]
+    fn la_lecture_n_invente_jamais_de_valeur_hors_des_coins() {
+        let n = 8u32;
+        let total = micro_sommets(3) as usize;
+        let entrees: Vec<[f32; 3]> = (0..total).map(|r| [(r % 17) as f32, 0.0, 0.0]).collect();
+        let (mut mini, mut maxi) = (f32::MAX, f32::MIN);
+        for e in &entrees {
+            mini = mini.min(e[0]);
+            maxi = maxi.max(e[0]);
+        }
+        for a in 0..=40 {
+            for b in 0..=40 {
+                let (u, v) = (a as f32 / 40.0, b as f32 / 40.0);
+                if u + v > 1.0 {
+                    continue;
+                }
+                let lu = lire_interpole(&entrees, 0, n, u, v)[0];
+                assert!(lu >= mini - 1e-3 && lu <= maxi + 1e-3, "({u},{v}) rend {lu}");
+            }
+        }
     }
 
     /// Le format d'une entrée est un poste de budget : le figer ici rend tout changement visible.

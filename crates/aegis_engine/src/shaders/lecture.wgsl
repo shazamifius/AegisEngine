@@ -43,6 +43,9 @@ var<push_constant> reglages: Reglages;
 @group(0) @binding(0) var<storage, read> sommets: array<f32>;
 @group(0) @binding(1) var<storage, read> indices: array<u32>;
 @group(0) @binding(2) var<storage, read> surface: array<u32>;
+// ⭐ Le plan d'allocation : deux u32 par triangle (sa base, ses segments par arête). L'adresse se
+// LIT, elle ne se calcule plus — c'est ce que coûte une subdivision qui varie d'un triangle à l'autre.
+@group(0) @binding(3) var<storage, read> plan: array<u32>;
 
 const FLOTTANTS_PAR_SOMMET: u32 = 14u;
 
@@ -61,8 +64,8 @@ fn debut_rangee(j: u32, n: u32) -> u32 {
 }
 
 // Lit une entrée de la mémoire de surface : deux u32, quatre demi-flottants, dont trois utilisés.
-fn entree(triangle: u32, i: u32, j: u32, n: u32) -> vec3<f32> {
-    let base = (triangle * reglages.par_triangle + debut_rangee(j, n) + i) * 2u;
+fn entree(base_tri: u32, i: u32, j: u32, n: u32) -> vec3<f32> {
+    let base = (base_tri + debut_rangee(j, n) + i) * 2u;
     let rv = unpack2x16float(surface[base]);
     let b = unpack2x16float(surface[base + 1u]);
     return vec3<f32>(rv.x, rv.y, b.x);
@@ -84,7 +87,8 @@ fn entree(triangle: u32, i: u32, j: u32, n: u32) -> vec3<f32> {
 // parcours : deux planchers et une comparaison. C'est ce que l'adresse barycentrique achète, et
 // c'est l'argument que le budget ne mesurait pas.
 fn lire_surface(triangle: u32, u: f32, v: f32) -> vec3<f32> {
-    let n = reglages.cote;
+    let base_tri = plan[triangle * 2u];
+    let n = plan[triangle * 2u + 1u];
     let fn_ = f32(n);
     // ⚠ Le clamp n'est pas une prudence : à u + v == 1 exactement — sur l'arête opposée au premier
     // coin — le plancher rendrait i + j == n et le coin (i+1, j+1) sortirait du triangle, où il
@@ -103,14 +107,22 @@ fn lire_surface(triangle: u32, u: f32, v: f32) -> vec3<f32> {
     let fu = U - f32(i);
     let fv = V - f32(j);
 
-    if (fu + fv <= 1.0) {
-        return (1.0 - fu - fv) * entree(triangle, i, j, n)
-             + fu * entree(triangle, i + 1u, j, n)
-             + fv * entree(triangle, i, j + 1u, n);
+    // ⚠⚠ `i + j + 2u <= n` N'EST PAS UNE PRÉCAUTION : sans lui, la branche du micro-triangle
+    // inversé atteint le coin (i+1, j+1), qui n'existe pas sur la dernière cellule. En théorie le
+    // cas ne peut pas arriver — sur la diagonale extérieure, i+j = n−1 force fu+fv ≤ 1 — mais en
+    // virgule flottante un fu+fv à 1,0000001 y bascule.
+    //
+    // *Ici il n'y aurait aucune erreur : la lecture irait chercher dans la plage du triangle
+    // SUIVANT et rendrait une image plausible. C'est un test Rust sur la même arithmétique qui l'a
+    // trouvé, parce que là-bas un index hors bornes panique au lieu de mentir.*
+    if (fu + fv <= 1.0 || i + j + 2u > n) {
+        return (1.0 - fu - fv) * entree(base_tri, i, j, n)
+             + fu * entree(base_tri, i + 1u, j, n)
+             + fv * entree(base_tri, i, j + 1u, n);
     }
-    return (1.0 - fv) * entree(triangle, i + 1u, j, n)
-         + (1.0 - fu) * entree(triangle, i, j + 1u, n)
-         + (fu + fv - 1.0) * entree(triangle, i + 1u, j + 1u, n);
+    return (1.0 - fv) * entree(base_tri, i + 1u, j, n)
+         + (1.0 - fu) * entree(base_tri, i, j + 1u, n)
+         + (fu + fv - 1.0) * entree(base_tri, i + 1u, j + 1u, n);
 }
 
 struct Sortie {

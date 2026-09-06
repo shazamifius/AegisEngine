@@ -1,3 +1,4 @@
+pub mod allocation;
 pub mod cadre;
 pub mod compute_pipeline;
 pub mod cibles;

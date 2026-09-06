@@ -35,6 +35,12 @@ var<push_constant> reglages: Reglages;
 @group(0) @binding(0) var<storage, read> sommets: array<f32>;
 @group(0) @binding(1) var<storage, read> indices: array<u32>;
 @group(0) @binding(2) var<storage, read_write> surface: array<u32>;
+// ⭐ LE PLAN D'ALLOCATION — deux u32 par triangle : sa base, et son nombre de segments par arête.
+//
+// C'est ce qui remplace `triangle * par_triangle`. La subdivision cesse d'être uniforme, donc
+// l'adresse cesse d'être une multiplication : elle devient une LECTURE. *Huit octets par triangle,
+// et c'est le prix exact de la non-uniformité — il faut le dire, pas le cacher dans une formule.*
+@group(0) @binding(3) var<storage, read> plan: array<u32>;
 
 const FLOTTANTS_PAR_SOMMET: u32 = 14u;
 
@@ -79,11 +85,20 @@ fn depuis_rang(r: u32, n: u32) -> vec2<u32> {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let rang = gid.x;      // le micro-sommet dans son triangle
     let triangle = gid.y;  // le triangle du maillage
-    if (triangle >= reglages.triangles || rang >= reglages.par_triangle) {
+    if (triangle >= reglages.triangles) {
         return;
     }
 
-    let n = reglages.cote;
+    // L'adresse se LIT : ce triangle a sa propre base et sa propre subdivision.
+    let base_tri = plan[triangle * 2u];
+    let n = plan[triangle * 2u + 1u];
+    // ⚠ Le dispatch est dimensionné sur le PLUS SUBDIVISÉ des triangles ; les fils en trop d'un
+    // triangle grossier sortent ici. *Sans ce test, ils écriraient dans la plage du triangle
+    // suivant — un débordement silencieux qui rendrait une image presque juste.*
+    let sommets_ici = (n + 1u) * (n + 2u) / 2u;
+    if (rang >= sommets_ici) {
+        return;
+    }
     let ij = depuis_rang(rang, n);
     // La coordonnée barycentrique — c'est ELLE l'adresse, et elle ne coûte qu'une division.
     let u = f32(ij.x) / f32(n);
@@ -112,7 +127,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let modulation = reglages.signal.xyz * (0.5 + 0.5 * sin(p * reglages.signal.w));
     let lumiere = modulation * lambert;
 
-    let base = (triangle * reglages.par_triangle + rang) * 2u;
+    let base = (base_tri + rang) * 2u;
     surface[base] = pack2x16float(vec2<f32>(lumiere.x, lumiere.y));
     surface[base + 1u] = pack2x16float(vec2<f32>(lumiere.z, 0.0));
 }

@@ -47,8 +47,9 @@ use aegis_engine::core::gpu_context::GpuContext;
 use aegis_engine::core::math::Vec3;
 use aegis_engine::core::memory::MemoryManager;
 use aegis_engine::geometry::glb_loader::GlbLoader;
+use aegis_engine::render::allocation::Plan;
 use aegis_engine::render::surface::{
-    depuis_rang, micro_sommets, MemoireDeSurface, PasseDeSurface, Reglages, OCTETS_PAR_ENTREE,
+    depuis_rang, EntreesGeometrie, micro_sommets, MemoireDeSurface, PasseDeSurface, Reglages, OCTETS_PAR_ENTREE,
 };
 use ash::vk;
 use std::path::PathBuf;
@@ -166,13 +167,26 @@ fn remplir(
     let (tampon_indices, mem_indices, octets_indices) =
         televerser(&gpu.device, &memory_props, &scene.indices)?;
 
+    // ⚠ Ce banc reste en subdivision UNIFORME, exprès : il vérifie l'ADRESSAGE, et un plan
+    // uniforme est le cas où la vérification processeur reste lisible. *L'allocation adaptative se
+    // mesure dans `lire_surface`, qui sait voir une couture ; ici elle brouillerait le sujet.*
+    let plan = Plan {
+        par_triangle: (0..triangles).map(|t| (t * micro_sommets(k), 1u32 << k)).collect(),
+        entrees: triangles * micro_sommets(k),
+        biais: 0,
+        ecretes: 0,
+    };
+    let mots: Vec<u32> = plan.par_triangle.iter().flat_map(|(b, c)| [*b, *c]).collect();
+    let (tampon_plan, mem_plan, octets_plan) = televerser(&gpu.device, &memory_props, &mots)?;
+
     let memoire = MemoireDeSurface::allouer(&gpu.device, &memory_props, triangles, k)?;
     let passe = PasseDeSurface::nouvelle(
         &gpu.device,
-        tampon_sommets,
-        octets_sommets,
-        tampon_indices,
-        octets_indices,
+        &EntreesGeometrie {
+            sommets: (tampon_sommets, octets_sommets),
+            indices: (tampon_indices, octets_indices),
+            plan: (tampon_plan, octets_plan),
+        },
         &memoire,
     )?;
 
@@ -186,7 +200,7 @@ fn remplir(
     };
 
     let cmd = gpu.begin_single_time_commands()?;
-    passe.encoder(&gpu.device, cmd, &reglages, &memoire);
+    passe.encoder(&gpu.device, cmd, &reglages, &memoire, memoire.par_triangle);
     gpu.end_single_time_commands(cmd)?;
 
     let relu = memoire.relire(&gpu.device)?;
@@ -200,6 +214,8 @@ fn remplir(
         gpu.device.free_memory(mem_sommets, None);
         gpu.device.destroy_buffer(tampon_indices, None);
         gpu.device.free_memory(mem_indices, None);
+        gpu.device.destroy_buffer(tampon_plan, None);
+        gpu.device.free_memory(mem_plan, None);
     }
     Ok(Some((mesure, entrees)))
 }
