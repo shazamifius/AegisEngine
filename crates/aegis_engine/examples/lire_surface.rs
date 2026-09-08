@@ -39,6 +39,7 @@ use aegis_engine::core::math::Vec3;
 use aegis_engine::core::memory::MemoryManager;
 use aegis_engine::geometry::glb_loader::{GlbLoader, Scene};
 use aegis_engine::render::allocation::{aires_ecran, encoder_pour_gpu, planifier, raccorder, Plan};
+use aegis_engine::render::placement::Placement;
 use aegis_engine::render::pipeline::{Faces, Melange, PipelineFactory, Reglages as ReglagesPipeline};
 use aegis_engine::render::surface::{EntreesGeometrie, MemoireDeSurface, PasseDeSurface, Reglages as ReglagesSurface, OCTETS_PAR_ENTREE};
 use ash::vk;
@@ -124,6 +125,7 @@ fn main() {
     }
     convergence(&scene, triangles);
     allocation(&scene, triangles);
+    adresse_stable(&scene, triangles);
 }
 
 /// ⭐⭐⭐ L'ALLOCATION ADAPTATIVE — le chantier 0.2, et la question qu'il pose vraiment.
@@ -158,7 +160,7 @@ fn allocation(scene: &Scene, triangles: u32) {
     let positions: Vec<[f32; 3]> = scene.sommets.iter().map(|s| s.position).collect();
     let mut lignes = Vec::new();
     for budget in [64_000u64, 256_000, 1_000_000, 4_000_000, 16_000_000] {
-        match rendre_avec(scene, triangles, None, budget) {
+        match rendre_avec(scene, triangles, None, budget, None) {
             Ok(Some((calcule, lu, entrees))) => {
                 let (moyen, _, _) = ecart(&calcule, &lu);
                 // ⚠ La carte du budget le plus SERRÉ au-dessus du plancher : c'est là que les
@@ -643,7 +645,7 @@ fn rendre(
     triangles: u32,
     k: u32,
 ) -> Result<Option<(Vec<u8>, Vec<u8>, u32)>, Box<dyn std::error::Error>> {
-    rendre_avec(scene, triangles, Some(k), 0)
+    rendre_avec(scene, triangles, Some(k), 0, None)
 }
 
 /// Rend les deux images, soit à subdivision uniforme (`k`), soit d'après un budget d'octets.
@@ -653,6 +655,7 @@ fn rendre_avec(
     triangles: u32,
     k: Option<u32>,
     budget: u64,
+    placement: Option<&Placement>,
 ) -> Result<Option<(Vec<u8>, Vec<u8>, u32)>, Box<dyn std::error::Error>> {
     let gpu = match GpuContext::sans_ecran_format(COTE, COTE, 1, FORMAT) {
         Ok(c) => c,
@@ -711,7 +714,13 @@ fn rendre_avec(
             let mut plan = planifier(&aires, budget);
             // ⭐ Le raccord : sans lui, deux voisins de subdivisions différentes cousent leur arête.
             raccorder(&mut plan, &positions, &scene.indices);
-            plan
+            // ⭐⭐ Et si un placement est fourni, les BASES viennent de lui. *Les niveaux d'arêtes,
+            // eux, sont ceux du raccord ci-dessus : le raccord dépend des voisins, jamais de
+            // l'endroit où la mémoire vit.*
+            match placement {
+                Some(p) => p.appliquer(&plan),
+                None => plan,
+            }
         }
     };
     let mots = encoder_pour_gpu(&plan);
@@ -1187,6 +1196,116 @@ fn ecrire_png(chemin: &Path, rvb: &[u8]) {
             }
         }
         Err(e) => println!("  ⚠ encodage PNG impossible : {e}"),
+    }
+}
+
+/// ⭐⭐⭐ **L'ADRESSE STABLE — et la seule preuve qui compte : l'image ne doit PAS changer.**
+///
+/// Le banc `persistance` a mesuré que l'adressage cumulatif fait déplacer **96,3 %** de la mémoire
+/// par image alors que **0,52 %** seulement cesse d'être vrai, et
+/// [`Placement`](aegis_engine::render::placement::Placement) le corrige en donnant à chaque triangle
+/// un bloc qui ne bouge pas tant que sa subdivision ne bouge pas.
+///
+/// **Mais tout ça est de l'arithmétique.** Un placement qui rendrait une adresse fausse produirait
+/// exactement les mêmes beaux chiffres — *une adresse fausse ne lève aucune erreur, elle rend une
+/// image presque juste.* La seule chose qui tranche est l'image.
+///
+/// ## ⚠⚠ ET LE PIÈGE QUI RENDRAIT CETTE GARDE CREUSE
+///
+/// À sa **première** mise à jour, le placement sert les triangles dans l'ordre, depuis une arène
+/// vide : ses bases sont alors **rigoureusement celles du cumulatif**. Comparer les deux images à ce
+/// moment-là ne prouverait rien du tout — les deux chemins seraient le même chemin.
+///
+/// *On fait donc d'abord bouger la caméra pour créer des trous et forcer la réutilisation de blocs,
+/// et on VÉRIFIE que les bases diffèrent réellement avant de juger l'image.* **Sans cette
+/// vérification, un test vert ne dirait rien.**
+///
+/// ## Le critère, écrit avant
+///
+/// **Les deux images doivent être identiques AU BIT PRÈS.** Aucune tolérance, et ce n'est pas de la
+/// sévérité : le placement ne change que l'**endroit** où une valeur vit, jamais sa valeur. *Un
+/// seuil ici masquerait précisément le défaut qu'on cherche.*
+fn adresse_stable(scene: &Scene, triangles: u32) {
+    titre("L'ADRESSE STABLE — la mémoire vit ailleurs, l'image ne bouge pas");
+    println!("  Critère écrit AVANT : les deux images IDENTIQUES AU BIT PRÈS.");
+    println!("  *Le placement change l'endroit, jamais la valeur — une tolérance masquerait le défaut.*\n");
+
+    let positions: Vec<[f32; 3]> = scene.sommets.iter().map(|s| s.position).collect();
+    let budget = 4_000_000u64;
+
+    // ── Brasser : une caméra qui tourne, pour que des blocs soient rendus puis repris ────────
+    let (centre, rayon) = boite_englobante(scene);
+    let fov = 55_f32.to_radians();
+    let recul = rayon * 1.3 / (fov * 0.5).tan();
+    let direction = Vec3::new(0.55, 0.40, -0.73).normalize();
+    let oeil = centre + direction * recul;
+    let vue = (centre - oeil).normalize();
+
+    let mut placement = Placement::nouveau(triangles as usize);
+    for pas in 0..16 {
+        // On balaie jusqu'à 40°, puis on revient exactement au cadrage du banc.
+        let a = (if pas < 8 { pas as f32 } else { (15 - pas) as f32 } * 5.0).to_radians();
+        let (sn, cs) = a.sin_cos();
+        let tournee = Vec3::new(vue.x * cs + vue.z * sn, vue.y, -vue.x * sn + vue.z * cs);
+        let mut camera = aegis_engine::scene::camera::Camera::new(oeil, oeil + tournee * recul, 1.0);
+        camera.fov_y_radians = fov;
+        camera.z_near = (recul - rayon * 1.3).max(rayon * 0.01);
+        camera.z_far = recul + rayon * 2.6;
+        let vp = aplatir(&(camera.compute_projection_matrix() * camera.compute_view_matrix()));
+        let aires = aires_ecran(&positions, &scene.indices, &vp, COTE as f32, COTE as f32);
+        let modele = planifier(&aires, budget);
+        let k: Vec<u32> = modele.par_triangle.iter().map(|(_, c)| c.trailing_zeros()).collect();
+        placement.mettre_a_jour(&k, budget);
+    }
+
+    // ── La garde anti-test-creux : les bases DOIVENT différer ────────────────────────────────
+    let aires = aires_ecran(&positions, &scene.indices, &view_proj_du_banc(scene), COTE as f32, COTE as f32);
+    let mut modele = planifier(&aires, budget);
+    raccorder(&mut modele, &positions, &scene.indices);
+    let k: Vec<u32> = modele.par_triangle.iter().map(|(_, c)| c.trailing_zeros()).collect();
+    placement.mettre_a_jour(&k, budget);
+    let place = placement.appliquer(&modele);
+
+    let differentes = (0..triangles as usize)
+        .filter(|t| place.par_triangle[*t].0 != modele.par_triangle[*t].0)
+        .count();
+    println!("  Brassage : 16 images de caméra tournante, puis retour au cadrage du banc.");
+    println!("  Triangles dont la base DIFFÈRE du cumulatif : {differentes} sur {triangles}");
+    println!("  Empreinte : {} Ko placée contre {} Ko cumulée (fragmentation {:.3}×)",
+        place.octets() / 1024, modele.octets() / 1024, placement.fragmentation());
+
+    if differentes == 0 {
+        println!("\n  ⛔ AUCUNE base ne diffère : les deux chemins sont le MÊME chemin, et cette");
+        println!("     comparaison ne prouverait rien. Ne rien conclure.");
+        return;
+    }
+
+    // ── Les deux rendus ─────────────────────────────────────────────────────────────────────
+    let cumulatif = match rendre_avec(scene, triangles, None, budget, None) {
+        Ok(Some((_, lu, _))) => lu,
+        _ => { println!("\n  ⚠ Aucun Vulkan joignable — le banc ne peut rien conclure."); return; }
+    };
+    let stable = match rendre_avec(scene, triangles, None, budget, Some(&placement)) {
+        Ok(Some((_, lu, _))) => lu,
+        _ => { println!("\n  ⚠ Aucun Vulkan joignable — le banc ne peut rien conclure."); return; }
+    };
+
+    let differents = cumulatif.iter().zip(&stable).filter(|(a, b)| a != b).count();
+    let pire = cumulatif.iter().zip(&stable)
+        .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
+        .max()
+        .unwrap_or(0);
+
+    println!("\n  Sous-pixels différents : {differents} sur {} · pire écart : {pire}",
+        cumulatif.len());
+    if differents == 0 {
+        println!("\n  ⇒ ✅ IDENTIQUES AU BIT PRÈS, avec {differentes} triangles adressés ailleurs.");
+        println!("     *L'adresse stable ne coûte rien à l'image : elle ne change que l'endroit.*");
+    } else {
+        println!("\n  ⇒ ⛔ LES DEUX IMAGES DIFFÈRENT. Le placement rend une adresse fausse, et");
+        println!("     aucun chiffre du banc `persistance` n'est interprétable tant que ce n'est");
+        println!("     pas fermé. *Une adresse fausse ne lève aucune erreur : elle rend une image");
+        println!("     presque juste.*");
     }
 }
 

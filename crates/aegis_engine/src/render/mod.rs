@@ -9,6 +9,7 @@ pub mod instances;
 pub mod occlusion;
 pub mod ombre;
 pub mod pipeline;
+pub mod placement;
 pub mod push_constants;
 pub mod surface;
 pub mod texture;

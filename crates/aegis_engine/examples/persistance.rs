@@ -43,6 +43,20 @@
 //! répond sur la bonne grandeur, noyée dans autre chose — et il rend un chiffre stable et
 //! plausible.*
 //!
+//! ## ⭐⭐ LE SECOND RÉGIME — l'adresse STABLE, et son critère écrit AVANT
+//!
+//! Depuis le 8 septembre, [`Placement`] donne à chaque triangle un bloc qui **ne bouge pas** tant
+//! que sa subdivision ne bouge pas — une free-list par classe de taille, le patron que *Shading
+//! Atlas Streaming* appelle *« superblock scheme inspired by memory management »*.
+//!
+//! Ce banc mesure donc **les deux régimes côte à côte**, sur exactement la même séquence.
+//!
+//! | | Le critère, écrit avant |
+//! |---|---|
+//! | **le travail réécrit** | doit tomber **sous 5 %** par image en mouvement ordinaire, contre ~97 % en cumulatif. *Sinon l'adresse stable ne sert à rien et il faut le dire.* |
+//! | **la fragmentation** | ne doit pas dépasser **2× l'empreinte utile**. ⚠ C'est le critère d'invalidation de `02-THESE.md` — *« une empreinte non bornée »* — et sans coalescence, le risque est réel |
+//! | **le témoin** | caméra immobile : **0 %** réécrit après la première image, et fragmentation exactement **1,00** |
+//!
 //! ## Ce que ce banc ne prouve PAS
 //!
 //! - **Rien sur le coût réel d'une réécriture partielle.** Il compte des entrées invalidées, pas des
@@ -55,6 +69,7 @@
 use aegis_engine::core::math::Vec3;
 use aegis_engine::geometry::glb_loader::{GlbLoader, Scene};
 use aegis_engine::render::allocation::{aires_ecran, planifier, raccorder, Plan};
+use aegis_engine::render::placement::Placement;
 use aegis_engine::render::surface::micro_sommets;
 use std::path::PathBuf;
 
@@ -199,6 +214,7 @@ fn main() {
             "  {:>20} {:>8} {:>9} {:>12} {:>12} {:>10}",
             "mouvement", "biais≠", "tri. k≠", "invalidé/img", "à déplacer", "pire img"
         );
+        println!("  {:>20} {:>8} {:>9} {:>12} {:>12} {:>10}", "", "", "", "", "▼ STABLE", "frag.");
 
         for m in &mouvements {
             let deltas = simuler(&scene, budget, m);
@@ -219,8 +235,20 @@ fn main() {
                 pire * 100.0
             );
 
-            if m.temoin && deltas.iter().any(|d| d.recalcul + d.bord + d.deplacees > 0) {
-                temoin_propre = false;
+            // ⭐ Le même mouvement, adresse stable.
+            let (stable_moyen, stable_pire, frag) = simuler_stable(&scene, budget, m);
+            println!(
+                "  {:>20} {:>8} {:>9} {:>11.2}% {:>11.2}% {:>9.2}×",
+                "└─ adresse stable", "", "", stable_moyen * 100.0, stable_pire * 100.0, frag
+            );
+
+            if m.temoin {
+                if deltas.iter().any(|d| d.recalcul + d.bord + d.deplacees > 0) {
+                    temoin_propre = false;
+                }
+                if stable_moyen > 0.0 || (frag - 1.0).abs() > 1e-9 {
+                    temoin_propre = false;
+                }
             }
         }
         println!();
@@ -266,8 +294,60 @@ fn main() {
     println!("       {:.2} % ; le reste est de la copie que rien n'oblige à faire.*", deltas.iter().map(|d| d.invalide()).sum::<f64>() / n * 100.0);
 
     println!();
+    fragmentation_longue(&scene, 4_000_000);
+
+    titre("CE QUE ÇA NE DIT PAS");
     println!("  ⚠ Ce banc ne dit RIEN du coût en millisecondes d'une réécriture partielle, ni");
     println!("    d'une vraie scène ouverte. Il dit ce qui CESSE D'ÊTRE VALIDE, et rien de plus.");
+}
+
+/// Le second régime : le même mouvement, mais avec un placement à adresse stable.
+///
+/// ## ⚠ Ce qui est compté comme réécrit, et pourquoi les deux termes comptent
+///
+/// 1. **Les triangles relogés** — leur subdivision a changé, donc leur bloc aussi : tout leur
+///    contenu est à recalculer. *C'est irréductible : ça ne dépend pas de l'adressage.*
+/// 2. **Les bords dont le raccord a changé** — un triangle peut garder sa place ET sa subdivision,
+///    et voir le niveau effectif d'une de ses arêtes bouger parce qu'un **voisin** a changé.
+///    *L'oublier ferait annoncer un gain trop beau, et l'image montrerait une couture.*
+fn simuler_stable(scene: &Scene, budget: u64, m: &Mouvement) -> (f64, f64, f64) {
+    let positions: Vec<[f32; 3]> = scene.sommets.iter().map(|s| s.position).collect();
+    let triangles = scene.indices.len() / 3;
+    let mut placement = Placement::nouveau(triangles);
+    let mut aretes_avant: Option<Vec<[u32; 3]>> = None;
+    let (mut somme, mut pire, mut frag) = (0.0f64, 0.0f64, 1.0f64);
+    let mut mesures = 0usize;
+
+    for image in 0..IMAGES {
+        let t = image as f32 / HZ;
+        let vp = camera_a(scene, m.degres_par_seconde * t, m.metres_par_seconde * t);
+        let aires = aires_ecran(&positions, &scene.indices, &vp, COTE, COTE);
+        let modele = planifier(&aires, budget);
+        let k_voulu: Vec<u32> = modele.par_triangle.iter().map(|(_, c)| c.trailing_zeros()).collect();
+
+        let deplacement = placement.mettre_a_jour(&k_voulu, budget);
+        let mut plan = placement.appliquer(&modele);
+        raccorder(&mut plan, &positions, &scene.indices);
+
+        // La première image ne mesure rien : tout y est neuf par construction.
+        if let Some(avant) = &aretes_avant {
+            let relogés: std::collections::HashSet<u32> = deplacement.relogés.iter().copied().collect();
+            let mut bord = 0u64;
+            for (t, aretes_avant) in avant.iter().enumerate() {
+                if !relogés.contains(&(t as u32)) && *aretes_avant != plan.aretes[t] {
+                    bord += (3 * plan.par_triangle[t].1) as u64;
+                }
+            }
+            let part = (deplacement.entrees_relogées + bord) as f64
+                / deplacement.entrees_totales.max(1) as f64;
+            somme += part;
+            pire = pire.max(part);
+            mesures += 1;
+        }
+        frag = frag.max(placement.fragmentation());
+        aretes_avant = Some(plan.aretes.clone());
+    }
+    (somme / mesures.max(1) as f64, pire, frag)
 }
 
 /// Rejoue `IMAGES` images consécutives d'un mouvement et rend le delta de chaque paire.
@@ -374,6 +454,120 @@ fn aplatir(m: &aegis_engine::core::math::Mat4) -> [f32; 16] {
         sortie[i * 4..i * 4 + 4].copy_from_slice(col);
     }
     sortie
+}
+
+/// ⚠⚠ **LA FRAGMENTATION SUR LA DURÉE — le seul point qui peut invalider l'adresse stable.**
+///
+/// `02-THESE.md` écrit noir sur blanc : *« ce qui invaliderait : une empreinte NON BORNÉE »*.
+///
+/// Sans coalescence, un bloc rendu par un triangle de classe $k$ ne resservira **qu'à** un futur
+/// triangle de classe $k$. L'empreinte réservée est donc le cumul des **pics par classe**, et elle
+/// dépasse l'empreinte utile. *Le brassage du banc `lire_surface` l'a mesurée à **1,82×** — bien
+/// au-delà des 1,05× que rendait une séquence douce, et tout près du plafond de 2×.*
+///
+/// **La question n'est donc pas « y a-t-il de la fragmentation » — il y en a — mais : PLAFONNE-T-ELLE ?**
+///
+/// ## ⚠⚠ LE CRITÈRE A DÛ ÊTRE REMPLACÉ, ET IL FAUT DIRE POURQUOI
+///
+/// **Ce qu'il disait d'abord :** *« la fragmentation doit PLAFONNER — les 100 dernières images à
+/// moins de 5 % au-dessus des 100 du milieu »*. Il était juste pour une free-list seule, et il a
+/// rendu son verdict : **⛔ 2,65× au milieu, 3,90× à la fin, 5,26× au pire, +47 %.** C'est ce refus
+/// qui a fait naître le compactage.
+///
+/// **Pourquoi il ne vaut plus rien depuis :** avec un compactage, la fragmentation monte, retombe à
+/// exactement 1,00, remonte — *une dent de scie n'a pas de tendance.* Comparer deux fenêtres y
+/// mesure la **phase** de l'oscillation, pas une dérive. Le critère ne serait pas trop sévère : il
+/// répondrait à côté.
+///
+/// *Ce n'est donc pas un seuil assoupli parce qu'il gênait — c'est une grandeur qui a cessé d'être
+/// la bonne quand le mécanisme a changé. Le distinguer est tout ce qui sépare une correction d'un
+/// arrangement.*
+///
+/// ## Le critère qui le remplace
+///
+/// Sur 600 images d'une caméra qui balaie dans les deux sens, avance et recule :
+///
+/// - **l'empreinte ne dépasse jamais le budget** tant que la densité, elle, y tient. *C'est ça,
+///   « bornée », et c'est vrai par construction : c'est le dépassement qui déclenche sa remise à
+///   plat.*
+/// - **le coût amorti**, compactages compris, doit rester **sous 5 %** par image — contre 96,25 %
+///   pour l'adressage cumulatif. *Si le compactage se déclenche si souvent qu'il mange le gain,
+///   l'adresse stable ne sert à rien et il faut le dire.*
+///
+/// ⚠ **La borne théorique existe mais elle est inutilisable** : le nombre de triangles est fini,
+/// donc l'empreinte l'est aussi — à $\sum_k N \cdot \mathrm{taille}(k)$, soit ~145 M entrées ici.
+/// *Une borne qu'on ne peut pas payer n'est pas une borne ; seul le comportement réel décide.*
+fn fragmentation_longue(scene: &Scene, budget: u64) {
+    titre("LA FRAGMENTATION SUR LA DURÉE — l'empreinte est-elle bornée ?");
+    println!("  Critère écrit AVANT : l'empreinte ne dépasse jamais le budget, ET le coût amorti");
+    println!("  (compactages compris) reste sous 5 % par image — contre 96,25 % en cumulatif.");
+    println!("  ⚠ Le critère précédent portait sur la fragmentation ; il a rendu ⛔ (5,26× et");
+    println!("    croissante), c'est ce qui a fait naître le compactage — et il a cessé d'être");
+    println!("    interprétable avec lui : une dent de scie n'a pas de tendance.\n");
+
+    let positions: Vec<[f32; 3]> = scene.sommets.iter().map(|s| s.position).collect();
+    let triangles = scene.indices.len() / 3;
+    let mut placement = Placement::nouveau(triangles);
+    let mut suite = Vec::with_capacity(600);
+    let mut travail = 0.0f64;
+    let mut depassements = 0usize;
+
+    for image in 0..600usize {
+        let t = image as f32 / HZ;
+        // Un mouvement volontairement AGITÉ : deux rotations de périodes incommensurables plus un
+        // va-et-vient. *Une caméra qui tourne toujours dans le même sens finirait par revenir sur
+        // ses pas et flatterait la mesure.*
+        let angle = 60.0 * (t * 0.7).sin() + 25.0 * (t * 1.9).sin();
+        let avance = rayon_scene(scene) * 0.4 * (t * 0.5).sin();
+        let vp = camera_a(scene, angle, avance);
+        let aires = aires_ecran(&positions, &scene.indices, &vp, COTE, COTE);
+        let modele = planifier(&aires, budget);
+        let k: Vec<u32> = modele.par_triangle.iter().map(|(_, c)| c.trailing_zeros()).collect();
+        let d = placement.mettre_a_jour(&k, budget);
+        suite.push(placement.fragmentation());
+        travail += d.entrees_relogées as f64 / d.entrees_totales.max(1) as f64;
+        // ⚠ Un dépassement ne compte QUE si la densité, elle, tenait dans le budget : sinon c'est
+        // le biais qui n'a pas su descendre, et ce n'est pas le procès du placement.
+        if placement.empreinte() > budget && placement.utile() <= budget {
+            depassements += 1;
+        }
+    }
+
+    let moyenne = |t: &[f64]| t.iter().sum::<f64>() / t.len() as f64;
+    let milieu = moyenne(&suite[250..350]);
+    let fin = moyenne(&suite[500..600]);
+    let pire = suite.iter().cloned().fold(0.0f64, f64::max);
+
+    println!("  {:>14} {:>12} {:>12} {:>10}", "images 250-350", "images 500-600", "pire", "croissance");
+    println!("  {:>14.3}× {:>11.3}× {:>11.3}× {:>9.1} %", milieu, fin, pire, (fin / milieu - 1.0) * 100.0);
+    println!();
+    println!("  ⭐ LE COÛT AMORTI, compactages compris — c'est LUI qui décide :");
+    println!("     compactages : {} sur 600 images (1 toutes les {:.0} images)",
+        placement.compactages, 600.0 / placement.compactages.max(1) as f64);
+    println!("     travail moyen réécrit par image : {:.2} %", travail / 600.0 * 100.0);
+    println!("     à comparer aux 96,25 % de l'adressage cumulatif.");
+    println!();
+
+    let amorti = travail / 600.0;
+    let tient = depassements == 0;
+    if tient && amorti < 0.05 {
+        println!("  ⇒ ✅ L'EMPREINTE EST BORNÉE, et le coût amorti tient : {:.2} % par image contre", amorti * 100.0);
+        println!("     96,25 % en cumulatif — un facteur {:.0}, compactages compris.", 0.9625 / amorti.max(1e-9));
+        println!("     *Le critère d'invalidation de `02-THESE.md` tient, et il se paie en");
+        println!("     compactages rares plutôt qu'en copie permanente.*");
+    } else if !tient {
+        println!("  ⇒ ⛔ L'EMPREINTE DÉPASSE LE BUDGET sur {depassements} image(s) alors que la");
+        println!("     densité y tenait. Le compactage ne fait pas son travail. *Ne rien conclure.*");
+    } else {
+        println!("  ⇒ ⛔ LE COÛT AMORTI EST DE {:.2} %, au-dessus des 5 % du critère : le", amorti * 100.0);
+        println!("     compactage se déclenche trop souvent et mange le gain. *L'adresse stable");
+        println!("     ne se justifie pas dans cet état.*");
+    }
+}
+
+/// Le rayon de la scène — extrait pour que le mouvement long soit à l'échelle du modèle chargé.
+fn rayon_scene(scene: &Scene) -> f32 {
+    boite_englobante(scene).1
 }
 
 fn racine_du_depot() -> PathBuf {
