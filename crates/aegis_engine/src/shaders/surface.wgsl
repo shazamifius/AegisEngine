@@ -8,18 +8,25 @@
 // qu'un shader peut écrire dans une mémoire persistante attachée à la géométrie.
 
 struct Reglages {
-    // ⭐ Le nombre de triangles que CETTE passe doit recalculer — la longueur de `a_refaire`, pas le
-    // nombre de triangles du maillage.
+    // ⭐⭐ Le nombre total de FILS utiles — la somme des micro-sommets de tous les triangles de la
+    // liste. C'est LUI qui dimensionne le dispatch, plus le nombre de triangles.
     //
-    // *Il n'y a pas deux modes « tout » et « partiel » : il y a une LISTE, pleine à la première
-    // image et courte ensuite. Un mécanisme unique se teste ; deux modes font deux moteurs, dont un
-    // seul est exercé.*
-    a_refaire: u32,
+    // *Avant le 8 septembre au soir, on lançait `rangs_max` fils pour CHAQUE triangle : tous les
+    // petits payaient la taille du plus gros. Mesuré : 7 124 224 fils lancés pour 154 809 utiles,
+    // soit 97,8 % de gaspillage. Un dispatch par classe de subdivision en laissait encore 54,2 %,
+    // parce que les fils partent par groupes de 64 et qu'un triangle à 3 points paie un groupe
+    // entier. **À plat, il n'y a plus qu'un seul arrondi pour toute la scène.**
+    //
+    // ⚠ L'ORDRE DES CHAMPS DOIT SUIVRE `Reglages` de `render/surface.rs`, à l'octet près : rien ne
+    // vérifie cette correspondance à la compilation. *C'est la couture la plus fragile des deux
+    // fichiers, et elle est dite des deux côtés.*
+    fils: u32,
     // n = 2^k, le nombre de segments par arête.
     cote: u32,
     // Les micro-sommets d'un triangle : (n+1)(n+2)/2.
     par_triangle: u32,
-    _pad: u32,
+    // Le nombre de triangles dans la liste de travail — la borne de la recherche ci-dessous.
+    lots: u32,
     // `xyz` : la direction dans laquelle le soleil VOYAGE — de la lumière vers la surface. Le sens
     // est écrit parce qu'une convention supposée au lieu d'être lue a déjà coûté au projet.
     //
@@ -64,6 +71,12 @@ var<push_constant> reglages: Reglages;
 // un triangle qu'on ne veut pas toucher. *Un test « ce triangle est-il à refaire ? » à l'intérieur
 // du shader lancerait tous les fils pour n'en garder que 3 % — ça n'économiserait rien.*
 @group(0) @binding(4) var<storage, read> a_refaire: array<u32>;
+// ⭐⭐ LES DÉBUTS — `debuts[j]` est le premier fil qui appartient au j-ième triangle de la liste,
+// et `debuts[lots]` vaut le total. C'est une somme cumulée, calculée sur le processeur.
+//
+// *C'est ce qui permet à un dispatch PLAT de retrouver à qui appartient chaque fil. Sans elle, il
+// faudrait un rectangle — et un rectangle fait payer à tous la taille du plus gros.*
+@group(0) @binding(5) var<storage, read> debuts: array<u32>;
 
 const FLOTTANTS_PAR_SOMMET: u32 = 14u;
 
@@ -136,12 +149,27 @@ fn bary_arete(e: u32, f: f32) -> vec2<f32> {
 
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let rang = gid.x;  // le micro-sommet dans son triangle
-    if (gid.y >= reglages.a_refaire) {
+    // ⭐⭐⭐ LE DISPATCH EST PLAT : `gid.x` numérote un MICRO-SOMMET de la scène entière, et il faut
+    // retrouver à quel triangle il appartient.
+    //
+    // C'est une recherche binaire dans les débuts cumulés — au plus 12 étapes pour 3 274 triangles,
+    // négligeable devant le travail qu'elle évite. *Le rectangle qu'elle remplace gaspillait 97,8 %
+    // des fils lancés ; un dispatch par classe en aurait laissé 54,2 %, à cause de l'arrondi au
+    // groupe de 64. À plat, l'arrondi n'a lieu qu'une fois pour toute la scène.*
+    let fil = gid.x;
+    if (fil >= reglages.fils) {
         return;
     }
-    // ⭐ Le triangle se LIT dans la liste de travail : `gid.y` numérote le travail, pas le maillage.
-    let triangle = a_refaire[gid.y];
+    // On cherche le plus grand j tel que debuts[j] <= fil.
+    var bas = 0u;
+    var haut = reglages.lots;  // exclu
+    loop {
+        if (haut - bas <= 1u) { break; }
+        let milieu = bas + (haut - bas) / 2u;
+        if (debuts[milieu] <= fil) { bas = milieu; } else { haut = milieu; }
+    }
+    let triangle = a_refaire[bas];
+    let rang = fil - debuts[bas];
 
     // L'adresse se LIT : ce triangle a sa propre base et sa propre subdivision.
     let base_tri = plan[triangle * 2u];

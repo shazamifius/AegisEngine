@@ -37,6 +37,34 @@
 //! dans son propre bruit ». C'est la leçon du 6 septembre sur l'instrument saturé, appliquée au
 //! temps.*
 //!
+//! ## ⛔⛔ CE BANC A MENTI D'UN FACTEUR 378 PENDANT UNE SOIRÉE — 8 septembre 2026
+//!
+//! Sa première version allouait la mémoire de surface en **`HOST_VISIBLE`**, comme les bancs de
+//! preuve qui doivent la relire. Sur une carte **discrète**, cette mémoire est atteinte par le bus
+//! **PCIe** : une passe de calcul qui y écrit 155 000 entrées mesure alors **le transfert, pas le
+//! calcul**.
+//!
+//! | | mémoire hôte | mémoire carte |
+//! |---|---|---|
+//! | la passe complète | **13,02 ms** | **0,034 ms** |
+//!
+//! **Toutes les conclusions de temps de cette soirée-là décrivaient un bus.** Et la phrase qui
+//! l'annonçait était écrite dans `render/surface.rs` depuis son premier jour — *« `HOST_VISIBLE` est
+//! un choix de BANC, pas d'architecture »*. Elle a été lue le matin même et n'a protégé de rien.
+//!
+//! > **Une leçon écrite ne protège de rien tant qu'elle n'est pas une garde.** Elle en est une
+//! > maintenant : `MemoireDeSurface::relisible` est vrai en mémoire hôte, et ce banc **refuse de
+//! > tourner** si on le lui donne.
+//!
+//! ## ⚠ ET LA PRÉDICTION QUI ALLAIT AVEC ÉTAIT FAUSSE AUSSI
+//!
+//! Le tableau du gaspillage montrait 97,8 % de fils inutiles, et j'en ai déduit *« un dispatch
+//! dimensionné juste rendrait un facteur voisin de 45 »*. **Mesuré : 3,5.**
+//!
+//! *Un fil gaspillé sort du shader immédiatement et coûte environ **18 fois moins** qu'un fil qui
+//! travaille. Compter les fils lancés revenait à supposer qu'ils coûtent tous pareil — c'est le
+//! genre d'hypothèse qu'on ne voit pas parce qu'on ne l'a jamais formulée.*
+//!
 //! ## Ce que ce banc ne dira JAMAIS
 //!
 //! - **Rien sur un Adreno 650.** Il décrit *cette carte, ce pilote, ce jour* — c'est écrit dans
@@ -135,7 +163,16 @@ fn mesurer(scene: &Scene, triangles: u32) -> Result<Option<()>, Box<dyn std::err
     raccorder(&mut plan, &positions, &scene.indices);
     let (b_plan, _, o_plan) = televerser(&gpu.device, &props, &encoder_pour_gpu(&plan))?;
 
-    let memoire = MemoireDeSurface::allouer_selon(&gpu.device, &props, &plan)?;
+    // ⭐⭐ SUR LA CARTE, et c'est la correction la plus importante de ce banc.
+    //
+    // *Il a mesuré 13,02 ms pendant toute une soirée avec une mémoire HÔTE — c'est-à-dire le bus
+    // PCIe, pas le moteur. La même passe rend 0,034 ms sur la carte : un facteur 378.*
+    let memoire = MemoireDeSurface::allouer_selon_sur_carte(&gpu.device, &props, &plan)?;
+    assert!(
+        !memoire.relisible,
+        "un banc qui chronomètre ne doit JAMAIS mesurer sur une mémoire hôte : il mesurerait le \
+         bus, pas le calcul"
+    );
     let mut liste = ListeDeTravail::allouer(&gpu.device, &props, triangles)?;
     let passe = PasseDeSurface::nouvelle(
         &gpu.device,
@@ -144,6 +181,7 @@ fn mesurer(scene: &Scene, triangles: u32) -> Result<Option<()>, Box<dyn std::err
             indices: (b_indices, o_indices),
             plan: (b_plan, o_plan),
             a_refaire: (liste.tampon, liste.octets()),
+            debuts: (liste.tampon_debuts, liste.octets_debuts()),
         },
         &memoire,
     )?;
@@ -208,18 +246,17 @@ fn mesurer(scene: &Scene, triangles: u32) -> Result<Option<()>, Box<dyn std::err
         if travail.is_empty() {
             continue;
         }
-        liste.ecrire(&gpu.device, &travail)?;
-        let rangs_max = travail
+        let utiles_prevus: u64 = travail
             .iter()
-            .map(|t| micro_sommets(plan.par_triangle[*t as usize].1.trailing_zeros()))
-            .max()
-            .unwrap_or(3);
+            .map(|t| micro_sommets(plan.par_triangle[*t as usize].1.trailing_zeros()) as u64)
+            .sum();
+        liste.ecrire(&gpu.device, &travail, &plan)?;
 
         let reglages = Reglages {
-            a_refaire: liste.longueur,
+            fils: liste.fils,
             cote: memoire.cote,
             par_triangle: memoire.par_triangle,
-            _pad: 0,
+            lots: liste.longueur,
             soleil: SOLEIL,
             signal: SIGNAL,
         };
@@ -228,7 +265,7 @@ fn mesurer(scene: &Scene, triangles: u32) -> Result<Option<()>, Box<dyn std::err
         for i in 0..(ECHAUFFEMENT + REPETITIONS + 1) {
             let cmd = gpu.begin_single_time_commands()?;
             chrono.ouvrir_image(&gpu.device, cmd);
-            passe.encoder(&gpu.device, cmd, &reglages, &memoire, rangs_max);
+            passe.encoder(&gpu.device, cmd, &reglages, &memoire);
             chrono.jalon(&gpu.device, cmd, "surface");
             gpu.end_single_time_commands(cmd)?;
             // Le relevé lu ici est celui du tour PRÉCÉDENT — d'où le tour supplémentaire.
@@ -259,16 +296,17 @@ fn mesurer(scene: &Scene, triangles: u32) -> Result<Option<()>, Box<dyn std::err
         // *`surface.rs` nomme ce gaspillage depuis le premier jour : « c'est le gaspillage assumé
         // d'un dispatch rectangulaire sur une allocation qui ne l'est pas ; le mesurer est le
         // chantier suivant, l'ignorer serait le vrai défaut ». Le voici mesuré.*
-        let lances = rangs_max as u64 * *n as u64;
-        let utiles: u64 = travail
-            .iter()
-            .map(|t| micro_sommets(plan.par_triangle[*t as usize].1.trailing_zeros()) as u64)
-            .sum();
+        // ⚠ Depuis le dispatch plat, `lances` vaut le travail utile arrondi au groupe de 64 : la
+        // colonne « gaspillé » ne mesure donc plus la forme rectangulaire, elle mesure ce qu'il
+        // reste — l'arrondi. *Le tableau de simulation en bas de banc garde la comparaison des
+        // trois formes, lui.*
+        let lances = utiles_prevus.div_ceil(64) * 64;
+        let utiles: u64 = utiles_prevus;
         println!(
             "  {:>7} {:>7.4}ms {:>10} {:>12} {:>12} {:>8.1}%{}",
             n,
             mediane,
-            rangs_max,
+            travail.iter().map(|t| micro_sommets(plan.par_triangle[*t as usize].1.trailing_zeros())).max().unwrap_or(3),
             lances,
             utiles,
             (1.0 - utiles as f64 / lances.max(1) as f64) * 100.0,
@@ -281,17 +319,14 @@ fn mesurer(scene: &Scene, triangles: u32) -> Result<Option<()>, Box<dyn std::err
     }
 
     // ── Le modèle : T(n) = a + b·n, ajusté sur le témoin et le lot complet ───────────────────
-    titre("⚠⚠ CE QUE LA COURBE DIT, ET CE N'EST PAS CE QUE JE CHERCHAIS");
-    println!("  Le temps ne suit PAS le nombre de triangles : entre 2 000 et 3 274 (×1,6), il");
-    println!("  explose. La cause est dans les colonnes ci-dessus — le dispatch est RECTANGULAIRE.");
+    titre("CE QUE LA COURBE DIT");
+    println!("  Le temps suit le TRAVAIL UTILE, pas les fils lancés : le coût par micro-sommet");
+    println!("  écrit est stable sur toute la gamme dès que le lot est assez gros pour occuper la");
+    println!("  carte. Les petits lots paient leur manque de parallélisme, pas un prix fixe.");
     println!();
-    println!("  On lance `rangs max` fils pour CHAQUE triangle du lot, alors que chaque triangle");
-    println!("  n'a besoin que des siens. **Un seul gros triangle dans le lot fait payer sa taille");
-    println!("  à tous les autres.** Les fils en trop sortent aussitôt du shader, mais ils ont été");
-    println!("  lancés — et c'est ce lancement qui coûte.");
-    println!();
-    println!("  *`surface.rs` nommait ce gaspillage dès le premier jour : « le mesurer est le");
-    println!("  chantier suivant, l'ignorer serait le vrai défaut ». Le voici mesuré.*");
+    println!("  ⚠ La colonne « gaspillé » ne mesure plus la forme rectangulaire — elle a disparu le");
+    println!("    8 septembre au soir — mais ce qu'il en reste : l'arrondi au groupe de 64, qui ne");
+    println!("    mord que sur les tout petits lots.");
 
     // ⭐ Le coût rapporté au TRAVAIL RÉEL — la seule grandeur comparable d'un lot à l'autre.
     titre("LE COÛT PAR MICRO-SOMMET — la grandeur qui, elle, se compare");
@@ -302,9 +337,10 @@ fn mesurer(scene: &Scene, triangles: u32) -> Result<Option<()>, Box<dyn std::err
         println!("  {:>7} {:>13.2} {:>15.2} {:>15.1}×", n, par_lance, par_utile, par_utile / par_lance.max(f32::MIN_POSITIVE));
     }
     println!();
-    println!("  ⇒ Le coût par fil LANCÉ est à peu près constant : la carte fait ce qu'on lui");
-    println!("    demande, et c'est nous qui lui demandons trop. **Le défaut est dans la FORME du");
-    println!("    dispatch, pas dans la réécriture partielle.**");
+    println!("  ⚠ Le coût par fil LANCÉ n'est PAS constant, et c'est ce que la première version de");
+    println!("    ce banc avait mal lu : un fil qui sort tôt coûte ~18× moins qu'un fil qui");
+    println!("    travaille. **Compter les fils lancés suppose qu'ils coûtent tous pareil.**");
+    println!("    *La grandeur qui se compare est le coût par fil UTILE, et lui est stable.*");
 
     titre("CE QUE ÇA VEUT DIRE");
     let prix_fixe = resultats.first().map(|(_, t)| *t).unwrap_or(0.0);
@@ -368,6 +404,140 @@ fn mesurer(scene: &Scene, triangles: u32) -> Result<Option<()>, Box<dyn std::err
             }
         }
         None => println!("  (le lot de 210 n'a pas été mesuré)"),
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    // ⭐⭐ LA COMPARAISON QUI DÉCIDE : le dispatch plat sert-il, une fois la mesure honnête ?
+    //
+    // On relance la liste complète en gonflant `fils` jusqu'à ce que le dispatch lance autant de
+    // fils que l'ancienne forme RECTANGULAIRE en lançait — 7 124 224. Les fils au-delà du travail
+    // réel font leur recherche binaire, trouvent un rang hors de leur triangle, et sortent : très
+    // exactement ce que faisaient les fils gaspillés du rectangle.
+    titre("⭐⭐ LE DISPATCH PLAT SERT-IL ? — la charge de l'ancienne forme, remesurée honnêtement");
+    {
+        liste.tout(&gpu.device, &plan)?;
+        let rangs_max_scene = plan.par_triangle.iter()
+            .map(|(_, c)| micro_sommets(c.trailing_zeros()))
+            .max().unwrap_or(3);
+        let charge_rect = rangs_max_scene as u64 * triangles as u64;
+        for (nom, fils) in [("plat (actuel)", liste.fils as u64), ("rectangulaire (avant)", charge_rect)] {
+            let reglages = Reglages {
+                fils: fils as u32,
+                cote: memoire.cote,
+                par_triangle: memoire.par_triangle,
+                lots: liste.longueur,
+                soleil: SOLEIL,
+                signal: SIGNAL,
+            };
+            let mut d = Vec::with_capacity(REPETITIONS);
+            for i in 0..(ECHAUFFEMENT + REPETITIONS + 1) {
+                let cmd = gpu.begin_single_time_commands()?;
+                chrono.ouvrir_image(&gpu.device, cmd);
+                passe.encoder(&gpu.device, cmd, &reglages, &memoire);
+                chrono.jalon(&gpu.device, cmd, "surface");
+                gpu.end_single_time_commands(cmd)?;
+                if i > ECHAUFFEMENT {
+                    if let Some(e) = chrono.etapes().iter().find(|e| e.nom == "surface") {
+                        d.push(e.millisecondes);
+                    }
+                }
+            }
+            d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!("  {:>24} : {:>10} fils → {:.4} ms", nom, fils, d[d.len() / 2]);
+        }
+        println!();
+        println!("  *Les fils en trop font leur recherche, trouvent un rang hors de leur triangle,");
+        println!("  et sortent — exactement ce que faisaient les fils gaspillés du rectangle.*");
+    }
+
+    titre("⭐⭐⭐ CE QUE DONNERAIT CHAQUE FORME DE DISPATCH — calculé, sans GPU");
+    println!("  *Son intuition, avant qu'on code quoi que ce soit : « un dispatch par classe de");
+    println!("  subdivision ne suffira pas ». On la chiffre au lieu de l'essayer.*\n");
+    println!("  ⚠ LE DÉTAIL QUI DÉCIDE : les fils partent par GROUPES DE 64. Un triangle qui n'a");
+    println!("    besoin que de 3 micro-points paie quand même un groupe entier — 61 fils perdus.");
+    println!("    *Ce n'est pas un détail d'implémentation : c'est la granularité du matériel.*\n");
+
+    const GROUPE: u64 = 64;
+    let arrondi = |n: u64| n.div_ceil(GROUPE) * GROUPE;
+
+    // Le travail utile, une fois pour toutes.
+    let utiles_total: u64 = plan
+        .par_triangle
+        .iter()
+        .map(|(_, c)| micro_sommets(c.trailing_zeros()) as u64)
+        .sum();
+
+    // (a) Ce qu'on fait aujourd'hui : un rectangle sur le plus gros.
+    let rangs_max_scene = plan
+        .par_triangle
+        .iter()
+        .map(|(_, c)| micro_sommets(c.trailing_zeros()) as u64)
+        .max()
+        .unwrap_or(3);
+    let rectangulaire = arrondi(rangs_max_scene) * triangles as u64;
+
+    // (b) Un dispatch PAR CLASSE : chaque classe lance ce que SA taille demande.
+    let mut par_classe = 0u64;
+    let mut effectifs = [0u64; 9];
+    for (_, cote) in &plan.par_triangle {
+        effectifs[cote.trailing_zeros() as usize] += 1;
+    }
+    for (k, nb) in effectifs.iter().enumerate() {
+        if *nb > 0 {
+            par_classe += arrondi(micro_sommets(k as u32) as u64) * nb;
+        }
+    }
+
+    // (c) Un dispatch À PLAT sur les micro-sommets : un seul arrondi, pour toute la scène.
+    let a_plat = arrondi(utiles_total);
+
+    println!("  {:>22} {:>14} {:>12} {:>14}", "forme du dispatch", "fils lancés", "gaspillé", "contre l'idéal");
+    for (nom, fils) in [
+        ("rectangulaire (actuel)", rectangulaire),
+        ("par classe", par_classe),
+        ("à plat sur les points", a_plat),
+    ] {
+        println!(
+            "  {:>22} {:>14} {:>11.1}% {:>13.1}×",
+            nom,
+            fils,
+            (1.0 - utiles_total as f64 / fils as f64) * 100.0,
+            fils as f64 / utiles_total as f64
+        );
+    }
+    println!("  {:>22} {:>14} {:>11} {:>14}", "(travail utile)", utiles_total, "—", "1,0×");
+
+    println!("\n  La répartition des triangles par classe, qui explique tout :");
+    println!("  {:>4} {:>10} {:>12} {:>14} {:>12}", "k", "triangles", "points/tri", "fils/tri (64)", "gaspillé");
+    for (k, nb) in effectifs.iter().enumerate() {
+        if *nb > 0 {
+            let points = micro_sommets(k as u32) as u64;
+            println!(
+                "  {:>4} {:>10} {:>12} {:>14} {:>11.1}%",
+                k, nb, points, arrondi(points),
+                (1.0 - points as f64 / arrondi(points) as f64) * 100.0
+            );
+        }
+    }
+
+    println!();
+    if par_classe as f64 / utiles_total as f64 > 1.5 {
+        println!("  ⇒ ⛔ **SON INTUITION EST JUSTE : le dispatch par classe NE SUFFIT PAS.**");
+        println!("     Il ramène le gaspillage de {:.1} % à {:.1} %, ce qui est déjà beaucoup —",
+            (1.0 - utiles_total as f64 / rectangulaire as f64) * 100.0,
+            (1.0 - utiles_total as f64 / par_classe as f64) * 100.0);
+        println!("     mais il en LAISSE {:.1} %, et la cause est l'arrondi au groupe de 64 : les",
+            (1.0 - utiles_total as f64 / par_classe as f64) * 100.0);
+        println!("     petites classes paient un groupe entier pour quelques points.");
+        println!();
+        println!("     *Le dispatch À PLAT, lui, n'arrondit qu'UNE FOIS pour toute la scène —");
+        println!("     {:.1} % de gaspillage. C'est la voie à prendre.*",
+            (1.0 - utiles_total as f64 / a_plat as f64) * 100.0);
+    } else {
+        println!("  ⇒ ✅ Le dispatch par classe suffit : il ramène le gaspillage à {:.1} %.",
+            (1.0 - utiles_total as f64 / par_classe as f64) * 100.0);
+        println!("     *L'intuition d'un problème résiduel ne se vérifie pas sur cette scène —");
+        println!("     à re-mesurer sur une scène aux triangles plus petits.*");
     }
 
     titre("CE QUE CE BANC NE DIT PAS");

@@ -269,6 +269,7 @@ fn rendre(
             indices: (b_indices, o_indices),
             plan: (b_plan, o_plan),
             a_refaire: (liste.tampon, liste.octets()),
+            debuts: (liste.tampon_debuts, liste.octets_debuts()),
         },
         &memoire,
     )?;
@@ -278,36 +279,23 @@ fn rendre(
         ecrire_tampon(&gpu.device, m_plan, &encoder_pour_gpu(&etape.plan))?;
         // La liste de travail de cette étape.
         if *complet {
-            liste.tout(&gpu.device)?;
+            liste.tout(&gpu.device, &etape.plan)?;
         } else {
-            liste.ecrire(&gpu.device, &etape.a_refaire)?;
+            liste.ecrire(&gpu.device, &etape.a_refaire, &etape.plan)?;
         }
-        // ⚠ `rangs_max` se calcule sur la LISTE, pas sur le maillage : dispatcher en X sur le plus
-        // subdivisé de toute la scène lancerait des fils que le shader ferait sortir aussitôt.
-        let rangs_max = etape
-            .a_refaire
-            .iter()
-            .map(|t| micro_sommets(etape.plan.par_triangle[*t as usize].1.trailing_zeros()))
-            .max()
-            .unwrap_or(3);
-        let rangs_max = if *complet {
-            etape.plan.par_triangle.iter()
-                .map(|(_, c)| micro_sommets(c.trailing_zeros()))
-                .max().unwrap_or(3)
-        } else {
-            rangs_max
-        };
+        // ⭐ Plus aucun `rangs_max` à calculer : le dispatch est PLAT depuis le 8 septembre au
+        // soir, et il se dimensionne sur le travail réel que la liste porte.
 
         let reglages = Reglages {
-            a_refaire: liste.longueur,
+            fils: liste.fils,
             cote: memoire.cote,
             par_triangle: memoire.par_triangle,
-            _pad: 0,
+            lots: liste.longueur,
             soleil: SOLEIL,
             signal: SIGNAL,
         };
         let cmd = gpu.begin_single_time_commands()?;
-        passe.encoder(&gpu.device, cmd, &reglages, &memoire, rangs_max);
+        passe.encoder(&gpu.device, cmd, &reglages, &memoire);
         gpu.end_single_time_commands(cmd)?;
     }
 

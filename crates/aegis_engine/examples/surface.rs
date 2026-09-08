@@ -183,7 +183,7 @@ fn remplir(
     let memoire = MemoireDeSurface::allouer(&gpu.device, &memory_props, triangles, k)?;
     // ⭐ La liste de travail : à la première image, elle porte tous les triangles.
     let mut liste = ListeDeTravail::allouer(&gpu.device, &memory_props, triangles)?;
-    liste.tout(&gpu.device)?;
+    liste.tout(&gpu.device, &plan)?;
     let passe = PasseDeSurface::nouvelle(
         &gpu.device,
         &EntreesGeometrie {
@@ -191,21 +191,22 @@ fn remplir(
             indices: (tampon_indices, octets_indices),
             plan: (tampon_plan, octets_plan),
             a_refaire: (liste.tampon, liste.octets()),
+            debuts: (liste.tampon_debuts, liste.octets_debuts()),
         },
         &memoire,
     )?;
 
     let reglages = Reglages {
-        a_refaire: liste.longueur,
+        fils: liste.fils,
         cote: memoire.cote,
         par_triangle: memoire.par_triangle,
-        _pad: 0,
+        lots: liste.longueur,
         soleil: SOLEIL,
         signal: SIGNAL,
     };
 
     let cmd = gpu.begin_single_time_commands()?;
-    passe.encoder(&gpu.device, cmd, &reglages, &memoire, memoire.par_triangle);
+    passe.encoder(&gpu.device, cmd, &reglages, &memoire);
     gpu.end_single_time_commands(cmd)?;
 
     let relu = memoire.relire(&gpu.device)?;

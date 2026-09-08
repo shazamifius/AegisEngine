@@ -153,6 +153,22 @@ pub struct MemoireDeSurface {
     pub cote: u32,
     /// Les micro-sommets d'un seul triangle.
     pub par_triangle: u32,
+    /// ⭐⭐ **Vrai si cette mémoire est relisible par le processeur — donc si elle vit en mémoire
+    /// HÔTE plutôt que sur la carte.**
+    ///
+    /// Ce n'est pas un détail de plomberie, c'est un **avertissement de mesure**, et il a coûté une
+    /// soirée : sur une carte discrète, une mémoire hôte est atteinte par le bus PCIe, et une passe
+    /// de calcul qui y écrit mesure **le bus, pas le moteur**.
+    ///
+    /// *Mesuré le 8 septembre 2026 : la même passe rendait **13,02 ms** en mémoire hôte et
+    /// **0,034 ms** sur la carte — un facteur **378**. Toute conclusion de temps tirée du premier
+    /// chiffre décrivait un transfert.*
+    ///
+    /// ⚠ **Un banc qui chronomètre DOIT vérifier ce drapeau et refuser de conclure s'il est vrai.**
+    /// La phrase « `HOST_VISIBLE` est un choix de banc, pas d'architecture » était écrite dans ce
+    /// fichier depuis le premier jour — *elle n'a protégé de rien, parce qu'elle n'était pas une
+    /// garde.*
+    pub relisible: bool,
 }
 
 impl MemoireDeSurface {
@@ -178,7 +194,7 @@ impl MemoireDeSurface {
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
-        Ok(Self { tampon, memoire, entrees, cote: 1 << k, par_triangle })
+        Ok(Self { tampon, memoire, entrees, cote: 1 << k, par_triangle, relisible: true })
     }
 
     /// Alloue la mémoire d'après un [`Plan`](crate::render::allocation::Plan) — la subdivision
@@ -208,6 +224,39 @@ impl MemoireDeSurface {
             entrees: plan.entrees,
             cote: premier,
             par_triangle: micro_sommets(premier.trailing_zeros()),
+            relisible: true,
+        })
+    }
+
+    /// ⭐ La même mémoire, mais **sur la carte** — celle qu'un banc de chronométrage doit employer.
+    ///
+    /// Elle n'est pas relisible depuis le processeur : c'est le prix, et c'est le bon. *Sur une
+    /// carte discrète, écrire dans une mémoire hôte traverse le bus PCIe, et une mesure de temps y
+    /// décrit le transfert plutôt que le calcul — facteur **378** mesuré le 8 septembre 2026.*
+    ///
+    /// ⚠ Sur un GPU à mémoire unifiée — le Quest 2, un téléphone — la distinction s'estompe **sans
+    /// disparaître**. *Supposer qu'elle disparaît serait une conclusion sur une machine qu'on n'a
+    /// pas.*
+    pub fn allouer_selon_sur_carte(
+        device: &ash::Device,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        plan: &crate::render::allocation::Plan,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (tampon, memoire) = MemoryManager::create_buffer(
+            device,
+            memory_props,
+            plan.octets().max(OCTETS_PAR_ENTREE),
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )?;
+        let premier = plan.par_triangle.first().map(|(_, c)| *c).unwrap_or(1);
+        Ok(Self {
+            tampon,
+            memoire,
+            entrees: plan.entrees,
+            cote: premier,
+            par_triangle: micro_sommets(premier.trailing_zeros()),
+            relisible: false,
         })
     }
 
@@ -221,6 +270,13 @@ impl MemoireDeSurface {
     /// *C'est l'instrument de preuve du banc : sans lui, « le shader a écrit » resterait une
     /// affirmation sur un tampon que personne n'a ouvert.*
     pub fn relire(&self, device: &ash::Device) -> Result<Vec<[f32; 3]>, Box<dyn std::error::Error>> {
+        // ⚠ Refuser plutôt que rendre des octets qui ne veulent rien dire : une mémoire de carte
+        // n'est pas projetable, et l'appel échouerait plus loin, ailleurs, sans dire pourquoi.
+        if !self.relisible {
+            return Err("cette mémoire de surface vit sur la carte : elle n'est pas relisible \
+                        depuis le processeur (voir `allouer_selon_sur_carte`)"
+                .into());
+        }
         let octets = self.octets();
         let ptr = unsafe {
             device.map_memory(self.memoire, 0, octets, vk::MemoryMapFlags::empty())? as *const u32
@@ -342,10 +398,20 @@ fn demi_vers_f32(h: u16) -> f32 {
 pub struct ListeDeTravail {
     pub tampon: vk::Buffer,
     memoire: vk::DeviceMemory,
+    /// ⭐ Les DÉBUTS cumulés : `debuts[j]` est le premier fil du j-ième triangle de la liste, et
+    /// `debuts[longueur]` vaut le total.
+    ///
+    /// *C'est ce qui permet un dispatch PLAT. Sans cette somme cumulée, un fil ne saurait pas à quel
+    /// triangle il appartient, et il faudrait revenir au rectangle — qui fait payer à tous les
+    /// triangles la taille du plus gros, mesuré à 97,8 % de gaspillage.*
+    pub tampon_debuts: vk::Buffer,
+    memoire_debuts: vk::DeviceMemory,
     /// Combien de triangles elle peut porter — le maillage entier, alloué une fois.
     pub capacite: u32,
     /// Combien elle en porte à cet instant.
     pub longueur: u32,
+    /// Le total des micro-sommets à écrire — **c'est lui qui dimensionne le dispatch**.
+    pub fils: u32,
 }
 
 impl ListeDeTravail {
@@ -366,14 +432,35 @@ impl ListeDeTravail {
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
-        Ok(Self { tampon, memoire, capacite, longueur: 0 })
+        // ⚠ Un de plus que la capacité : `debuts[longueur]` porte le total, et c'est la borne haute
+        // de la recherche binaire du shader.
+        let (tampon_debuts, memoire_debuts) = MemoryManager::create_buffer(
+            device,
+            memory_props,
+            (capacite.max(1) as u64 + 1) * 4,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        Ok(Self {
+            tampon,
+            memoire,
+            tampon_debuts,
+            memoire_debuts,
+            capacite,
+            longueur: 0,
+            fils: 0,
+        })
     }
 
-    /// Écrit la liste des triangles à recalculer.
+    /// Écrit la liste des triangles à recalculer, et la somme cumulée de leurs micro-sommets.
+    ///
+    /// *Le plan est nécessaire parce que chaque triangle a sa propre subdivision : c'est lui qui dit
+    /// combien de fils chacun réclame.*
     pub fn ecrire(
         &mut self,
         device: &ash::Device,
         triangles: &[u32],
+        plan: &crate::render::allocation::Plan,
     ) -> Result<(), Box<dyn std::error::Error>> {
         assert!(
             triangles.len() <= self.capacite as usize,
@@ -393,24 +480,53 @@ impl ListeDeTravail {
                 device.unmap_memory(self.memoire);
             }
         }
+        // ⭐ Les débuts : une somme cumulée, plus le total en queue.
+        let mut debuts = Vec::with_capacity(triangles.len() + 1);
+        let mut cumul = 0u32;
+        for t in triangles {
+            debuts.push(cumul);
+            cumul += micro_sommets(plan.par_triangle[*t as usize].1.trailing_zeros());
+        }
+        debuts.push(cumul);
+        unsafe {
+            let ptr = device.map_memory(
+                self.memoire_debuts,
+                0,
+                (debuts.len() * 4) as u64,
+                vk::MemoryMapFlags::empty(),
+            )? as *mut u32;
+            std::ptr::copy_nonoverlapping(debuts.as_ptr(), ptr, debuts.len());
+            device.unmap_memory(self.memoire_debuts);
+        }
         self.longueur = triangles.len() as u32;
+        self.fils = cumul;
         Ok(())
     }
 
     /// Remplit la liste avec **tous** les triangles — ce que fait la première image.
-    pub fn tout(&mut self, device: &ash::Device) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn tout(
+        &mut self,
+        device: &ash::Device,
+        plan: &crate::render::allocation::Plan,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let tous: Vec<u32> = (0..self.capacite).collect();
-        self.ecrire(device, &tous)
+        self.ecrire(device, &tous, plan)
     }
 
     pub fn octets(&self) -> u64 {
         (self.capacite.max(1) as u64) * 4
     }
 
+    pub fn octets_debuts(&self) -> u64 {
+        (self.capacite.max(1) as u64 + 1) * 4
+    }
+
     pub fn detruire(&self, device: &ash::Device) {
         unsafe {
             device.destroy_buffer(self.tampon, None);
             device.free_memory(self.memoire, None);
+            device.destroy_buffer(self.tampon_debuts, None);
+            device.free_memory(self.memoire_debuts, None);
         }
     }
 }
@@ -423,15 +539,19 @@ impl ListeDeTravail {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Reglages {
-    /// ⭐ Le nombre de triangles que CETTE passe recalcule — la longueur de la
-    /// [`ListeDeTravail`], **pas** le nombre de triangles du maillage.
+    /// ⭐⭐ Le nombre total de FILS utiles — la somme des micro-sommets de la liste de travail.
     ///
-    /// *Le champ s'appelait `triangles` jusqu'au 8 septembre 2026, et il aurait menti dès que la
-    /// passe a cessé de tout refaire.*
-    pub a_refaire: u32,
+    /// **C'est lui qui dimensionne le dispatch**, et c'est tout l'objet du dispatch plat : on lance
+    /// exactement le travail, une fois arrondi au groupe de 64 pour la scène entière.
+    ///
+    /// *Le champ s'appelait `triangles`, puis `a_refaire`. Chaque renommage a suivi un changement de
+    /// ce que la passe fait vraiment — un champ dont le nom ment est ce que ce projet paie le plus
+    /// cher.*
+    pub fils: u32,
     pub cote: u32,
     pub par_triangle: u32,
-    pub _pad: u32,
+    /// Le nombre de triangles dans la liste — la borne haute de la recherche binaire du shader.
+    pub lots: u32,
     /// La direction dans laquelle le soleil VOYAGE (de la lumière vers la surface).
     ///
     /// ⚠ Le sens est écrit ici parce qu'il a déjà coûté : `examples/eclairer.rs` documente une
@@ -461,6 +581,8 @@ pub struct EntreesGeometrie {
     pub plan: (vk::Buffer, u64),
     /// `(tampon, octets)` de la liste de travail : les indices des triangles à recalculer.
     pub a_refaire: (vk::Buffer, u64),
+    /// `(tampon, octets)` des débuts cumulés — ce qui rend le dispatch plat possible.
+    pub debuts: (vk::Buffer, u64),
 }
 
 /// La passe de calcul qui remplit la mémoire de surface.
@@ -483,7 +605,8 @@ impl PasseDeSurface {
         let (indices, octets_indices) = entrees.indices;
         let (plan, octets_plan) = entrees.plan;
         let (liste, octets_liste) = entrees.a_refaire;
-        let liaisons: [vk::DescriptorSetLayoutBinding; 5] = std::array::from_fn(|i| {
+        let (debuts, octets_debuts) = entrees.debuts;
+        let liaisons: [vk::DescriptorSetLayoutBinding; 6] = std::array::from_fn(|i| {
             vk::DescriptorSetLayoutBinding::default()
                 .binding(i as u32)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -499,7 +622,7 @@ impl PasseDeSurface {
 
         let tailles = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(5)];
+            .descriptor_count(6)];
         let pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default().pool_sizes(&tailles).max_sets(1),
@@ -520,8 +643,9 @@ impl PasseDeSurface {
             vk::DescriptorBufferInfo::default().buffer(memoire.tampon).offset(0).range(memoire.octets()),
             vk::DescriptorBufferInfo::default().buffer(plan).offset(0).range(octets_plan),
             vk::DescriptorBufferInfo::default().buffer(liste).offset(0).range(octets_liste),
+            vk::DescriptorBufferInfo::default().buffer(debuts).offset(0).range(octets_debuts),
         ];
-        let ecritures: Vec<vk::WriteDescriptorSet> = (0..5)
+        let ecritures: Vec<vk::WriteDescriptorSet> = (0..6)
             .map(|i| {
                 vk::WriteDescriptorSet::default()
                     .dst_set(set)
@@ -566,6 +690,10 @@ impl PasseDeSurface {
     /// Encode le remplissage de la mémoire de surface, puis la barrière qui rend l'écriture
     /// visible à qui lira ensuite.
     ///
+    /// ⚠ **Il prenait un `rangs_max` jusqu'au 8 septembre au soir**, et ce paramètre a disparu avec
+    /// le dispatch rectangulaire : *une forme de dispatch qui n'a plus besoin de connaître le plus
+    /// gros triangle du lot est exactement ce qu'on cherchait.*
+    ///
     /// ## ⚠⚠ Ce que la barrière fait, et ce qu'AUCUN test ne prouve aujourd'hui
     ///
     /// Elle rend l'écriture du shader visible à qui lira ensuite. Elle est exprimée dans la même
@@ -589,7 +717,6 @@ impl PasseDeSurface {
         cmd: vk::CommandBuffer,
         reglages: &Reglages,
         memoire: &MemoireDeSurface,
-        rangs_max: u32,
     ) {
         unsafe {
             device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
@@ -613,18 +740,25 @@ impl PasseDeSurface {
             // la subdivision réelle dans le plan. *C'est le gaspillage assumé d'un dispatch
             // rectangulaire sur une allocation qui ne l'est pas ; le mesurer est le chantier
             // suivant, l'ignorer serait le vrai défaut.*
-            // ⭐ Le dispatch suit la LISTE, pas le maillage : c'est là que le travail tombe.
+            // ⭐⭐⭐ LE DISPATCH EST PLAT : un fil par micro-sommet à écrire, et rien de plus.
+            //
+            // *Il était RECTANGULAIRE jusqu'au 8 septembre au soir — `rangs_max` fils pour CHAQUE
+            // triangle, donc tous les petits payaient la taille du plus gros. Mesuré : 7 124 224
+            // fils lancés pour 154 809 utiles, **97,8 % de gaspillage**. Un dispatch par classe de
+            // subdivision en aurait laissé 54,2 %, parce que les fils partent par groupes de 64 et
+            // qu'un triangle à 3 micro-sommets paie un groupe entier. À plat, l'arrondi n'a lieu
+            // qu'une seule fois pour toute la scène.*
             //
             // ⚠ Un dispatch de zéro groupe est légal en Vulkan et ne fait rien — mais on sort avant,
             // parce qu'encoder une barrière pour une écriture qui n'a pas eu lieu serait décrire une
             // dépendance qui n'existe pas.
-            if reglages.a_refaire == 0 {
+            if reglages.fils == 0 {
                 return;
             }
             device.cmd_dispatch(
                 cmd,
-                ComputePipelineManager::calculate_workgroup_count(rangs_max, 64),
-                reglages.a_refaire,
+                ComputePipelineManager::calculate_workgroup_count(reglages.fils, 64),
+                1,
                 1,
             );
             let barriere = vk::BufferMemoryBarrier::default()

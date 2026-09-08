@@ -458,7 +458,7 @@ fn remplir_pour_mesure(scene: &Scene, plan: &Plan) -> Option<Vec<[f32; 3]>> {
     let (bp, mp, op) = televerser(&gpu.device, &props, &mots).ok()?;
     let memoire = MemoireDeSurface::allouer_selon(&gpu.device, &props, plan).ok()?;
     let mut liste = ListeDeTravail::allouer(&gpu.device, &props, (scene.indices.len() / 3) as u32).ok()?;
-    liste.tout(&gpu.device).ok()?;
+    liste.tout(&gpu.device, plan).ok()?;
     let passe = PasseDeSurface::nouvelle(
         &gpu.device,
         &EntreesGeometrie {
@@ -466,17 +466,15 @@ fn remplir_pour_mesure(scene: &Scene, plan: &Plan) -> Option<Vec<[f32; 3]>> {
             indices: (bi, oi),
             plan: (bp, op),
             a_refaire: (liste.tampon, liste.octets()),
+            debuts: (liste.tampon_debuts, liste.octets_debuts()),
         },
         &memoire,
     ).ok()?;
-    let rangs_max = plan.par_triangle.iter()
-        .map(|(_, c)| aegis_engine::render::surface::micro_sommets(c.trailing_zeros()))
-        .max().unwrap_or(3);
     let reglages = ReglagesSurface {
-        a_refaire: liste.longueur,
+        fils: liste.fils,
         cote: memoire.cote,
         par_triangle: memoire.par_triangle,
-        _pad: 0,
+        lots: liste.longueur,
         // ⭐ `w = 1` fige le lambert : la valeur ne dépend plus que de la POSITION.
         //
         // *C'est ce qui rend la mesure de couture possible. Avec le lambert, le saut à une arête
@@ -487,7 +485,7 @@ fn remplir_pour_mesure(scene: &Scene, plan: &Plan) -> Option<Vec<[f32; 3]>> {
         signal: SIGNAL,
     };
     let cmd = gpu.begin_single_time_commands().ok()?;
-    passe.encoder(&gpu.device, cmd, &reglages, &memoire, rangs_max);
+    passe.encoder(&gpu.device, cmd, &reglages, &memoire);
     gpu.end_single_time_commands(cmd).ok()?;
     let lu = memoire.relire(&gpu.device).ok()?;
     passe.detruire(&gpu.device);
@@ -732,19 +730,13 @@ fn rendre_avec(
     };
     let mots = encoder_pour_gpu(&plan);
     let (b_plan, m_plan, o_plan) = televerser(&gpu.device, &memory_props, &mots)?;
-    let rangs_max = plan
-        .par_triangle
-        .iter()
-        .map(|(_, c)| aegis_engine::render::surface::micro_sommets(c.trailing_zeros()))
-        .max()
-        .unwrap_or(3);
 
     // ── 2. Remplir la mémoire de surface ────────────────────────────────────────────────────
     let memoire = MemoireDeSurface::allouer_selon(&gpu.device, &memory_props, &plan)?;
     // ⭐ La liste de travail : à la première image, elle porte tous les triangles. *Il n'y a pas de
     // mode « tout refaire » — il y a une liste, pleine ici et courte quand la mémoire persiste.*
     let mut liste = ListeDeTravail::allouer(&gpu.device, &memory_props, triangles)?;
-    liste.tout(&gpu.device)?;
+    liste.tout(&gpu.device, &plan)?;
     let passe = PasseDeSurface::nouvelle(
         &gpu.device,
         &EntreesGeometrie {
@@ -752,19 +744,20 @@ fn rendre_avec(
             indices: (b_indices, o_indices),
             plan: (b_plan, o_plan),
             a_refaire: (liste.tampon, liste.octets()),
+            debuts: (liste.tampon_debuts, liste.octets_debuts()),
         },
         &memoire,
     )?;
     let reglages_surface = ReglagesSurface {
-        a_refaire: liste.longueur,
+        fils: liste.fils,
         cote: memoire.cote,
         par_triangle: memoire.par_triangle,
-        _pad: 0,
+        lots: liste.longueur,
         soleil: SOLEIL,
         signal: SIGNAL,
     };
     let cmd = gpu.begin_single_time_commands()?;
-    passe.encoder(&gpu.device, cmd, &reglages_surface, &memoire, rangs_max);
+    passe.encoder(&gpu.device, cmd, &reglages_surface, &memoire);
     gpu.end_single_time_commands(cmd)?;
 
     // ── 2. Le pipeline de lecture ───────────────────────────────────────────────────────────
@@ -775,6 +768,7 @@ fn rendre_avec(
             indices: (b_indices, o_indices),
             plan: (b_plan, o_plan),
             a_refaire: (liste.tampon, liste.octets()),
+            debuts: (liste.tampon_debuts, liste.octets_debuts()),
         },
         &memoire,
     )?;
