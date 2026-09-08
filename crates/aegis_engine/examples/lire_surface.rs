@@ -41,7 +41,7 @@ use aegis_engine::geometry::glb_loader::{GlbLoader, Scene};
 use aegis_engine::render::allocation::{aires_ecran, encoder_pour_gpu, planifier, raccorder, Plan};
 use aegis_engine::render::placement::Placement;
 use aegis_engine::render::pipeline::{Faces, Melange, PipelineFactory, Reglages as ReglagesPipeline};
-use aegis_engine::render::surface::{EntreesGeometrie, MemoireDeSurface, PasseDeSurface, Reglages as ReglagesSurface, OCTETS_PAR_ENTREE};
+use aegis_engine::render::surface::{EntreesGeometrie, ListeDeTravail, MemoireDeSurface, PasseDeSurface, Reglages as ReglagesSurface, OCTETS_PAR_ENTREE};
 use ash::vk;
 use std::path::{Path, PathBuf};
 
@@ -457,16 +457,23 @@ fn remplir_pour_mesure(scene: &Scene, plan: &Plan) -> Option<Vec<[f32; 3]>> {
     let mots = encoder_pour_gpu(plan);
     let (bp, mp, op) = televerser(&gpu.device, &props, &mots).ok()?;
     let memoire = MemoireDeSurface::allouer_selon(&gpu.device, &props, plan).ok()?;
+    let mut liste = ListeDeTravail::allouer(&gpu.device, &props, (scene.indices.len() / 3) as u32).ok()?;
+    liste.tout(&gpu.device).ok()?;
     let passe = PasseDeSurface::nouvelle(
         &gpu.device,
-        &EntreesGeometrie { sommets: (bs, os), indices: (bi, oi), plan: (bp, op) },
+        &EntreesGeometrie {
+            sommets: (bs, os),
+            indices: (bi, oi),
+            plan: (bp, op),
+            a_refaire: (liste.tampon, liste.octets()),
+        },
         &memoire,
     ).ok()?;
     let rangs_max = plan.par_triangle.iter()
         .map(|(_, c)| aegis_engine::render::surface::micro_sommets(c.trailing_zeros()))
         .max().unwrap_or(3);
     let reglages = ReglagesSurface {
-        triangles: (scene.indices.len() / 3) as u32,
+        a_refaire: liste.longueur,
         cote: memoire.cote,
         par_triangle: memoire.par_triangle,
         _pad: 0,
@@ -734,17 +741,22 @@ fn rendre_avec(
 
     // ── 2. Remplir la mémoire de surface ────────────────────────────────────────────────────
     let memoire = MemoireDeSurface::allouer_selon(&gpu.device, &memory_props, &plan)?;
+    // ⭐ La liste de travail : à la première image, elle porte tous les triangles. *Il n'y a pas de
+    // mode « tout refaire » — il y a une liste, pleine ici et courte quand la mémoire persiste.*
+    let mut liste = ListeDeTravail::allouer(&gpu.device, &memory_props, triangles)?;
+    liste.tout(&gpu.device)?;
     let passe = PasseDeSurface::nouvelle(
         &gpu.device,
         &EntreesGeometrie {
             sommets: (b_sommets, o_sommets),
             indices: (b_indices, o_indices),
             plan: (b_plan, o_plan),
+            a_refaire: (liste.tampon, liste.octets()),
         },
         &memoire,
     )?;
     let reglages_surface = ReglagesSurface {
-        triangles,
+        a_refaire: liste.longueur,
         cote: memoire.cote,
         par_triangle: memoire.par_triangle,
         _pad: 0,
@@ -762,6 +774,7 @@ fn rendre_avec(
             sommets: (b_sommets, o_sommets),
             indices: (b_indices, o_indices),
             plan: (b_plan, o_plan),
+            a_refaire: (liste.tampon, liste.octets()),
         },
         &memoire,
     )?;

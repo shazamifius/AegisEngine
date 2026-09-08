@@ -8,7 +8,13 @@
 // qu'un shader peut écrire dans une mémoire persistante attachée à la géométrie.
 
 struct Reglages {
-    triangles: u32,
+    // ⭐ Le nombre de triangles que CETTE passe doit recalculer — la longueur de `a_refaire`, pas le
+    // nombre de triangles du maillage.
+    //
+    // *Il n'y a pas deux modes « tout » et « partiel » : il y a une LISTE, pleine à la première
+    // image et courte ensuite. Un mécanisme unique se teste ; deux modes font deux moteurs, dont un
+    // seul est exercé.*
+    a_refaire: u32,
     // n = 2^k, le nombre de segments par arête.
     cote: u32,
     // Les micro-sommets d'un triangle : (n+1)(n+2)/2.
@@ -47,6 +53,17 @@ var<push_constant> reglages: Reglages;
 // l'adresse cesse d'être une multiplication : elle devient une LECTURE. *Huit octets par triangle,
 // et c'est le prix exact de la non-uniformité — il faut le dire, pas le cacher dans une formule.*
 @group(0) @binding(3) var<storage, read> plan: array<u32>;
+// ⭐⭐ LA LISTE DE TRAVAIL — quels triangles cette passe doit recalculer.
+//
+// C'est ce qui rend la mémoire de surface PERSISTANTE : ce qui n'est pas dans cette liste garde la
+// valeur écrite à une image précédente. *Sans elle, « une mémoire et sa dérivée » reste une
+// intention — on réécrirait un état complet à chaque image, ce qui est la définition d'une texture
+// recalculée, pas d'un état qui évolue.*
+//
+// ⚠ Elle contient des INDICES de triangles, pas des drapeaux : un fil ne doit jamais être lancé pour
+// un triangle qu'on ne veut pas toucher. *Un test « ce triangle est-il à refaire ? » à l'intérieur
+// du shader lancerait tous les fils pour n'en garder que 3 % — ça n'économiserait rien.*
+@group(0) @binding(4) var<storage, read> a_refaire: array<u32>;
 
 const FLOTTANTS_PAR_SOMMET: u32 = 14u;
 
@@ -119,11 +136,12 @@ fn bary_arete(e: u32, f: f32) -> vec2<f32> {
 
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let rang = gid.x;      // le micro-sommet dans son triangle
-    let triangle = gid.y;  // le triangle du maillage
-    if (triangle >= reglages.triangles) {
+    let rang = gid.x;  // le micro-sommet dans son triangle
+    if (gid.y >= reglages.a_refaire) {
         return;
     }
+    // ⭐ Le triangle se LIT dans la liste de travail : `gid.y` numérote le travail, pas le maillage.
+    let triangle = a_refaire[gid.y];
 
     // L'adresse se LIT : ce triangle a sa propre base et sa propre subdivision.
     let base_tri = plan[triangle * 2u];

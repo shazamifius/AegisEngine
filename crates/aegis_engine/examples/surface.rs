@@ -49,7 +49,7 @@ use aegis_engine::core::memory::MemoryManager;
 use aegis_engine::geometry::glb_loader::GlbLoader;
 use aegis_engine::render::allocation::{encoder_pour_gpu, Plan};
 use aegis_engine::render::surface::{
-    depuis_rang, EntreesGeometrie, micro_sommets, MemoireDeSurface, PasseDeSurface, Reglages, OCTETS_PAR_ENTREE,
+    depuis_rang, EntreesGeometrie, ListeDeTravail, micro_sommets, MemoireDeSurface, PasseDeSurface, Reglages, OCTETS_PAR_ENTREE,
 };
 use ash::vk;
 use std::path::PathBuf;
@@ -181,18 +181,22 @@ fn remplir(
     let (tampon_plan, mem_plan, octets_plan) = televerser(&gpu.device, &memory_props, &mots)?;
 
     let memoire = MemoireDeSurface::allouer(&gpu.device, &memory_props, triangles, k)?;
+    // ⭐ La liste de travail : à la première image, elle porte tous les triangles.
+    let mut liste = ListeDeTravail::allouer(&gpu.device, &memory_props, triangles)?;
+    liste.tout(&gpu.device)?;
     let passe = PasseDeSurface::nouvelle(
         &gpu.device,
         &EntreesGeometrie {
             sommets: (tampon_sommets, octets_sommets),
             indices: (tampon_indices, octets_indices),
             plan: (tampon_plan, octets_plan),
+            a_refaire: (liste.tampon, liste.octets()),
         },
         &memoire,
     )?;
 
     let reglages = Reglages {
-        triangles,
+        a_refaire: liste.longueur,
         cote: memoire.cote,
         par_triangle: memoire.par_triangle,
         _pad: 0,

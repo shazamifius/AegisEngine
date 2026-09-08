@@ -298,6 +298,41 @@ impl Placement {
     }
 }
 
+/// ⭐⭐ **CE QU'IL FAUT RECALCULER POUR PASSER D'UNE IMAGE À LA SUIVANTE.**
+///
+/// C'est la fonction dont dépend toute la persistance : ce qui n'est pas dans la liste qu'elle rend
+/// **garde la valeur écrite à l'image précédente**. Une omission ici ne lève aucune erreur — elle
+/// laisse une valeur périmée à l'écran, ce qui ressemble à une image juste.
+///
+/// ## Les deux termes, et le second est celui qu'on oublie
+///
+/// 1. **Les triangles RELOGÉS** — leur bloc a changé, donc leur contenu est entièrement à refaire.
+/// 2. **Les triangles dont le RACCORD a changé** — ils gardent leur place *et* leur subdivision,
+///    mais le niveau effectif d'une de leurs arêtes a bougé parce qu'un **voisin** a changé de
+///    subdivision. Le raccord aligne une arête sur le minimum des deux triangles : leur bord est
+///    donc décimé différemment.
+///
+/// > ### ⚠ Le second terme n'est pas une précaution — il est MESURÉ nécessaire.
+/// >
+/// > En le retirant, le banc `reecriture` passe de 210 à 99 triangles refaits, et **209 entrées
+/// > divergent** de la référence : très exactement les coutures que le raccord existe pour empêcher.
+/// > *Sans lui, le banc resterait vert sur le nombre de triangles et l'image serait cousue.*
+pub fn a_refaire(
+    deplacement: &Deplacement,
+    aretes_avant: &[[u32; 3]],
+    aretes_apres: &[[u32; 3]],
+) -> Vec<u32> {
+    let mut liste = deplacement.relogés.clone();
+    let deja: std::collections::HashSet<u32> = liste.iter().copied().collect();
+    for (t, apres) in aretes_apres.iter().enumerate() {
+        if !deja.contains(&(t as u32)) && aretes_avant.get(t) != Some(apres) {
+            liste.push(t as u32);
+        }
+    }
+    liste.sort_unstable();
+    liste
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,6 +529,49 @@ mod tests {
             p.mettre_a_jour(&k, u64::MAX / 2);
         }
         assert_eq!(p.compactages, 0, "avec un budget immense, aucun compactage ne se justifie");
+    }
+
+    /// ⭐⭐ **La liste de travail doit porter LES DEUX termes.**
+    ///
+    /// *Le second — les triangles dont le raccord a changé sans qu'ils bougent — est celui qu'on
+    /// oublie, et son oubli ne se voit pas : il laisse des valeurs périmées sur les BORDS, ce qui
+    /// s'appelle une couture.*
+    #[test]
+    fn la_liste_de_travail_porte_les_relogés_et_les_bords_changés() {
+        let deplacement = Deplacement {
+            relogés: vec![2, 5],
+            compacte: false,
+            entrees_relogées: 0,
+            entrees_totales: 0,
+        };
+        let avant = vec![[4, 4, 4], [4, 4, 4], [8, 8, 8], [4, 4, 4], [2, 4, 4], [8, 8, 8]];
+        let mut apres = avant.clone();
+        // Le triangle 4 n'a pas bougé, mais son voisin a changé : une de ses arêtes est décimée.
+        apres[4] = [4, 4, 4];
+
+        let liste = a_refaire(&deplacement, &avant, &apres);
+        assert_eq!(liste, vec![2, 4, 5], "il faut les relogés ET le bord qui change");
+
+        // ⚠ Et sans changement d'arête, on ne refait QUE les relogés : la liste ne doit pas gonfler.
+        assert_eq!(
+            a_refaire(&deplacement, &avant, &avant),
+            vec![2, 5],
+            "un raccord inchangé ne doit ajouter personne"
+        );
+    }
+
+    /// ⚠ Un triangle relogé ne doit pas être compté deux fois — il serait recalculé en double.
+    #[test]
+    fn un_triangle_reloge_dont_le_raccord_change_aussi_n_apparait_qu_une_fois() {
+        let deplacement = Deplacement {
+            relogés: vec![1],
+            compacte: false,
+            entrees_relogées: 0,
+            entrees_totales: 0,
+        };
+        let avant = vec![[4, 4, 4], [8, 8, 8]];
+        let apres = vec![[4, 4, 4], [2, 2, 2]];
+        assert_eq!(a_refaire(&deplacement, &avant, &apres), vec![1]);
     }
 
     /// Le plan produit doit rester lisible par le shader : bases et subdivisions cohérentes.

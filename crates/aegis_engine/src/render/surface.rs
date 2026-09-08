@@ -322,6 +322,99 @@ fn demi_vers_f32(h: u16) -> f32 {
     }
 }
 
+/// ⭐⭐ **LA LISTE DE TRAVAIL — ce qui rend la mémoire de surface persistante.**
+///
+/// Elle porte les **indices des triangles** que la prochaine passe doit recalculer. Ce qui n'y est
+/// pas garde la valeur écrite à une image précédente.
+///
+/// ## ⚠ Pourquoi il n'y a pas de mode « tout refaire »
+///
+/// Il y en aurait pu : un drapeau, deux chemins. **Mais le jour où un mécanisme choisit entre deux
+/// algorithmes, il y a deux moteurs, dont un seul est réellement exercé.** Ici la liste existe
+/// toujours — pleine à la première image, courte ensuite — donc le chemin testé est le chemin
+/// employé, et [`tout`](Self::tout) n'est qu'un remplissage commode.
+///
+/// ## ⚠ Et pourquoi ce sont des INDICES, pas des drapeaux
+///
+/// Un tampon de booléens testé dans le shader lancerait tous les fils pour n'en garder que quelques
+/// pour cent : *ça ne coûterait pas moins de dispatch, seulement moins d'écritures.* Une liste
+/// d'indices réduit le dispatch lui-même, qui est le poste qu'on cherche à faire tomber.
+pub struct ListeDeTravail {
+    pub tampon: vk::Buffer,
+    memoire: vk::DeviceMemory,
+    /// Combien de triangles elle peut porter — le maillage entier, alloué une fois.
+    pub capacite: u32,
+    /// Combien elle en porte à cet instant.
+    pub longueur: u32,
+}
+
+impl ListeDeTravail {
+    /// Alloue la liste pour un maillage de `capacite` triangles.
+    ///
+    /// ⚠ Elle est allouée **à la taille du maillage entier**, une fois pour toutes, même si elle ne
+    /// portera ensuite que quelques dizaines d'entrées. *Réallouer un tampon Vulkan par image pour
+    /// économiser quelques kilo-octets serait précisément l'inverse de ce que ce fichier cherche.*
+    pub fn allouer(
+        device: &ash::Device,
+        memory_props: &vk::PhysicalDeviceMemoryProperties,
+        capacite: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (tampon, memoire) = MemoryManager::create_buffer(
+            device,
+            memory_props,
+            (capacite.max(1) as u64) * 4,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        Ok(Self { tampon, memoire, capacite, longueur: 0 })
+    }
+
+    /// Écrit la liste des triangles à recalculer.
+    pub fn ecrire(
+        &mut self,
+        device: &ash::Device,
+        triangles: &[u32],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert!(
+            triangles.len() <= self.capacite as usize,
+            "la liste de travail porte {} triangles pour une capacité de {}",
+            triangles.len(),
+            self.capacite
+        );
+        if !triangles.is_empty() {
+            unsafe {
+                let ptr = device.map_memory(
+                    self.memoire,
+                    0,
+                    (triangles.len() * 4) as u64,
+                    vk::MemoryMapFlags::empty(),
+                )? as *mut u32;
+                std::ptr::copy_nonoverlapping(triangles.as_ptr(), ptr, triangles.len());
+                device.unmap_memory(self.memoire);
+            }
+        }
+        self.longueur = triangles.len() as u32;
+        Ok(())
+    }
+
+    /// Remplit la liste avec **tous** les triangles — ce que fait la première image.
+    pub fn tout(&mut self, device: &ash::Device) -> Result<(), Box<dyn std::error::Error>> {
+        let tous: Vec<u32> = (0..self.capacite).collect();
+        self.ecrire(device, &tous)
+    }
+
+    pub fn octets(&self) -> u64 {
+        (self.capacite.max(1) as u64) * 4
+    }
+
+    pub fn detruire(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_buffer(self.tampon, None);
+            device.free_memory(self.memoire, None);
+        }
+    }
+}
+
 /// Les réglages passés au shader, en constantes poussées.
 ///
 /// ⚠ `repr(C)` et l'ordre des champs comptent : ils doivent correspondre exactement à la structure
@@ -330,7 +423,12 @@ fn demi_vers_f32(h: u16) -> f32 {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Reglages {
-    pub triangles: u32,
+    /// ⭐ Le nombre de triangles que CETTE passe recalcule — la longueur de la
+    /// [`ListeDeTravail`], **pas** le nombre de triangles du maillage.
+    ///
+    /// *Le champ s'appelait `triangles` jusqu'au 8 septembre 2026, et il aurait menti dès que la
+    /// passe a cessé de tout refaire.*
+    pub a_refaire: u32,
     pub cote: u32,
     pub par_triangle: u32,
     pub _pad: u32,
@@ -361,6 +459,8 @@ pub struct EntreesGeometrie {
     pub indices: (vk::Buffer, u64),
     /// `(tampon, octets)` du plan d'allocation : deux `u32` par triangle.
     pub plan: (vk::Buffer, u64),
+    /// `(tampon, octets)` de la liste de travail : les indices des triangles à recalculer.
+    pub a_refaire: (vk::Buffer, u64),
 }
 
 /// La passe de calcul qui remplit la mémoire de surface.
@@ -382,7 +482,8 @@ impl PasseDeSurface {
         let (sommets, octets_sommets) = entrees.sommets;
         let (indices, octets_indices) = entrees.indices;
         let (plan, octets_plan) = entrees.plan;
-        let liaisons: [vk::DescriptorSetLayoutBinding; 4] = std::array::from_fn(|i| {
+        let (liste, octets_liste) = entrees.a_refaire;
+        let liaisons: [vk::DescriptorSetLayoutBinding; 5] = std::array::from_fn(|i| {
             vk::DescriptorSetLayoutBinding::default()
                 .binding(i as u32)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -398,7 +499,7 @@ impl PasseDeSurface {
 
         let tailles = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(4)];
+            .descriptor_count(5)];
         let pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default().pool_sizes(&tailles).max_sets(1),
@@ -418,8 +519,9 @@ impl PasseDeSurface {
             vk::DescriptorBufferInfo::default().buffer(indices).offset(0).range(octets_indices),
             vk::DescriptorBufferInfo::default().buffer(memoire.tampon).offset(0).range(memoire.octets()),
             vk::DescriptorBufferInfo::default().buffer(plan).offset(0).range(octets_plan),
+            vk::DescriptorBufferInfo::default().buffer(liste).offset(0).range(octets_liste),
         ];
-        let ecritures: Vec<vk::WriteDescriptorSet> = (0..4)
+        let ecritures: Vec<vk::WriteDescriptorSet> = (0..5)
             .map(|i| {
                 vk::WriteDescriptorSet::default()
                     .dst_set(set)
@@ -511,10 +613,18 @@ impl PasseDeSurface {
             // la subdivision réelle dans le plan. *C'est le gaspillage assumé d'un dispatch
             // rectangulaire sur une allocation qui ne l'est pas ; le mesurer est le chantier
             // suivant, l'ignorer serait le vrai défaut.*
+            // ⭐ Le dispatch suit la LISTE, pas le maillage : c'est là que le travail tombe.
+            //
+            // ⚠ Un dispatch de zéro groupe est légal en Vulkan et ne fait rien — mais on sort avant,
+            // parce qu'encoder une barrière pour une écriture qui n'a pas eu lieu serait décrire une
+            // dépendance qui n'existe pas.
+            if reglages.a_refaire == 0 {
+                return;
+            }
             device.cmd_dispatch(
                 cmd,
                 ComputePipelineManager::calculate_workgroup_count(rangs_max, 64),
-                reglages.triangles,
+                reglages.a_refaire,
                 1,
             );
             let barriere = vk::BufferMemoryBarrier::default()
