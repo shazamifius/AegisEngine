@@ -23,6 +23,8 @@
 // *Conséquence assumée : la géométrie est dessinée NON INDEXÉE, donc chaque sommet partagé est lu
 // plusieurs fois. C'est un coût de bande passante réel, et il n'est pas mesuré ici.*
 
+//!inclure adresse
+
 struct Reglages {
     view_proj: mat4x4<f32>,
     triangles: u32,
@@ -59,13 +61,12 @@ fn normale(s: u32) -> vec3<f32> {
     return vec3<f32>(sommets[b], sommets[b + 1u], sommets[b + 2u]);
 }
 
-fn debut_rangee(j: u32, n: u32) -> u32 {
-    return j * (2u * n + 3u - j) / 2u;
-}
-
 // Lit une entrée de la mémoire de surface : deux u32, quatre demi-flottants, dont trois utilisés.
+//
+// ⭐ L'adresse vient de `adresse.wgsl`, partagée avec la passe d'écriture. *C'est le sens
+// (i,j) → rang, et c'est le chemin le plus chaud du moteur : trois appels par pixel d'écran.*
 fn entree(base_tri: u32, i: u32, j: u32, n: u32) -> vec3<f32> {
-    let base = (base_tri + debut_rangee(j, n) + i) * 2u;
+    let base = (base_tri + rang_stable(i, j, n)) * 2u;
     let rv = unpack2x16float(surface[base]);
     let b = unpack2x16float(surface[base + 1u]);
     return vec3<f32>(rv.x, rv.y, b.x);

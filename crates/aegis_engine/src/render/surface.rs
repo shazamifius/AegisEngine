@@ -140,6 +140,185 @@ pub fn depuis_rang(r: u32, n: u32) -> (u32, u32) {
     (r - rang(0, j, n), j)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//  L'ADRESSE STABLE — chantier 0.6, 9 septembre 2026
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+/// ⭐⭐⭐ **LE NIVEAU D'APPARITION D'UN MICRO-SOMMET**, et pourquoi c'est lui qui rend l'adresse stable.
+///
+/// ## Le défaut que ceci corrige, et il est à la racine
+///
+/// [`rang`] contient `n`. L'adresse d'un micro-sommet dépend donc de la subdivision de son
+/// triangle : le milieu d'une arête — **physiquement toujours le même point** — vit à l'adresse 1
+/// quand $k=1$, 4 quand $k=3$, 32 quand $k=6$.
+///
+/// *Ajouter un étage à un immeuble oblige à renuméroter tous les appartements.*
+///
+/// > **Mesuré le 9 septembre 2026, avec témoin : 775 points sur 780 changent d'adresse en
+/// > raffinant — 99,4 %.** Ce n'est pas « quelques points déménagent ».
+///
+/// C'est ce défaut qui a rendu nécessaire toute la plomberie du 8 septembre — free-list par classe
+/// de taille, compactage, recherche binaire. **On ne le compense pas : on le supprime.**
+///
+/// ## La réponse : numéroter par ORDRE D'APPARITION dans le raffinement
+///
+/// | niveau | ce qui apparaît | adresses |
+/// |---|---|---|
+/// | 0 | les 3 coins | 0 – 2 |
+/// | 1 | les 3 milieux d'arêtes | 3 – 5 |
+/// | 2 | les 9 points suivants | 6 – 14 |
+///
+/// Le niveau se **lit dans les coordonnées** : c'est le nombre de fois qu'on peut diviser la grille
+/// par deux en gardant le point sur un nœud — une **valuation 2-adique**.
+///
+/// $$k_{\mathrm{app}}(i,j) = K - \min\big(v_2(i),\ v_2(j),\ v_2(n-i-j),\ K\big)$$
+///
+/// ⚠ *Le troisième terme n'est pas une symétrie décorative.* Un point de l'arête opposée au premier
+/// coin vérifie $i+j = n$ ; ni $v_2(i)$ ni $v_2(j)$ ne décrivent alors sa position sur cette arête,
+/// et sans ce terme un point du bord se verrait attribuer un niveau trop fin.
+///
+/// Le plafond à `K` traite les trois coins, où l'une des coordonnées est nulle — et $v_2(0)$ n'est
+/// pas fini.
+pub fn niveau_apparition(i: u32, j: u32, k: u32) -> u32 {
+    let n = 1u32 << k;
+    debug_assert!(i + j <= n, "({i},{j}) est hors du triangle de côté {n}");
+    let v2 = |x: u32| if x == 0 { u32::MAX } else { x.trailing_zeros() };
+    k - v2(i).min(v2(j)).min(v2(n - i - j)).min(k)
+}
+
+/// Combien de points de la **grille de pas `p`** viennent avant `(i, j)`, en ordre rangée.
+///
+/// Les points comptés sont les $(i', j')$ multiples de `p` dans le triangle, tels que $j' < j$, ou
+/// $j' = j$ et $i' < i$. *Le point `(i, j)` lui-même n'a pas besoin d'être sur cette grille.*
+///
+/// La rangée $j' = m\,p$ contient $N - m + 1$ de ces points, avec $N = n/p$ ; la somme des
+/// $M = \lceil j/p \rceil$ rangées précédentes est donc fermée :
+///
+/// $$M\,(N+1) - \frac{M(M-1)}{2}$$
+///
+/// *Aucune boucle : c'est ce qui permet à l'adresse de rester une arithmétique, comme la
+/// précédente.*
+fn rang_grille(i: u32, j: u32, n: u32, p: u32) -> u32 {
+    let grand_n = n / p;
+    let m = j.div_ceil(p); // rangées multiples de `p` strictement avant `j`
+    let mut total = m * (grand_n + 1) - m * (m - 1) / 2;
+    if j.is_multiple_of(p) {
+        total += i.div_ceil(p);
+    }
+    total
+}
+
+/// ⭐⭐ **L'ADRESSE STABLE** : le rang de `(i, j)` dans l'ordre d'apparition.
+///
+/// ## Ce que cette fonction achète, et c'est démontré, pas mesuré
+///
+/// $$\mathrm{rang\_stable}(i, j, K) = \mathrm{rang\_stable}(2i, 2j, K{+}1)$$
+///
+/// **Un point ne change jamais d'adresse quand on raffine son triangle.** Trois conséquences, qui
+/// ne sont pas des optimisations mais des disparitions :
+///
+/// 1. **Raffiner n'ajoute qu'en queue.** Aucune donnée ne se déplace, jamais.
+/// 2. **Le niveau $k$ est un PRÉFIXE** — les $\mathrm{micro}(k)$ premières adresses *sont* le
+///    niveau $k$. ⚠ Un préfixe **sous-échantillonne**, il ne filtre pas : ce n'est pas un mipmap
+///    (voir le chantier 0.7 dans `prive/moteur/02-THESE.md`).
+/// 3. **Tous les blocs deviennent identiques** : plus de classes de taille, plus de fragmentation,
+///    plus de compactage.
+///
+/// ## Comment le rang se calcule sans rien parcourir
+///
+/// Les points de niveau $\le a$ forment la grille de pas $d = 2^{K-a}$ ; ceux de niveau $\le a-1$
+/// la grille de pas $2d$. Le rang **dans** le niveau $a$ est donc la **différence de deux rangs de
+/// grille**, et la base du niveau est $\mathrm{micro}(a-1)$ — le nombre total de points plus
+/// grossiers.
+///
+/// ⚠ **Le niveau 0 est un cas à part, et il a fait tomber la première version** : il n'existe
+/// aucune grille précédente à soustraire, les trois coins *sont* le niveau 0. *Sans ce cas, la
+/// formule rendait 0 pour le coin `(1,0)` à $K=0$.*
+///
+/// ## L'ordre à l'intérieur d'un niveau est LIBRE
+///
+/// L'invariance n'impose **que** le regroupement par niveau. À l'intérieur, n'importe quel ordre
+/// convient — vérifié le 9 septembre sur quatre ordres différents ; seul le retrait du regroupement
+/// la casse. *L'ordre rangée est retenu ici parce qu'il a une formule fermée ; un ordre de Morton
+/// donnerait une meilleure localité de lecture (2,10 blocs de cache par pixel contre 2,52) au prix
+/// d'un décodage sans formule simple sur un domaine triangulaire. À n'instruire que si la mesure de
+/// temps le réclame.*
+pub fn rang_stable(i: u32, j: u32, k: u32) -> u32 {
+    let n = 1u32 << k;
+    let a = niveau_apparition(i, j, k);
+    let d = 1u32 << (k - a);
+    if a == 0 {
+        // Les trois coins : aucune grille plus grossière n'existe.
+        return rang_grille(i, j, n, d);
+    }
+    micro_sommets(a - 1) + rang_grille(i, j, n, d) - rang_grille(i, j, n, 2 * d)
+}
+
+/// Combien de points du niveau `a` vivent dans les rangées situées avant $j = m\,d$.
+///
+/// C'est la primitive que la recherche binaire de [`depuis_rang_stable`] interroge : elle doit être
+/// **fermée**, sinon l'inverse coûterait $O(2^a)$ par fil — jusqu'à 256 itérations à $K = 8$, ce
+/// qu'un shader ne peut pas payer.
+fn cumul_niveau(m: u32, a: u32, k: u32) -> u32 {
+    let n = 1u32 << k;
+    let d = 1u32 << (k - a);
+    let grand_n = n / d;
+    let total = m * (grand_n + 1) - m * (m - 1) / 2;
+    if a == 0 {
+        return total;
+    }
+    let n2 = n / (2 * d);
+    let m2 = m.div_ceil(2);
+    total - (m2 * (n2 + 1) - m2 * (m2 - 1) / 2)
+}
+
+/// L'inverse de [`rang_stable`] : retrouve `(i, j)` depuis une adresse stable.
+///
+/// C'est le sens dont le shader d'écriture a besoin — un fil connaît son rang et doit en déduire sa
+/// coordonnée barycentrique. **C'est aussi le sens rare** : la lecture par pixel, elle, part de
+/// `(i, j)` et n'appelle que [`rang_stable`].
+///
+/// Deux étapes, toutes deux bornées par $K \le 8$ :
+///
+/// 1. **Le niveau**, par comparaison aux $\mathrm{micro}(k)$ — au plus 9 pas, et sans division.
+/// 2. **La rangée**, par recherche binaire sur [`cumul_niveau`] — au plus 9 pas.
+///
+/// Puis la colonne se lit directement : dans une rangée dont l'indice `m` est **pair**, un point sur
+/// deux appartient déjà au niveau plus grossier, donc les points du niveau `a` sont les
+/// $i = (2r+1)\,d$ ; dans une rangée impaire, ils y sont **tous**.
+///
+/// ⚠ *Aucune racine carrée, contrairement à [`depuis_rang`] — donc plus de correction en virgule
+/// flottante à rattraper dans les deux sens.*
+pub fn depuis_rang_stable(r: u32, k: u32) -> (u32, u32) {
+    // 1. Le niveau : le plus petit `a` tel que `micro_sommets(a) > r`.
+    let mut a = 0u32;
+    while a < k && micro_sommets(a) <= r {
+        a += 1;
+    }
+    let dans_niveau = r - if a == 0 { 0 } else { micro_sommets(a - 1) };
+
+    // 2. La rangée : le plus grand `m` tel que `cumul_niveau(m) <= dans_niveau`.
+    let d = 1u32 << (k - a);
+    let grand_n = (1u32 << k) / d;
+    let (mut bas, mut haut) = (0u32, grand_n + 1);
+    while haut - bas > 1 {
+        let milieu = bas + (haut - bas) / 2;
+        if cumul_niveau(milieu, a, k) <= dans_niveau {
+            bas = milieu;
+        } else {
+            haut = milieu;
+        }
+    }
+
+    let reste = dans_niveau - cumul_niveau(bas, a, k);
+    let i = if a > 0 && bas % 2 == 0 {
+        (2 * reste + 1) * d
+    } else {
+        reste * d
+    };
+    (i, bas * d)
+}
+
 /// La mémoire de surface elle-même : un tampon de stockage, et rien d'autre.
 ///
 /// *Elle ne connaît ni la scène, ni la caméra, ni la lumière. Elle sait combien d'entrées elle
@@ -337,7 +516,11 @@ pub fn lire_interpole(
         }
     }
     let (fu, fv) = (gu - i as f32, gv - j as f32);
-    let e = |di: u32, dj: u32| entrees[(base + rang(i + di, j + dj, n)) as usize];
+    // ⚠ La MÊME adresse que `lecture.wgsl`, et ce n'est pas une commodité : si les deux
+    // divergeaient, cette fonction — qui sert de référence aux bancs — accuserait le GPU d'un
+    // défaut venu de l'instrument.
+    let k = n.trailing_zeros();
+    let e = |di: u32, dj: u32| entrees[(base + rang_stable(i + di, j + dj, k)) as usize];
     // ⚠⚠ `i + j + 2 <= n` N'EST PAS UNE PRÉCAUTION : sans lui, la branche « micro-triangle
     // inversé » atteint le coin (i+1, j+1), qui n'existe pas sur la dernière cellule.
     //
@@ -793,6 +976,7 @@ impl PasseDeSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::allocation::K_MAX;
 
     #[test]
     fn le_compte_des_micro_sommets_suit_la_subdivision() {
@@ -858,10 +1042,10 @@ mod tests {
             for i in 0..=(n - j) {
                 let lu = lire_interpole(&entrees, 0, n, i as f32 / n as f32, j as f32 / n as f32);
                 assert!(
-                    (lu[0] - rang(i, j, n) as f32).abs() < 1e-3,
+                    (lu[0] - rang_stable(i, j, 2) as f32).abs() < 1e-3,
                     "au micro-sommet ({i},{j}) la lecture rend {} au lieu de {}",
                     lu[0],
-                    rang(i, j, n)
+                    rang_stable(i, j, 2)
                 );
             }
         }
@@ -907,6 +1091,127 @@ mod tests {
             part < 0.15,
             "une entrée de {OCTETS_PAR_ENTREE} o lue une fois par pixel prendrait {:.1} % du \
              trafic du Quest 2 — le plafond posé est 15 %",
+            part * 100.0
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    //  L'ADRESSE STABLE — chantier 0.6
+    //
+    //  ⚠ Ces trois tests ont été MUTÉS avant d'être crus (9 septembre 2026). Une garde qui passe
+    //    du premier coup se suspecte : les mutations passées, et qui ont toutes fait tomber leur
+    //    garde, sont « base d'un niveau décalée de 1 », « grille précédente de mauvais pas »,
+    //    « i et j intervertis », et « regroupement par niveau retiré ».
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    // La DÉFINITION de l'ordre d'apparition : trier par (niveau, j, i). Lente, mais indiscutable —
+    // c'est elle qui juge la formule fermée, jamais l'inverse.
+    fn table_par_tri(k: u32) -> Vec<((u32, u32), u32)> {
+        let n = 1u32 << k;
+        let mut pts: Vec<(u32, u32)> = (0..=n).flat_map(|j| (0..=n - j).map(move |i| (i, j))).collect();
+        pts.sort_by_key(|&(i, j)| (niveau_apparition(i, j, k), j, i));
+        pts.into_iter().enumerate().map(|(r, p)| (p, r as u32)).collect()
+    }
+
+    #[test]
+    fn la_formule_fermee_du_rang_stable_est_celle_du_tri() {
+        // Le rang stable se calcule sans rien parcourir. On confronte cette formule à la définition
+        // elle-même, exhaustivement — pas sur un échantillon.
+        for k in 0..=K_MAX {
+            for ((i, j), attendu) in table_par_tri(k) {
+                assert_eq!(
+                    rang_stable(i, j, k),
+                    attendu,
+                    "k={k} : la formule fermée et le tri divergent en ({i},{j})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn l_adresse_stable_est_une_bijection() {
+        // Aller et retour sur TOUS les micro-sommets de k = 0..=8, dans les deux sens. Le shader
+        // d'écriture dépend du retour ; une seule adresse fausse écrirait dans la plage du voisin,
+        // et rendrait une image plausible.
+        for k in 0..=K_MAX {
+            let n = 1u32 << k;
+            let mut vus = vec![false; micro_sommets(k) as usize];
+            for j in 0..=n {
+                for i in 0..=n - j {
+                    let r = rang_stable(i, j, k);
+                    assert!(
+                        (r as usize) < vus.len(),
+                        "k={k} : le rang de ({i},{j}) vaut {r}, hors des {} entrées",
+                        vus.len()
+                    );
+                    assert!(!vus[r as usize], "k={k} : l'adresse {r} est attribuée deux fois");
+                    vus[r as usize] = true;
+                    assert_eq!(
+                        depuis_rang_stable(r, k),
+                        (i, j),
+                        "k={k} : l'inverse de l'adresse {r} est faux"
+                    );
+                }
+            }
+            assert!(vus.iter().all(|&v| v), "k={k} : des adresses ne sont atteintes par personne");
+        }
+    }
+
+    #[test]
+    fn le_rang_ne_change_pas_quand_on_raffine() {
+        // ⭐ LA propriété du chantier : un point garde son adresse quand son triangle se subdivise.
+        // C'est elle qui rend `placement.rs` inutile — rien ne se déplace, donc rien n'est à
+        // replacer.
+        //
+        // ⚠⚠ CE TEST NE SUFFIT PAS, ET LA MUTATION L'A MONTRÉ (9 septembre 2026). Il reste VERT
+        // quand on décale la base d'un niveau de 1, et vert quand la grille précédente n'est pas
+        // soustraite : *un décalage constant conserve l'invariance sans conserver la justesse.*
+        // Seul le retrait du regroupement par niveau le fait tomber.
+        //
+        // > Ce test prouve la COHÉRENCE de la numérotation, jamais sa correction. C'est
+        // > `l_adresse_stable_est_une_bijection` qui prouve la seconde, et aucun des deux ne
+        // > remplace l'autre. *Les croire interchangeables laisserait passer une adresse fausse
+        // > mais cohérente — celle qui écrirait proprement dans la plage du voisin.*
+        for k in 0..K_MAX {
+            let n = 1u32 << k;
+            for j in 0..=n {
+                for i in 0..=n - j {
+                    assert_eq!(
+                        rang_stable(i, j, k),
+                        rang_stable(2 * i, 2 * j, k + 1),
+                        "({i},{j}) a déménagé en passant de k={k} à k={}",
+                        k + 1
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn temoin_l_ancienne_numerotation_elle_deplace_presque_tout() {
+        // ⚠⚠ LE TÉMOIN, et sans lui le test précédent ne prouverait rien.
+        //
+        // Une propriété d'invariance peut être vraie pour une raison triviale — par exemple si les
+        // deux membres se réduisaient au même calcul. Ce test exige que la MÊME question, posée à
+        // l'ancienne numérotation, réponde NON massivement. *C'est la garde qui rend l'autre
+        // interprétable.*
+        let (mut bouge, mut total) = (0u32, 0u32);
+        for k in 1..K_MAX {
+            let n = 1u32 << k;
+            for j in 0..=n {
+                for i in 0..=n - j {
+                    total += 1;
+                    if rang(i, j, n) != rang(2 * i, 2 * j, 2 * n) {
+                        bouge += 1;
+                    }
+                }
+            }
+        }
+        let part = bouge as f64 / total as f64;
+        assert!(
+            part > 0.99,
+            "l'ancienne numérotation ne déplace que {:.1} % des points ({bouge}/{total}) — \
+             si ce chiffre s'effondre, c'est le TÉMOIN qui est cassé, pas le défaut qui a disparu",
             part * 100.0
         );
     }

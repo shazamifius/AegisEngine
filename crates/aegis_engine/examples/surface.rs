@@ -49,7 +49,7 @@ use aegis_engine::core::memory::MemoryManager;
 use aegis_engine::geometry::glb_loader::GlbLoader;
 use aegis_engine::render::allocation::{encoder_pour_gpu, Plan};
 use aegis_engine::render::surface::{
-    depuis_rang, EntreesGeometrie, ListeDeTravail, micro_sommets, MemoireDeSurface, PasseDeSurface, Reglages, OCTETS_PAR_ENTREE,
+    depuis_rang_stable, EntreesGeometrie, ListeDeTravail, micro_sommets, MemoireDeSurface, PasseDeSurface, Reglages, OCTETS_PAR_ENTREE,
 };
 use ash::vk;
 use std::path::PathBuf;
@@ -259,7 +259,7 @@ fn confronter(
         );
 
         for r in 0..par_triangle {
-            let (i, j) = depuis_rang(r, n);
+            let (i, j) = depuis_rang_stable(r, n.trailing_zeros());
             let u = i as f32 / n as f32;
             let v = j as f32 / n as f32;
             let w = 1.0 - u - v;

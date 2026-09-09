@@ -116,6 +116,22 @@ struct Delta {
     deplacees: u64,
     /// Le total des entrées de l'image.
     total: u64,
+    /// ⭐⭐ Entrées à recalculer **avec la numérotation par ordre d'apparition** (chantier 0.6).
+    ///
+    /// Le champ `recalcul` ci-dessus compte tout le triangle dès que sa subdivision change, et
+    /// c'était exact : l'ancienne adresse `rang(i,j,n)` contient `n`, donc **aucune** valeur ne
+    /// restait à sa place. Depuis le 9 septembre 2026 l'adresse est invariante par raffinement,
+    /// et deux régimes apparaissent :
+    ///
+    /// | le triangle… | ce qui reste vrai |
+    /// |---|---|
+    /// | **grossit** (k diminue) | **tout** — les micro(k) premières adresses SONT le niveau k |
+    /// | **s'affine** (k augmente) | les micro(k_avant) premières — le reste arrive en queue |
+    ///
+    /// *C'est le gain réel du chantier 0.6, et il n'est pas là où le plan l'attendait : la
+    /// numérotation ne supprime pas le DÉPLACEMENT (les bases restent cumulatives, c'est le rôle
+    /// de `placement.rs`), elle supprime du RECALCUL.*
+    recalcul_stable: u64,
     /// Combien de TRIANGLES ont changé de subdivision.
     ///
     /// ⭐ C'est ce compteur qui rend la cascade visible au lieu de la laisser déduire : si trois
@@ -133,6 +149,14 @@ impl Delta {
             return 0.0;
         }
         (self.recalcul + self.bord) as f64 / self.total as f64
+    }
+
+    /// La même fraction, avec l'adresse invariante par raffinement.
+    fn invalide_stable(&self) -> f64 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        (self.recalcul_stable + self.bord) as f64 / self.total as f64
     }
 
     /// La fraction qui reste juste mais doit être déplacée.
@@ -211,26 +235,46 @@ fn main() {
     for budget in [4_000_000u64, 16_000_000] {
         titre(&format!("BUDGET {} Mo", budget / 1_000_000));
         println!(
-            "  {:>20} {:>8} {:>9} {:>12} {:>12} {:>10}",
-            "mouvement", "biais≠", "tri. k≠", "invalidé/img", "à déplacer", "pire img"
+            "  {:>20} {:>8} {:>9} {:>12} {:>13} {:>12} {:>10}",
+            "mouvement", "biais≠", "tri. k≠", "invalidé/img", "→ ADR. STABLE", "à déplacer", "pire img"
         );
-        println!("  {:>20} {:>8} {:>9} {:>12} {:>12} {:>10}", "", "", "", "", "▼ STABLE", "frag.");
+        println!(
+            "  {:>20} {:>8} {:>9} {:>12} {:>13} {:>12} {:>10}",
+            "", "", "", "(ancienne)", "(0.6)", "▼ STABLE", "frag."
+        );
 
+        let mut detail: Vec<String> = Vec::new();
         for m in &mouvements {
             let deltas = simuler(&scene, budget, m);
             let n = deltas.len().max(1) as f64;
             let moyen = deltas.iter().map(|d| d.invalide()).sum::<f64>() / n;
+            let moyen_stable = deltas.iter().map(|d| d.invalide_stable()).sum::<f64>() / n;
             let deplace = deltas.iter().map(|d| d.a_deplacer()).sum::<f64>() / n;
             let pire = deltas.iter().map(|d| d.invalide()).fold(0.0f64, f64::max);
             let biais = deltas.iter().filter(|d| d.biais_change).count();
+            // ⚠ Décomposition : sans elle, on lit un gain global sans savoir ce qui le borne.
+            // *Le raccord des ARÊTES est recalculé dans les deux cas — la numérotation ne le
+            // touche pas. Si le bord domine, le gain sur le recalcul est masqué.*
+            let (rec, rec_s, bord) = (
+                deltas.iter().map(|d| d.recalcul).sum::<u64>(),
+                deltas.iter().map(|d| d.recalcul_stable).sum::<u64>(),
+                deltas.iter().map(|d| d.bord).sum::<u64>(),
+            );
             let tri_k = deltas.iter().map(|d| d.triangles_k as f64).sum::<f64>() / n;
 
+            if rec > 0 {
+                detail.push(format!(
+                    "     {:<20} recalcul {:>9} → {:>9} ({:>5.1} % épargné) · bord {:>8} (intouché)",
+                    m.nom, rec, rec_s, 100.0 * (rec - rec_s) as f64 / rec as f64, bord
+                ));
+            }
             println!(
-                "  {:>20} {:>8} {:>9.1} {:>11.2}% {:>11.2}% {:>9.2}%",
+                "  {:>20} {:>8} {:>9.1} {:>11.2}% {:>12.2}% {:>11.2}% {:>9.2}%",
                 m.nom,
                 biais,
                 tri_k,
                 moyen * 100.0,
+                moyen_stable * 100.0,
                 deplace * 100.0,
                 pire * 100.0
             );
@@ -249,6 +293,13 @@ fn main() {
                 if stable_moyen > 0.0 || (frag - 1.0).abs() > 1e-9 {
                     temoin_propre = false;
                 }
+            }
+        }
+        if !detail.is_empty() {
+            println!();
+            println!("  ⭐ D'OÙ VIENT LE GAIN — et ce qui le borne (entrées par image cumulées) :");
+            for l in &detail {
+                println!("{l}");
             }
         }
         println!();
@@ -391,6 +442,14 @@ fn comparer(avant: &Plan, apres: &Plan) -> Delta {
 
         if cote_a != cote_b {
             d.recalcul += entrees;
+            // Avec l'adresse invariante, seul le niveau AJOUTÉ est à écrire ; un triangle qui
+            // grossit n'a rien à recalculer du tout.
+            let (ka, kb) = (cote_a.trailing_zeros(), cote_b.trailing_zeros());
+            d.recalcul_stable += if kb > ka {
+                entrees - micro_sommets(ka) as u64
+            } else {
+                0
+            };
             d.triangles_k += 1;
             d.premier = d.premier.or(Some(t as u32));
         } else if avant.aretes[t] != apres.aretes[t] {

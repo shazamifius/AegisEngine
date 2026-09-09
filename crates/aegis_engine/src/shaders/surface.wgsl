@@ -7,6 +7,8 @@
 // soleil, aucune ombre, aucun indirect. Le sujet ici n'est pas la lumière, c'est de prouver
 // qu'un shader peut écrire dans une mémoire persistante attachée à la géométrie.
 
+//!inclure adresse
+
 struct Reglages {
     // ⭐⭐ Le nombre total de FILS utiles — la somme des micro-sommets de tous les triangles de la
     // liste. C'est LUI qui dimensionne le dispatch, plus le nombre de triangles.
@@ -184,7 +186,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (rang >= sommets_ici) {
         return;
     }
-    let ij = depuis_rang(rang, n);
+    let ij = depuis_rang_stable(rang, n);
     // La coordonnée barycentrique — c'est ELLE l'adresse, et elle ne coûte qu'une division.
     let u = f32(ij.x) / f32(n);
     let v = f32(ij.y) / f32(n);
